@@ -93,4 +93,4 @@ make all              # format + lint + strict mypy + pytest
 完成回复简述改动、验证和剩余限制即可，不要求固定多节交接模板。
 
 未经用户明确授权，不执行 push、重写 Git 历史、大目录删除、生产部署或密钥修改。
-详细验证与双 backend 命令见 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)，发布检查见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+详细验证与双 backend 命令见 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)，分支与发布检查见 [CONTRIBUTING.md](CONTRIBUTING.md)（`develop` 集成 + `/publish` skill）。

@@ -15,13 +15,13 @@ make install-hooks
 make all
 ```
 
-从 `main` 创建 `feature/*` 或 `fix/*`，用合成数据复现问题，再添加实现和相关行为测试。
+从 `develop` 创建 `feature/*` 或 `fix/*`，用合成数据复现问题，再添加实现和相关行为测试。
 `make all` 包括 format、lint、strict mypy、pytest；format 会改写文件。pre-commit 执行相同门禁。
 
 源码辅助目录各有用途：`examples/basic_usage.py` 是唯一的基础示例，使用临时数据库演示公共 API、
 组织树和 prompt recall；`evals/recall/` 是合成数据回归工具，指标局限见测试矩阵。
 `scripts/` 保留插件构建、部署和宿主验收入口；部署/E2E 脚本需专用环境，不属于普通单测。
-个人工具设置留在被忽略的 `.claude/`、`.codebuddy/`、`.cursor/` 中，不复制项目规则或发布流程。
+个人工具设置留在被忽略的 `.claude/`、`.codebuddy/`、`.cursor/` 中；共享的发版流程除外（已纳入版本库的 `.cursor/skills/publish` / `.codebuddy/skills/publish`）。项目规则只维护在 AGENTS.md。
 
 ## Harness 维护流程
 
@@ -73,20 +73,44 @@ octop-memory --db /path/to/memory.sqlite db checkpoints \
 PR 描述说明问题、改动、验证和剩余限制；用户可见变更更新 `CHANGELOG.md` 的 Unreleased。
 代码相关的非平凡改动更新现有 HANDOFF，并按影响同步地图、决策、测试、风险、术语和 README 核对项；不追加日期流水账。
 
-`main` 是集成分支。发布从 `release/x.y.z`（或 `hotfix/*`）通过 PR 合入 main，
-project version、CHANGELOG 与标签一致。现有 workflow 在合并后创建 `v*` tag 并触发 PyPI/GitHub Release；
+### 分支策略
+
+| 分支 | 角色 |
+|------|------|
+| `main` | 生产真源；GitHub 默认分支；仅合入 release / hotfix |
+| `develop` | 日常集成；**特性 PR 请打向 `develop`** |
+| `release/x.y.z` | 临时发版分支；发版完成后删除 |
+| `hotfix/*` | 从 `main` 紧急修复；合入 `main` 后再合回 `develop` |
+
+```
+feature/* ──PR──► develop ──► release/x.y.z ──PR──► main ──tag v*──► publish
+hotfix/* ──PR──► main (+ tag) and ──PR──► develop
+```
+
+**规则：**
+
+- 禁止 `develop` 直推/直 merge 到 `main`；禁止直接 push 到 `main` / `develop`（GitHub 分支保护）。
+- `release/x.y.z` → `main` 必须用 **merge commit**，不要 squash。
+- 生产 `v*` tag 仅在合入 `main` 之后由 Actions 打在 main tip。
+- 发版后由 `sync-main-to-develop.yml` 保持 `main` 为 `develop` 的祖先。
+
+从 `develop` 创建 `feature/*` 或 `fix/*`，PR base 选 `develop`。发布从 `release/x.y.z`（或 `hotfix/*`）通过 PR 合入 main，
+project version、CHANGELOG 与标签一致。现有 workflow 在合并后创建 `v*` tag 并触发 PyPI/GitHub Release，再 sync 回 develop；
 没有发布授权时只验证构建，不推 tag 或上传。
 公开发布统一走上述 PR 与 Actions 流程，不在本地用 `make publish` / `twine upload` 代替；
 发布前检查版本未占用、Unreleased 归档正确和门禁结果，发布后核对 tag 与产物，再按仓库策略清理发布分支。
+
+Agent 辅助发布：`.cursor/skills/publish` / `.codebuddy/skills/publish`（`/publish <version>`），发版时同步更新 CHANGELOG / README 等。
 
 ```bash
 uv build --out-dir dist/package-review
 uv build --wheel --out-dir dist/package-review/direct
 ```
 
+
 首条从 sdist 重建 wheel；比较两种 wheel 解压后的文件名与内容。Python sdist 使用 allowlist，
 独立插件另行构建，测试/CI 留在完整 checkout。插件短 README 是分发入口，详细说明只有集成指南一份。
 
 不要提交 `.env`、数据库/WAL、备份、日志、`.hmpkg`、依赖安装目录或私人运维记录。
-个人 editor 配置、重复发布 skill 和访问个人真实库的诊断脚本不属于公共源码；
+个人 editor 配置与访问真实库的诊断脚本不属于公共源码；共享 `/publish` skill 属于公共发版流程。
 ignore 不删除已跟踪内容，工作树脱敏也不清理 Git 历史或已有附件。漏洞报告见 [SECURITY.md](SECURITY.md)。

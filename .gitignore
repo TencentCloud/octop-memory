@@ -68,8 +68,15 @@ coverage.xml
 src/octop_memory/_version.py
 
 # Personal assistant settings; shared project rules live in AGENTS.md.
-/.codebuddy/
-/.cursor/
+# Track the shared publish skill (Octop-style); ignore everything else under these dirs.
+/.codebuddy/*
+!/.codebuddy/skills/
+!/.codebuddy/skills/publish/
+!/.codebuddy/skills/publish/**
+/.cursor/*
+!/.cursor/skills/
+!/.cursor/skills/publish/
+!/.cursor/skills/publish/**
 /.claude/
 # Local database diagnostics, never public fixtures.
 /scripts/_smoke_dashboard.py
