@@ -1798,10 +1798,16 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         # The annotation states what ``row_factory=dict_row`` below already
         # makes true at runtime: bare ``ConnectionPool`` infers tuple rows,
         # while ``PostgresSaver`` requires dict rows.
+        #
+        # ``check`` probes each connection on checkout: psycopg_pool's default
+        # max_lifetime recycling can otherwise hand a caller a connection the
+        # server is already terminating (AdminShutdown), and the checkpointer
+        # does not retry, so a whole invocation fails.
         pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] = ConnectionPool(
             conninfo=backend._dsn,
             min_size=1,
             max_size=4,
+            check=ConnectionPool.check_connection,
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,
