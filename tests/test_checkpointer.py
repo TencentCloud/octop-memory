@@ -61,6 +61,64 @@ class TestPostgresCheckpointerIsLazy:
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
 
 
+class TestPostgresPoolProbesOnCheckout:
+    """The checkpointer pool must probe connections at checkout (Octop#1172).
+
+    psycopg_pool's default max_lifetime recycling can otherwise hand the
+    checkpointer a connection the server is already terminating; the saver
+    does not retry, so a whole invocation fails (AdminShutdown).
+    """
+
+    def test_pool_is_created_with_checkout_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import psycopg_pool
+        from psycopg_pool import pool as pool_module
+
+        real_pool = pool_module.ConnectionPool
+        captured: dict[str, object] = {}
+
+        class _FakePool:
+            # langgraph's postgres module subscripts the pool type at import.
+            def __class_getitem__(cls, item: object) -> type:
+                return cls
+
+            # The production code passes this very callback to ``check=``.
+            check_connection = staticmethod(real_pool.check_connection)
+
+            def __init__(self, *, conninfo: str, check: object, **kwargs: object) -> None:
+                captured["check"] = check
+                captured["conninfo"] = conninfo
+
+        class _FakeSaver:
+            def __init__(self, pool: object) -> None:
+                captured["pool"] = pool
+
+            def setup(self) -> None:
+                return None
+
+        from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+        monkeypatch.setattr(psycopg_pool, "ConnectionPool", _FakePool)
+        monkeypatch.setattr("langgraph.checkpoint.postgres.PostgresSaver", _FakeSaver)
+        monkeypatch.setattr(
+            "octop_memory.pipeline.lifecycle.vacuum.tune_checkpoint_autovacuum",
+            lambda dsn: None,
+        )
+        # Schema bootstrap would need a live server; the pool contract under
+        # test does not.
+        monkeypatch.setattr(PostgresMemoryBackend, "_connect", lambda self: object())
+        monkeypatch.setattr(PostgresMemoryBackend, "_init_schema", lambda self: None)
+        monkeypatch.setattr(PostgresMemoryBackend, "_migrate_legacy_schema", lambda self: None)
+
+        backend = PostgresMemoryBackend("ns", dsn="postgresql://localhost/probe-test")
+        memory = Memory(namespace="ns", backend=backend)
+        saver = memory._create_postgres_checkpointer()
+
+        assert saver is not None
+        # The probe callback is the pool's own static checker, not None.
+        assert captured["check"] is real_pool.check_connection
+        assert captured["conninfo"] == "postgresql://localhost/probe-test"
+
+
 @pytest.fixture
 def pg_memory():
     """A Postgres-backed ``Memory``; skipped when no server is reachable."""
