@@ -21,6 +21,16 @@ real fallback chain.
 """
 
 
+DEFAULT_EXTRACT_MAX_TOKENS = 2048
+"""Default soft cap for memory-extraction completions.
+
+Extraction prompts ask for bounded JSON (candidates / episodes), so a few
+thousand tokens is plenty. Without a cap, a reasoning-heavy model may chain
+on the full remaining context window and run far past the client read
+timeout — bounding the budget bounds the worst-case wall time (TencentCloud/Octop#1360).
+"""
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Abstract interface for LLM completion calls.

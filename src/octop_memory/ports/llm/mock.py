@@ -33,6 +33,8 @@ class _RecordedCall:
     tier: LLMTier
     system: str | None
     response_format: Literal["text", "json"]
+    max_tokens: int | None = None
+    temperature: float | None = None
 
 
 class MockLLMClient:
@@ -79,7 +81,16 @@ class MockLLMClient:
         temperature: float | None = None,
         response_format: Literal["text", "json"] = "text",
     ) -> str:
-        self.calls.append(_RecordedCall(prompt=prompt, tier=tier, system=system, response_format=response_format))
+        self.calls.append(
+            _RecordedCall(
+                prompt=prompt,
+                tier=tier,
+                system=system,
+                response_format=response_format,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        )
         if self._raise_on_call:
             raise LLMClientError("mock configured to raise")
 

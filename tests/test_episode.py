@@ -103,6 +103,18 @@ class TestEpisodeExtractor:
         assert "家庭" in ep.topics
         assert ep.quote_event_id == "raw-1"
 
+    def test_output_budget_passed_to_llm(self) -> None:
+        # Extraction calls carry a bounded completion budget by default
+        # (reasoning-heavy models must not run past the read timeout).
+        events = [_make_event("raw-1", "今天和老婆吵架了，她说我天天加班不顾家")]
+        mock = MockLLMClient(default_response=_episode_payload())
+        extractor = EpisodeExtractor(llm=mock, max_tokens=1024)
+
+        extractor.extract(events)
+
+        assert len(mock.calls) == 1
+        assert mock.calls[0].max_tokens == 1024
+
     def test_empty_episodes_response(self) -> None:
         events = [_make_event("raw-1", "Python 怎么排序字典？")]
         mock = MockLLMClient(default_response=json.dumps({"episodes": []}))

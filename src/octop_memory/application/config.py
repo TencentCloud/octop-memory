@@ -41,6 +41,11 @@ DEFAULT_PRIVACY_CFG = {
 }
 DEFAULT_EXTRACTION_CFG = {
     "max_candidates": 20,
+    # ``None`` → the extractor's built-in budget
+    # (:data:`octop_memory.ports.llm.DEFAULT_EXTRACT_MAX_TOKENS`). A positive
+    # int caps the extraction / episode completions so a reasoning-heavy
+    # model cannot run past the client read timeout (TencentCloud/Octop#1360).
+    "max_tokens": None,
     "promote": True,
     "regen_pages": True,
     "page_regen_limit": 5,
