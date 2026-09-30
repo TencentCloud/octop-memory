@@ -116,6 +116,17 @@ class TestExtractHappyPath:
 
         assert mock.calls[0].max_tokens == 512
 
+    def test_explicit_none_falls_back_to_default_budget(self) -> None:
+        # A config layer that resolves "unset" to None must not erase the
+        # built-in budget by threading it down as an explicit argument.
+        events = [_make_event("raw-1", "decided to use Augment first, NOT replace")]
+        mock = MockLLMClient(default_response=_candidate_payload())
+        extractor = CandidateExtractor(llm=mock, max_tokens=None)
+
+        extractor.extract(events)
+
+        assert mock.calls[0].max_tokens == DEFAULT_EXTRACT_MAX_TOKENS
+
     def test_explicit_session_id_overrides_event_session(self) -> None:
         events = [_make_event("raw-1", "x", session_id="auto-detected")]
         mock = MockLLMClient(default_response=_candidate_payload())

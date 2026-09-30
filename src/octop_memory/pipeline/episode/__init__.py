@@ -102,7 +102,8 @@ class EpisodeExtractor:
         self._max_episodes = max_episodes
         self._extractor_version = extractor_version
         self._temperature = temperature
-        self._max_tokens = max_tokens
+        # ``None`` = unset by the caller — keep the built-in budget.
+        self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
 
     @property
     def extractor_version(self) -> str:

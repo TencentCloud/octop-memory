@@ -116,7 +116,10 @@ class CandidateExtractor:
         self._extractor_version = extractor_version
         self._max_retries = max_retries
         self._temperature = temperature
-        self._max_tokens = max_tokens
+        # ``None`` = caller left it unset (e.g. host config key absent) — fall
+        # back to the built-in budget so the default cap cannot be erased by
+        # an explicit ``None`` threaded down from a config layer.
+        self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
 
     @property
     def extractor_version(self) -> str:
