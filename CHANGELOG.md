@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+- 修复连接注册表在线程 ident 复用时泄漏 SQLite 连接的问题：短命线程不再累积 fd 并最终进入不可恢复的 disk I/O error（Refs TencentCloud/Octop#1339）。
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增
