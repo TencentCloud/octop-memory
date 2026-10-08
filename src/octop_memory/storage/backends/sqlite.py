@@ -107,6 +107,13 @@ class SqliteMemoryBackend:
         ident = threading.get_ident()
         self._local.conn = conn
         self._local.in_transaction = False
+        previous = self._conns_by_ident.get(ident)
+        if previous is not None and previous is not conn:
+            # A reused ident means the owning thread is gone (active threads
+            # never share an ident), so the old connection is orphaned. Close
+            # it here or every short-lived worker thread leaks one fd.
+            with suppress(sqlite3.Error):
+                previous.close()
         self._conns_by_ident[ident] = conn
         return conn
 
