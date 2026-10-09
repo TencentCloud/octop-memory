@@ -28,6 +28,7 @@ the fallback for hosts (current OpenClaw) that don't.
 from __future__ import annotations
 
 from octop_memory.ports.llm._protocol import (
+    DEFAULT_EXTRACT_MAX_TOKENS,
     LLMClient,
     LLMClientError,
     LLMTier,
@@ -37,6 +38,7 @@ from octop_memory.ports.llm.mock import MockLLMClient
 from octop_memory.ports.llm.openai_compat import DEFAULT_LLM_API_KEY_ENV, OpenAICompatClient
 
 __all__ = [
+    "DEFAULT_EXTRACT_MAX_TOKENS",
     "DEFAULT_LLM_API_KEY_ENV",
     "LLMClient",
     "LLMClientError",

@@ -522,6 +522,12 @@ class MemoryRuntime:
             default=int(extraction_cfg["max_candidates"]),
             name="max_candidates",
         )
+        cfg_max_tokens = extraction_cfg.get("max_tokens")
+        max_tokens = (
+            _coerce_positive_int(params.get("max_tokens"), default=int(cfg_max_tokens), name="max_tokens")
+            if cfg_max_tokens is not None
+            else _coerce_positive_int_or_none(params.get("max_tokens"), name="max_tokens")
+        )
 
         events = self._memory.list_raw(session_id=session_id, limit=10_000)
         seen = self._seen_ids_for(session_id)
@@ -542,7 +548,7 @@ class MemoryRuntime:
         if not new_events:
             return response
 
-        extractor = CandidateExtractor(llm=self._llm, max_candidates=max_candidates)
+        extractor = CandidateExtractor(llm=self._llm, max_candidates=max_candidates, max_tokens=max_tokens)
         result = extractor.extract(new_events, session_id=session_id)
         response["warnings"] = result.warnings
         response["cap_warning"] = result.cap_warning
@@ -596,7 +602,7 @@ class MemoryRuntime:
         # are an enrichment layer, not load-bearing for atom recall.
         if self._llm_configured:
             try:
-                ep_extractor = EpisodeExtractor(llm=self._llm)
+                ep_extractor = EpisodeExtractor(llm=self._llm, max_tokens=max_tokens)
                 ep_result = ep_extractor.extract(new_events, session_id=session_id)
                 if ep_result.episodes:
                     self._memory.add_episodes(ep_result.episodes)

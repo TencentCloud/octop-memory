@@ -32,7 +32,7 @@ from octop_memory.pipeline.episode.prompts import (
     EPISODE_EXTRACTOR_VERSION,
     render_episode_prompt,
 )
-from octop_memory.ports.llm import LLMClient
+from octop_memory.ports.llm import DEFAULT_EXTRACT_MAX_TOKENS, LLMClient
 from octop_memory.ports.llm._protocol import LLMClientError
 from octop_memory.types import Episode, EpisodeEmotion, RawEvent
 
@@ -96,11 +96,14 @@ class EpisodeExtractor:
         max_episodes: int = DEFAULT_MAX_EPISODES,
         extractor_version: str = EPISODE_EXTRACTOR_VERSION,
         temperature: float = 0.0,
+        max_tokens: int | None = DEFAULT_EXTRACT_MAX_TOKENS,
     ) -> None:
         self._llm = llm
         self._max_episodes = max_episodes
         self._extractor_version = extractor_version
         self._temperature = temperature
+        # ``None`` = unset by the caller — keep the built-in budget.
+        self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
 
     @property
     def extractor_version(self) -> str:
@@ -139,6 +142,7 @@ class EpisodeExtractor:
                 prompt,
                 tier="light",
                 temperature=self._temperature,
+                max_tokens=self._max_tokens,
                 response_format="json",
             )
         except LLMClientError as e:
