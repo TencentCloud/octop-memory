@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-09
+
+### 修复
+
+- 线程 ident 复用时关闭被丢弃的 SQLite 连接，短命线程不再累积 fd 并最终进入不可恢复的 disk I/O error（TencentCloud/Octop#1339）。
+- PostgreSQL 空闲连接不再长期占用：连接建立时申请 `idle_session_timeout`（PostgreSQL 14+，旧版本自动降级）；本地按同一阈值主动关闭并重拨，不必等下一条语句。checkpointer 连接池 `min_size` 改为 0，空闲超过 `max_idle` 后关闭。常驻 agent 不再永久持有 1–2 个连接（TencentCloud/Octop#1795）。小时 checkpoint 裁剪在打开连接池之前会拒绝已空闲的 Postgres backend。
+- checkpointer 连接池在取出连接时做存活性探测，丢弃服务器已关闭的连接并重建（TencentCloud/Octop#1172）。
+- 提炼补全默认带 `max_tokens` 预算（2048）；调用方传入 `None` 视为未设置并回落到该默认值，避免推理模型占满上下文并超过读取超时（TencentCloud/Octop#1360）。
+- 提高删除后与空闲维护的 SQLite 增量 vacuum 页数，避免 300 页的小时预算在大批删除后追不上。compact 统计计入 SQLite 主库、WAL 与 shm，Postgres 则报告数据库大小与回收字节。
+
+### 变更
+
+- 发版时同步检查多语言 README 版本。
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增

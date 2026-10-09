@@ -192,15 +192,13 @@ def _print_vacuum_stats(stats: VacuumStats) -> None:
 
 def _print_compact_stats(stats: CompactStats) -> None:
     click.echo(f"backend: {stats.backend}")
-    if stats.backend == "sqlite":
+    if stats.file_size_before is not None and stats.file_size_after is not None:
         click.echo(f"  file_size_before : {stats.file_size_before}")
         click.echo(f"  file_size_after  : {stats.file_size_after}")
-        if stats.file_size_before is not None and stats.file_size_after is not None:
-            click.echo(f"  reclaimed        : {stats.file_size_before - stats.file_size_after} bytes")
-    else:
-        for t in stats.tables:
-            detail = f" ({t.skipped_reason})" if t.skipped_reason else ""
-            click.echo(f"  {t.table:<32} {t.action}{detail}")
+        click.echo(f"  reclaimed        : {stats.file_size_before - stats.file_size_after} bytes")
+    for t in stats.tables:
+        detail = f" ({t.skipped_reason})" if t.skipped_reason else ""
+        click.echo(f"  {t.table:<32} {t.action}{detail}")
 
 
 def _check_to_json(check: StorageCheck) -> str:
@@ -254,6 +252,11 @@ def _compact_stats_to_json(stats: CompactStats) -> str:
             "dry_run": stats.dry_run,
             "file_size_before": stats.file_size_before,
             "file_size_after": stats.file_size_after,
+            "reclaimed_bytes": (
+                None
+                if stats.file_size_before is None or stats.file_size_after is None
+                else stats.file_size_before - stats.file_size_after
+            ),
             "auto_vacuum_was_enabled": stats.auto_vacuum_was_enabled,
             "tables": [
                 {"table": t.table, "action": t.action, "skipped_reason": t.skipped_reason} for t in stats.tables

@@ -810,90 +810,6 @@ wheels = [
 ]
 
 [[package]]
-name = "octop-memory"
-version = "0.9.9"
-source = { editable = "." }
-
-[package.optional-dependencies]
-chroma = [
-    { name = "chromadb" },
-]
-cli = [
-    { name = "click" },
-]
-dashboard = [
-    { name = "click" },
-    { name = "fastapi" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-embeddings = [
-    { name = "sentence-transformers" },
-]
-langgraph = [
-    { name = "langgraph-checkpoint" },
-    { name = "langgraph-checkpoint-sqlite" },
-]
-langgraph-postgres = [
-    { name = "langgraph-checkpoint" },
-    { name = "langgraph-checkpoint-postgres" },
-    { name = "psycopg", extra = ["binary"] },
-]
-postgres = [
-    { name = "psycopg", extra = ["binary"] },
-]
-qdrant = [
-    { name = "qdrant-client" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "click" },
-    { name = "langgraph" },
-    { name = "langgraph-checkpoint" },
-    { name = "langgraph-checkpoint-postgres" },
-    { name = "langgraph-checkpoint-sqlite" },
-    { name = "mypy" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "chromadb", marker = "extra == 'chroma'", specifier = ">=0.4" },
-    { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
-    { name = "click", marker = "extra == 'dashboard'", specifier = ">=8.0" },
-    { name = "fastapi", marker = "extra == 'dashboard'", specifier = ">=0.110" },
-    { name = "langgraph-checkpoint", marker = "extra == 'langgraph'", specifier = ">=2.0" },
-    { name = "langgraph-checkpoint", marker = "extra == 'langgraph-postgres'", specifier = ">=2.0" },
-    { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph-postgres'", specifier = ">=2.0" },
-    { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph'", specifier = ">=2.0" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'langgraph-postgres'", specifier = ">=3.1" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
-    { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = ">=1.7" },
-    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'dashboard'", specifier = ">=0.29" },
-]
-provides-extras = ["postgres", "chroma", "qdrant", "embeddings", "langgraph", "langgraph-postgres", "cli", "dashboard"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "click", specifier = ">=8.0" },
-    { name = "langgraph", specifier = ">=0.2" },
-    { name = "langgraph-checkpoint", specifier = ">=2.0" },
-    { name = "langgraph-checkpoint-postgres", specifier = ">=2.0" },
-    { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0" },
-    { name = "mypy", specifier = ">=1.13" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "ruff", specifier = ">=0.8" },
-]
-
-[[package]]
 name = "hf-xet"
 version = "1.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1912,6 +1828,90 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0b/5f/19930f824ffeb0ad4372da4812c50edbd1434f678c90c2733e1188edfc63/oauthlib-3.3.1.tar.gz", hash = "sha256:0f0f8aa759826a193cf66c12ea1af1637f87b9b4622d46e866952bb022e538c9", size = 185918, upload-time = "2025-06-19T22:48:08.269Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/be/9c/92789c596b8df838baa98fa71844d84283302f7604ed565dafe5a6b5041a/oauthlib-3.3.1-py3-none-any.whl", hash = "sha256:88119c938d2b8fb88561af5f6ee0eec8cc8d552b7bb1f712743136eb7523b7a1", size = 160065, upload-time = "2025-06-19T22:48:06.508Z" },
+]
+
+[[package]]
+name = "octop-memory"
+version = "1.0.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+chroma = [
+    { name = "chromadb" },
+]
+cli = [
+    { name = "click" },
+]
+dashboard = [
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+embeddings = [
+    { name = "sentence-transformers" },
+]
+langgraph = [
+    { name = "langgraph-checkpoint" },
+    { name = "langgraph-checkpoint-sqlite" },
+]
+langgraph-postgres = [
+    { name = "langgraph-checkpoint" },
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "psycopg", extra = ["binary"] },
+]
+postgres = [
+    { name = "psycopg", extra = ["binary"] },
+]
+qdrant = [
+    { name = "qdrant-client" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "click" },
+    { name = "langgraph" },
+    { name = "langgraph-checkpoint" },
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "langgraph-checkpoint-sqlite" },
+    { name = "mypy" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "chromadb", marker = "extra == 'chroma'", specifier = ">=0.4" },
+    { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
+    { name = "click", marker = "extra == 'dashboard'", specifier = ">=8.0" },
+    { name = "fastapi", marker = "extra == 'dashboard'", specifier = ">=0.110" },
+    { name = "langgraph-checkpoint", marker = "extra == 'langgraph'", specifier = ">=2.0" },
+    { name = "langgraph-checkpoint", marker = "extra == 'langgraph-postgres'", specifier = ">=2.0" },
+    { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph-postgres'", specifier = ">=2.0" },
+    { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph'", specifier = ">=2.0" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'langgraph-postgres'", specifier = ">=3.1" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = ">=1.7" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'dashboard'", specifier = ">=0.29" },
+]
+provides-extras = ["postgres", "chroma", "qdrant", "embeddings", "langgraph", "langgraph-postgres", "cli", "dashboard"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "langgraph", specifier = ">=0.2" },
+    { name = "langgraph-checkpoint", specifier = ">=2.0" },
+    { name = "langgraph-checkpoint-postgres", specifier = ">=2.0" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0" },
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]

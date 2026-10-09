@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -292,3 +293,90 @@ class TestAutoVacuumIncrementalOnCreate:
         backend = SqliteMemoryBackend(namespace="legacy", db_path=path)
         mode = backend._conn.execute("PRAGMA auto_vacuum").fetchone()[0]
         assert mode == 0  # NONE — pragma on open does not rebuild the file
+
+
+class TestConnectionRegistryLifecycle:
+    """Thread-ident reuse must not orphan connections (Octop#1339)."""
+
+    def test_bind_closes_orphaned_connection_on_ident_reuse(self, backend: SqliteMemoryBackend) -> None:
+        """A second bind under a reused ident closes the orphaned connection."""
+        from unittest.mock import MagicMock
+
+        backend._local.conn = None
+        first, second = MagicMock(), MagicMock()
+        bound_first = backend._bind_connection(first)
+        bound_second = backend._bind_connection(second)
+        assert bound_first is first
+        assert bound_second is second
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+        assert backend._conns_by_ident[threading.get_ident()] is second
+
+    def test_bind_same_connection_is_idempotent(self, backend: SqliteMemoryBackend) -> None:
+        from unittest.mock import MagicMock
+
+        backend._local.conn = None
+        conn = MagicMock()
+        backend._bind_connection(conn)
+        backend._bind_connection(conn)
+        conn.close.assert_not_called()
+
+    def test_distinct_live_threads_keep_their_connections(self, backend: SqliteMemoryBackend, tmp_path: Path) -> None:
+        """Two concurrent live threads each keep a working connection."""
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                backend._conn.execute("select 1").fetchone()
+                barrier.wait()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert len(backend._conns_by_ident) >= 3  # main + two workers
+
+
+posix_only = pytest.mark.skipif(
+    not os.path.isdir("/proc"),
+    reason="counts fds via /proc",
+)
+
+
+@posix_only
+class TestShortLivedThreadsDoNotLeakFds:
+    def test_300_short_lived_threads_leave_fds_flat(self, tmp_path: Path) -> None:
+        """Regression for Octop#1339: glibc reuses idents, so every
+        short-lived worker thread used to leak one database fd."""
+        db_path = tmp_path / "probe.sqlite"
+        backend = SqliteMemoryBackend(namespace="probe", db_path=db_path)
+
+        def db_fds() -> int:
+            prefix = str(db_path)
+            count = 0
+            for fd in os.listdir(f"/proc/{os.getpid()}/fd"):
+                try:
+                    if os.readlink(f"/proc/{os.getpid()}/fd/{fd}").startswith(prefix):
+                        count += 1
+                except OSError:
+                    pass
+            return count
+
+        baseline = db_fds()
+
+        def work() -> None:
+            backend._conn.execute("select 1").fetchone()
+
+        for _ in range(300):
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            t.join()
+
+        assert db_fds() <= baseline + 4
+        assert len(backend._conns_by_ident) <= 3

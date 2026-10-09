@@ -1795,13 +1795,26 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         # from_conn_string() is a short-lived context manager; keep a pool for
         # the lifetime of this Memory instance instead.
         #
+        # ``min_size=0``: an agent that sits idle must not pin a Postgres
+        # connection for the rest of the process lifetime — dozens of loaded
+        # agents otherwise fill ``max_connections`` and never let go
+        # (TencentCloud/Octop#1795). The pool's maintenance closes connections
+        # idle beyond ``max_idle`` (psycopg_pool default: 10 minutes) and the
+        # next checkpoint operation transparently opens a fresh one.
+        #
         # The annotation states what ``row_factory=dict_row`` below already
         # makes true at runtime: bare ``ConnectionPool`` infers tuple rows,
         # while ``PostgresSaver`` requires dict rows.
+        #
+        # ``check`` probes each connection on checkout: psycopg_pool's default
+        # max_lifetime recycling can otherwise hand a caller a connection the
+        # server is already terminating (AdminShutdown), and the checkpointer
+        # does not retry, so a whole invocation fails.
         pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] = ConnectionPool(
             conninfo=backend._dsn,
-            min_size=1,
+            min_size=0,
             max_size=4,
+            check=ConnectionPool.check_connection,
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,
