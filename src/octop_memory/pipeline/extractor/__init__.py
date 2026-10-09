@@ -35,7 +35,11 @@ from octop_memory.pipeline.extractor.prompts import (
     render_prompt,
     render_retry_prompt,
 )
-from octop_memory.ports.llm import LLMClient, LLMClientError
+from octop_memory.ports.llm import (
+    DEFAULT_EXTRACT_MAX_TOKENS,
+    LLMClient,
+    LLMClientError,
+)
 from octop_memory.types import Candidate, RawEvent
 
 logger = logging.getLogger(__name__)
@@ -105,12 +109,17 @@ class CandidateExtractor:
         extractor_version: str = EXTRACTOR_VERSION,
         max_retries: int = 1,
         temperature: float = 0.0,
+        max_tokens: int | None = DEFAULT_EXTRACT_MAX_TOKENS,
     ) -> None:
         self._llm = llm
         self._max_candidates = max_candidates
         self._extractor_version = extractor_version
         self._max_retries = max_retries
         self._temperature = temperature
+        # ``None`` = caller left it unset (e.g. host config key absent) — fall
+        # back to the built-in budget so the default cap cannot be erased by
+        # an explicit ``None`` threaded down from a config layer.
+        self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
 
     @property
     def extractor_version(self) -> str:
@@ -171,6 +180,7 @@ class CandidateExtractor:
                     current_prompt,
                     tier="light",
                     temperature=self._temperature,
+                    max_tokens=self._max_tokens,
                     response_format="json",
                 )
             except (LLMClientError, OSError, TimeoutError) as e:
