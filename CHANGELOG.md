@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 - 修复连接注册表在线程 ident 复用时泄漏 SQLite 连接的问题：短命线程不再累积 fd 并最终进入不可恢复的 disk I/O error（Refs TencentCloud/Octop#1339）。
+- **PostgreSQL 空闲连接不再长期占用**：`PostgresMemoryBackend` 的连接在建立时向服务器申请 `idle_session_timeout`（PostgreSQL 14+，旧版本自动降级为原行为），空闲超时后由服务器释放；本地按同一阈值预判已释放的连接并主动重拨，避免空闲后第一条语句失败。checkpointer 连接池同时由 `min_size=1` 改为 `min_size=0`，池维护会在连接空闲超过 `max_idle` 后关闭它们。此前每个常驻 agent 会永久持有 1–2 个连接，几十个 agent 即可耗尽 `max_connections`（TencentCloud/Octop#1795）。
 
 ## [1.0.0] - 2026-09-24
 
