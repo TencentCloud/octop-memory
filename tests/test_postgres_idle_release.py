@@ -206,7 +206,9 @@ class TestIdleSessionExpired:
     def test_true_even_when_the_server_rejected_the_setting(self) -> None:
         """PostgreSQL < 14 must still count as idle. Client close does not use the flag."""
         backend = _backend_with(_FakeConnection(), _idle_release_enabled=False)
-        backend._last_used_at = 0.0
+        # Monotonic time is seconds since boot. A stamp of 0.0 is not idle
+        # when the runner has been up for less than the timeout.
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
 
         assert backend._idle_session_expired() is True
 
@@ -253,7 +255,7 @@ class TestReconnectIfDead:
         old = _FakeConnection()
         new = _FakeConnection()
         backend = _backend_with(old, _idle_release_enabled=False)
-        backend._last_used_at = 0.0
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
 
         def fake_connect() -> _FakeConnection:
             return new
@@ -327,7 +329,7 @@ class TestProactiveIdleClose:
     def test_in_flight_transaction_is_kept(self) -> None:
         conn = _FakeConnection()
         backend = _backend_with(conn, _in_transaction=True)
-        backend._last_used_at = 0.0
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
 
         backend._release_idle_connection()
 
