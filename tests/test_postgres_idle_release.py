@@ -279,8 +279,8 @@ class TestCheckpointerPoolDoesNotPinConnections:
     """
 
     def test_pool_is_built_without_a_minimum(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import psycopg_pool
         import langgraph.checkpoint.postgres as lg_postgres
+        import psycopg_pool
 
         from octop_memory.core import Memory
 
