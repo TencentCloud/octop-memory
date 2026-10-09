@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "octop-memory"
-version = "1.0.0"
+version = "1.0.1"
 description = "Pluggable memory system with hierarchical recall, FTS search, and multiple backend support."
 readme = "README.md"
 license = { text = "MIT" }
