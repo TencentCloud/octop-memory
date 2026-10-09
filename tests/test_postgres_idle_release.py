@@ -2,15 +2,17 @@
 
 A loaded-but-unused agent must not hold Postgres connections for the rest of
 its life — dozens of agents behind one control plane otherwise exhaust
-``max_connections`` (TencentCloud/Octop#1795). Two changes deliver that, and
-neither needs a running server:
+``max_connections`` (TencentCloud/Octop#1795). Three changes deliver that, and
+none of them needs a running server:
 
-- the backend's own connection asks the server to release it after
-  ``idle_session_timeout`` (PostgreSQL 14+, best-effort) and is redialled
-  pre-emptively once locally idle past the same threshold, because libpq only
-  notices a server-side close on the next I/O;
-- the checkpointer pool is built with ``min_size=0`` so its maintenance can
-  close connections instead of pinning them.
+- the backend closes its own socket after ``_IDLE_SESSION_TIMEOUT_S`` with no
+  further query, including when the server rejects ``idle_session_timeout``
+  (PostgreSQL < 14); the next operation redials;
+- the same threshold is also sent as ``idle_session_timeout`` on PostgreSQL
+  14+, so the server drops the session if this process never comes back;
+- the checkpointer pool is built with ``min_size=0``, and checkpoint pruning
+  refuses a Postgres backend *before* opening that pool. Hourly maintenance
+  would otherwise pin a connection per loaded agent.
 
 Real-server behaviour of the same code stays covered by
 ``tests/test_postgres.py`` / ``tests/test_checkpointer.py``.
@@ -18,6 +20,7 @@ Real-server behaviour of the same code stays covered by
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -106,9 +109,28 @@ def _backend_with(conn: _FakeConnection, **attrs: Any) -> Any:
     backend._last_reconnect_at = 0.0
     backend._last_used_at = time.monotonic()
     backend._idle_release_enabled = False
+    backend._idle_timer = None
+    backend._conn_lock = threading.RLock()
     for name, value in attrs.items():
         setattr(backend, name, value)
     return backend
+
+
+@pytest.fixture(autouse=True)
+def _stop_idle_timers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Cancel client-side idle timers before they can fire across tests."""
+    started: list[threading.Timer] = []
+    original = threading.Timer.start
+
+    def _start(self: threading.Timer) -> None:
+        if self.name == "octop-memory-pg-idle":
+            started.append(self)
+        original(self)
+
+    monkeypatch.setattr(threading.Timer, "start", _start)
+    yield
+    for timer in started:
+        timer.cancel()
 
 
 class TestConstruction:
@@ -181,11 +203,14 @@ class TestIdleSessionExpired:
 
         assert backend._idle_session_expired() is True
 
-    def test_never_true_when_the_server_rejected_the_setting(self) -> None:
+    def test_true_even_when_the_server_rejected_the_setting(self) -> None:
+        """PostgreSQL < 14 must still count as idle. Client close does not use the flag."""
         backend = _backend_with(_FakeConnection(), _idle_release_enabled=False)
-        backend._last_used_at = 0.0
+        # Monotonic time is seconds since boot. A stamp of 0.0 is not idle
+        # when the runner has been up for less than the timeout.
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
 
-        assert backend._idle_session_expired() is False
+        assert backend._idle_session_expired() is True
 
 
 class TestReconnectIfDead:
@@ -225,26 +250,28 @@ class TestReconnectIfDead:
 
         assert not conn.closed
 
-    def test_disabled_idle_release_keeps_the_old_behaviour(self) -> None:
-        """On a server without the setting, an old connection is still reused."""
-        conn = _FakeConnection()
-        backend = _backend_with(conn, _idle_release_enabled=False)
-        backend._last_used_at = 0.0
+    def test_idle_connection_is_redialled_even_when_the_server_rejected_the_setting(self) -> None:
+        """A rejecting server used to pin the socket for the process lifetime."""
+        old = _FakeConnection()
+        new = _FakeConnection()
+        backend = _backend_with(old, _idle_release_enabled=False)
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
 
-        def unexpected_redial() -> _FakeConnection:
-            raise AssertionError("idle release is off; nothing to redial for")
+        def fake_connect() -> _FakeConnection:
+            return new
 
-        backend._connect = unexpected_redial
+        backend._connect = fake_connect
 
         backend._reconnect_if_dead()
 
-        assert not conn.closed
+        assert old.closed
+        assert backend._conn is new
 
 
 class TestLastUsedTracking:
     def test_cursor_marks_the_connection_used(self) -> None:
         backend = _backend_with(_FakeConnection())
-        backend._last_used_at = 0.0
+        backend._last_used_at = time.monotonic() - 5
 
         before = time.monotonic()
         with backend._cursor():
@@ -254,22 +281,90 @@ class TestLastUsedTracking:
 
     def test_cursor_marks_the_connection_used_even_on_failure(self) -> None:
         backend = _backend_with(_FakeConnection())
-        backend._last_used_at = 0.0
+        stale = time.monotonic() - 5
+        backend._last_used_at = stale
 
         with pytest.raises(RuntimeError), backend._cursor():
             raise RuntimeError("statement blew up")
 
-        assert backend._last_used_at > 0.0
+        assert backend._last_used_at >= stale
 
     def test_transaction_marks_the_connection_used(self) -> None:
         backend = _backend_with(_FakeConnection())
-        backend._last_used_at = 0.0
+        backend._last_used_at = time.monotonic() - 5
 
         before = time.monotonic()
         with backend.transaction():
             pass
 
         assert before <= backend._last_used_at <= time.monotonic()
+
+
+class TestProactiveIdleClose:
+    """The connection has to go away while nobody is querying.
+
+    Redial-on-next-use never runs for an agent that was loaded at boot and
+    then left alone, which is how ``max_connections`` filled up over weeks.
+    """
+
+    def test_idle_connection_is_closed_without_a_following_query(self) -> None:
+        conn = _FakeConnection()
+        backend = _backend_with(conn, _idle_release_enabled=False)
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
+
+        backend._release_idle_connection()
+
+        assert conn.closed
+        assert backend._conn is conn  # close only; the next operation redials
+
+    def test_recent_connection_is_kept(self) -> None:
+        conn = _FakeConnection()
+        backend = _backend_with(conn)
+
+        backend._release_idle_connection()
+
+        assert not conn.closed
+        assert backend._idle_timer is not None
+
+    def test_in_flight_transaction_is_kept(self) -> None:
+        conn = _FakeConnection()
+        backend = _backend_with(conn, _in_transaction=True)
+        backend._last_used_at = time.monotonic() - _IDLE_SESSION_TIMEOUT_S - 1
+
+        backend._release_idle_connection()
+
+        assert not conn.closed
+
+    def test_close_cancels_the_timer_and_does_not_redial(self) -> None:
+        conn = _FakeConnection()
+        backend = _backend_with(conn)
+        backend._arm_idle_timer()
+        assert backend._idle_timer is not None
+
+        backend.close()
+
+        assert conn.closed
+        assert backend._idle_timer is None
+        assert backend._closed is True
+
+
+class TestPruneDoesNotOpenPostgresPool:
+    def test_postgres_backend_is_rejected_before_ensure_checkpointer(self) -> None:
+        from octop_memory.pipeline.lifecycle.checkpoint_gc import _get_checkpointer_conn
+
+        class _Mem:
+            def __init__(self) -> None:
+                self._backend = object.__new__(PostgresMemoryBackend)
+                self.ensured = False
+
+            def _ensure_checkpointer(self) -> None:
+                self.ensured = True
+
+        memory = _Mem()
+        with pytest.raises(RuntimeError, match="PostgreSQL checkpoint pruning is not yet supported"):
+            _get_checkpointer_conn(memory)  # type: ignore[arg-type]
+
+        assert memory.ensured is False
 
 
 class TestCheckpointerPoolDoesNotPinConnections:

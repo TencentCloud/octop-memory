@@ -506,13 +506,38 @@ def _message_is_ai(msg: object) -> bool:
     return getattr(msg, "type", None) == "ai"
 
 
+def _postgres_memory(memory: Any) -> bool:
+    """True when ``memory`` stores on Postgres.
+
+    Idle maintenance calls pruning for every loaded agent. Opening the
+    checkpointer there builds a connection pool, so Postgres has to be
+    rejected before ``_ensure_checkpointer`` (TencentCloud/Octop#1795).
+    """
+    backend = getattr(memory, "_backend", None)
+    if backend is None:
+        return False
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+    return isinstance(backend, PostgresMemoryBackend)
+
+
 def _get_checkpointer_conn(memory: Memory) -> sqlite3.Connection:
     """Return the raw sqlite3 connection backing ``memory``'s checkpointer.
 
     Raises if the checkpointer isn't LangGraph's SQLite ``SqliteSaver``
     (e.g. no ``langgraph`` extra installed, or PostgreSQL backend) —
     silently no-op'ing would hide the fact that nothing got pruned.
+
+    PostgreSQL is rejected before ``_ensure_checkpointer``. That call builds
+    a connection pool, and the hourly maintenance tick would otherwise open
+    one per loaded agent even though Postgres pruning always fails.
     """
+    if _postgres_memory(memory):
+        raise RuntimeError(
+            "Checkpoint pruning requires the SQLite checkpointer (langgraph SqliteSaver); "
+            "got 'PostgresMemoryBackend' with no usable 'conn' attribute "
+            "(PostgreSQL checkpoint pruning is not yet supported)"
+        )
     memory._ensure_checkpointer()
     saver = memory._checkpointer
     # getattr on an untyped saver yields Any; narrow explicitly so the
