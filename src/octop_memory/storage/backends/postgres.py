@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager, suppress
@@ -53,13 +54,12 @@ SCHEMA_VERSION = "1"
 _DDL_LOCK_KEY = 0x68_6D_65_6D  # "hmem"
 _DDL_LOCK_TIMEOUT = "5s"
 
-# Server-side idle release (PostgreSQL 14+): a Memory that is loaded but unused
-# must not hold one of ``max_connections`` until its process exits — dozens of
-# idle agents otherwise exhaust the server (TencentCloud/Octop#1795). The
-# server closes the session once it has been idle this long; the next
-# operation redials in ``_reconnect_if_dead``, which also pre-empts the
-# inevitable first-statement failure by treating local idle time past the
-# same threshold as "already released".
+# A loaded but unused Memory must not hold one of ``max_connections`` until
+# its process exits — dozens of idle agents otherwise exhaust the server
+# (TencentCloud/Octop#1795). After this long with no use, the client closes
+# its own socket; the next operation redials in ``_reconnect_if_dead``.
+# ``idle_session_timeout`` (PostgreSQL 14+) is also set, so the server drops
+# the session even if this process never gets back to it.
 _IDLE_SESSION_TIMEOUT_S = 10 * 60
 
 # Tables with a generated tsvector column, and that column's name. Their FTS
@@ -131,16 +131,31 @@ class PostgresMemoryBackend:
         self._last_reconnect_at: float = 0.0
         self._last_used_at: float = time.monotonic()
         # Flipped by ``_init_schema`` when the server accepts
-        # ``idle_session_timeout`` (PostgreSQL 14+).
+        # ``idle_session_timeout`` (PostgreSQL 14+). Client-side release does
+        # not consult this flag — a server that rejects the SET must still
+        # lose the session once it sits idle.
         self._idle_release_enabled: bool = False
+        self._idle_timer: threading.Timer | None = None
+        # Serializes query use with the idle-release timer. The connection is
+        # not safe to share across threads; the lock also stops the timer from
+        # closing it mid-statement. Re-entrant: ``transaction()`` yields into
+        # code that calls ``_cursor``.
+        self._conn_lock = threading.RLock()
         # Schema bootstrap owns its own transactions and error handling; an
         # automatic rollback in the middle would undo half-built DDL.
         self._booting: bool = True
         try:
-            self._init_schema()
-            self._migrate_legacy_schema()
-        finally:
-            self._booting = False
+            try:
+                self._init_schema()
+                self._migrate_legacy_schema()
+            finally:
+                self._booting = False
+        except Exception:
+            # A timer armed during bootstrap would keep this object (and its
+            # connection) alive after the constructor fails.
+            with suppress(Exception):
+                self.close()
+            raise
 
     def close(self) -> None:
         """Close the database connection.
@@ -149,8 +164,17 @@ class PostgresMemoryBackend:
         use-after-close must stay an error rather than silently reopening
         what the caller asked to release.
         """
-        self._closed = True
-        self._conn.close()
+        with self._conn_lock:
+            self._closed = True
+            self._cancel_idle_timer()
+            conn = self._conn
+            if not getattr(conn, "closed", True):
+                conn.close()
+
+    def __del__(self) -> None:
+        timer = getattr(self, "_idle_timer", None)
+        if timer is not None:
+            timer.cancel()
 
     @contextmanager
     def transaction(self) -> Generator[None, None, None]:
@@ -159,27 +183,29 @@ class PostgresMemoryBackend:
         Re-entrant safe: nested calls are no-ops (the outer transaction owns
         the commit/rollback boundary).
         """
-        if self._in_transaction:
-            yield
-            return
-        # Before the block owns anything: a dead connection here has no
-        # pending writes to lose, so redialling is safe. Once inside,
-        # ``_reconnect_if_dead`` refuses (see its docstring).
-        self._reconnect_if_dead()
-        self._reset_if_aborted()
-        self._in_transaction = True
-        committed = False
-        try:
-            yield
-            self._conn.commit()
-            committed = True
-        finally:
+        with self._conn_lock:
+            if self._in_transaction:
+                yield
+                return
+            # Before the block owns anything: a dead connection here has no
+            # pending writes to lose, so redialling is safe. Once inside,
+            # ``_reconnect_if_dead`` refuses (see its docstring).
+            self._reconnect_if_dead()
+            self._reset_if_aborted()
+            self._in_transaction = True
+            committed = False
             try:
-                if not committed:
-                    self._conn.rollback()
+                yield
+                self._conn.commit()
+                committed = True
             finally:
-                self._in_transaction = False
-                self._last_used_at = time.monotonic()
+                try:
+                    if not committed:
+                        self._conn.rollback()
+                finally:
+                    self._in_transaction = False
+                    self._last_used_at = time.monotonic()
+                    self._arm_idle_timer()
 
     @contextmanager
     def _cursor(self) -> Generator[Any, None, None]:
@@ -195,17 +221,19 @@ class PostgresMemoryBackend:
         Bootstrap and explicit ``transaction()`` blocks are exempt — see
         :meth:`_reset_if_aborted`.
         """
-        self._reconnect_if_dead()
-        self._reset_if_aborted()
-        try:
-            if self._in_transaction or self._booting:
-                with self._conn.cursor() as cur:
+        with self._conn_lock:
+            self._reconnect_if_dead()
+            self._reset_if_aborted()
+            try:
+                if self._in_transaction or self._booting:
+                    with self._conn.cursor() as cur:
+                        yield cur
+                        return
+                with self._conn.transaction(), self._conn.cursor() as cur:
                     yield cur
-                return
-            with self._conn.transaction(), self._conn.cursor() as cur:
-                yield cur
-        finally:
-            self._last_used_at = time.monotonic()
+            finally:
+                self._last_used_at = time.monotonic()
+                self._arm_idle_timer()
 
     def _commit(self) -> None:
         """Commit only when not inside an explicit transaction block."""
@@ -215,6 +243,67 @@ class PostgresMemoryBackend:
     def _connect(self) -> Any:
         """Open one connection with the settings this backend was built with."""
         return psycopg.connect(self._dsn, row_factory=dict_row, **self._connect_kwargs)
+
+    def _cancel_idle_timer(self) -> None:
+        """Drop the armed idle-release timer. Caller holds ``_conn_lock``."""
+        timer = self._idle_timer
+        self._idle_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _arm_idle_timer(self, *, delay: float | None = None) -> None:
+        """Schedule a client-side close. Caller holds ``_conn_lock``.
+
+        Each use replaces the previous deadline. The timer only closes the
+        socket; the next operation redials.
+        """
+        self._cancel_idle_timer()
+        if self._closed:
+            return
+        wait = _IDLE_SESSION_TIMEOUT_S if delay is None else max(0.0, delay)
+        timer = threading.Timer(wait, self._release_idle_connection)
+        timer.daemon = True
+        timer.name = "octop-memory-pg-idle"
+        self._idle_timer = timer
+        timer.start()
+
+    def _release_idle_connection(self) -> None:
+        """Close the session once it has sat unused.
+
+        Does not redial. An agent that is loaded but never queried must drop
+        its ``max_connections`` slot without waiting for the next statement,
+        including on servers that reject ``idle_session_timeout``.
+        """
+        with self._conn_lock:
+            if self._closed:
+                return
+            me = threading.current_thread()
+            armed = self._idle_timer
+            # A newer deadline replaced this callback, which may already have
+            # been in flight when the new timer was armed.
+            if armed is not None and armed is not me:
+                return
+            if armed is me:
+                self._idle_timer = None
+            conn = self._conn
+            if getattr(conn, "closed", True):
+                return
+            if self._in_transaction or self._booting:
+                self._arm_idle_timer()
+                return
+            slack = _IDLE_SESSION_TIMEOUT_S - (time.monotonic() - self._last_used_at)
+            # ``Timer`` can fire a little early; a shortfall under a second
+            # still counts as idle. A larger gap means a use landed without
+            # replacing this timer — wait out the rest, don't add another
+            # full interval.
+            if slack > 1.0:
+                self._arm_idle_timer(delay=slack)
+                return
+            logger.info("releasing idle postgres connection after %ss", _IDLE_SESSION_TIMEOUT_S)
+            try:
+                conn.close()
+            except psycopg.Error:
+                logger.warning("failed to close idle postgres connection", exc_info=True)
 
     def _reconnect_if_dead(self) -> None:
         """Redial a connection the server has dropped.
@@ -238,34 +327,35 @@ class PostgresMemoryBackend:
         - during schema bootstrap, which owns its own connection handling
 
         Redialling also happens *before* a server-side idle release is
-        visible: with ``idle_session_timeout`` accepted (see
-        :meth:`_enable_idle_release`), a session idle past
-        ``_IDLE_SESSION_TIMEOUT_S`` is treated as already gone, because libpq
-        only notices the close on the next I/O — without this, the first
-        statement after an idle period would fail instead of transparently
-        getting a fresh connection.
+        visible. A session idle past ``_IDLE_SESSION_TIMEOUT_S`` is treated as
+        already gone: the idle timer may have closed it, PostgreSQL 14+ may
+        have closed it after ``idle_session_timeout``, and libpq only notices
+        a server-side close on the next I/O. Without this, the first statement
+        after an idle period would fail instead of transparently getting a
+        fresh connection.
 
         Attempts are spaced by ``_RECONNECT_COOLDOWN_S``. When the server is
         genuinely down, every call would otherwise block on a connect timeout;
         failing fast and retrying on the next operation is cheaper.
         """
-        if self._closed or self._in_transaction or self._booting:
-            return
-        dead = self._conn.closed
-        if not dead and not self._idle_session_expired():
-            return
-        now = time.monotonic()
-        if now - self._last_reconnect_at < self._RECONNECT_COOLDOWN_S:
-            return
-        self._last_reconnect_at = now
-        if dead:
-            logger.warning("postgres connection was closed by the server; reconnecting")
-        else:
-            logger.info("postgres connection idle past idle_session_timeout; reconnecting")
-            self._conn.close()
-        self._conn = self._connect()
-        self._restore_session_state()
-        self._last_used_at = time.monotonic()
+        with self._conn_lock:
+            if self._closed or self._in_transaction or self._booting:
+                return
+            dead = self._conn.closed
+            if not dead and not self._idle_session_expired():
+                return
+            now = time.monotonic()
+            if now - self._last_reconnect_at < self._RECONNECT_COOLDOWN_S:
+                return
+            self._last_reconnect_at = now
+            if dead:
+                logger.warning("postgres connection was closed; reconnecting")
+            else:
+                logger.info("postgres connection idle past the release threshold; reconnecting")
+                self._conn.close()
+            self._conn = self._connect()
+            self._restore_session_state()
+            self._last_used_at = time.monotonic()
 
     def _restore_session_state(self) -> None:
         """Re-apply settings that live on the connection, not in the database.
@@ -290,8 +380,8 @@ class PostgresMemoryBackend:
         Older servers reject the ``SET`` with ``UndefinedObject`` (42704) —
         which is why the broad ``psycopg.Error`` is caught rather than a named
         class (psycopg ships no ``UnrecognizedConfigurationParameter``). A
-        ``False`` result disables the pre-emptive redial in
-        :meth:`_reconnect_if_dead`; the connection then behaves as before.
+        ``False`` leaves client-side release in place: the idle timer still
+        closes the socket, and the next operation still redials.
         """
         try:
             self._conn.execute(f"SET idle_session_timeout = '{_IDLE_SESSION_TIMEOUT_S}s'")
@@ -299,19 +389,19 @@ class PostgresMemoryBackend:
         except psycopg.Error:
             with suppress(psycopg.Error):
                 self._conn.rollback()
-            logger.info("server rejected idle_session_timeout; idle connection release disabled")
+            logger.info("server rejected idle_session_timeout; client-side idle release still applies")
             return False
         return True
 
     def _idle_session_expired(self) -> bool:
-        """Whether the server has likely already released this session.
+        """Whether this session has been idle long enough to release.
 
-        Tracks idle time locally because the socket keeps looking open until
-        the next read or write: the server closes it after
-        ``idle_session_timeout``, but libpq only reports the closure once I/O
-        touches the dead socket.
+        Independent of ``idle_session_timeout``. Servers older than PostgreSQL
+        14 reject that setting; the client still has to drop the connection.
+        Local time is what the next operation consults, because a server-side
+        close stays invisible to libpq until the following read or write.
         """
-        return self._idle_release_enabled and (time.monotonic() - self._last_used_at >= _IDLE_SESSION_TIMEOUT_S)
+        return time.monotonic() - self._last_used_at >= _IDLE_SESSION_TIMEOUT_S
 
     def _reset_if_aborted(self) -> None:
         """Roll back a connection stuck in an aborted transaction.
