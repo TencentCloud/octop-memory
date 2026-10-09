@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -409,10 +410,19 @@ def _sqlite_nudge_vacuum(backend: SqliteMemoryBackend, *, pages: int, dry_run: b
     )
 
 
+def _sqlite_store_bytes(db_path: Path) -> int:
+    """Main database plus WAL and shm, matching one Postgres database size."""
+    total = 0
+    for candidate in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
+        if candidate.is_file():
+            total += candidate.stat().st_size
+    return total
+
+
 def _sqlite_compact_vacuum(backend: SqliteMemoryBackend, *, dry_run: bool) -> CompactStats:
     conn = backend._conn
     db_path = backend._db_path
-    size_before = db_path.stat().st_size if db_path.exists() else 0
+    size_before = _sqlite_store_bytes(db_path)
     auto_vacuum_mode = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
     was_enabled = auto_vacuum_mode == 2
 
@@ -442,7 +452,7 @@ def _sqlite_compact_vacuum(backend: SqliteMemoryBackend, *, dry_run: bool) -> Co
     # believe) that nothing was reclaimed.
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-    size_after = db_path.stat().st_size if db_path.exists() else 0
+    size_after = _sqlite_store_bytes(db_path)
     _LOG.info(
         "compact_vacuum done path=%s size_before=%s size_after=%s",
         db_path,
@@ -509,9 +519,26 @@ def _postgres_nudge_vacuum(backend: PostgresMemoryBackend, *, dry_run: bool) -> 
     return VacuumStats(backend="postgres", dry_run=dry_run, tables=tables)
 
 
+def _postgres_database_bytes(dsn: str) -> int:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_database_size(current_database())")
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _postgres_compact_vacuum(backend: PostgresMemoryBackend, *, dry_run: bool) -> CompactStats:
+    size_before = _postgres_database_bytes(backend._dsn)
     tables = _postgres_vacuum_tables(backend._dsn, _postgres_target_tables(), full=True, dry_run=dry_run)
-    return CompactStats(backend="postgres", dry_run=dry_run, tables=tables)
+    size_after = size_before if dry_run else _postgres_database_bytes(backend._dsn)
+    return CompactStats(
+        backend="postgres",
+        dry_run=dry_run,
+        file_size_before=size_before,
+        file_size_after=size_after,
+        tables=tables,
+    )
 
 
 def _postgres_check(backend: PostgresMemoryBackend) -> StorageCheck:
