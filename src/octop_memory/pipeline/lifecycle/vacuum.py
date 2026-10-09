@@ -68,6 +68,15 @@ DEFAULT_INCREMENTAL_VACUUM_PAGES = 300
 """~1.2MB reclaimed per call at the default 4KB SQLite page size — small
 enough that a single nudge_vacuum() stays fast even under lock contention."""
 
+DELETE_INCREMENTAL_VACUUM_PAGES = 2000
+"""~8MB at the default 4KB page size. One pass after a conversation delete,
+then return to the caller. Larger holes drain on the hourly maintenance tick."""
+
+MAINTENANCE_INCREMENTAL_VACUUM_PAGES = 5000
+"""~20MB at the default 4KB page size. Hourly tick budget when the freelist
+is larger than :data:`DEFAULT_INCREMENTAL_VACUUM_PAGES`. ``nudge_vacuum``
+already stops at the freelist, so a small hole still finishes in one tick."""
+
 _POSTGRES_JOURNAL_TABLE = "octop_memory.journal"
 _POSTGRES_CHECKPOINT_TABLES = (
     "public.checkpoints",
@@ -614,6 +623,8 @@ def tune_checkpoint_autovacuum(dsn: str) -> None:
 
 __all__ = [
     "DEFAULT_INCREMENTAL_VACUUM_PAGES",
+    "DELETE_INCREMENTAL_VACUUM_PAGES",
+    "MAINTENANCE_INCREMENTAL_VACUUM_PAGES",
     "CompactStats",
     "StorageCheck",
     "TableCheck",

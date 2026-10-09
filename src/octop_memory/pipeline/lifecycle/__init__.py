@@ -34,6 +34,8 @@ from octop_memory.pipeline.lifecycle.maintenance import (
 )
 from octop_memory.pipeline.lifecycle.vacuum import (
     DEFAULT_INCREMENTAL_VACUUM_PAGES,
+    DELETE_INCREMENTAL_VACUUM_PAGES,
+    MAINTENANCE_INCREMENTAL_VACUUM_PAGES,
     CompactStats,
     TableVacuumResult,
     VacuumStats,
@@ -58,6 +60,8 @@ __all__ = [
     "DEFAULT_ORPHAN_RAW_DAYS",
     "DEFAULT_REJECTED_CANDIDATE_DAYS",
     "DEFAULT_WAL_TRUNCATE_BYTES",
+    "DELETE_INCREMENTAL_VACUUM_PAGES",
+    "MAINTENANCE_INCREMENTAL_VACUUM_PAGES",
     "PIPELINE_JOURNAL_ACTIONS",
     "BootstrapStats",
     "CompactStats",

@@ -343,7 +343,10 @@ class TestConnectionRegistryLifecycle:
         assert len(backend._conns_by_ident) >= 3  # main + two workers
 
 
-posix_only = pytest.mark.skipif(os.name != "posix", reason="counts fds via /proc")
+posix_only = pytest.mark.skipif(
+    not os.path.isdir("/proc"),
+    reason="counts fds via /proc",
+)
 
 
 @posix_only

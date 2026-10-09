@@ -28,6 +28,7 @@ from octop_memory.pipeline.lifecycle.checkpoint_gc import (
 )
 from octop_memory.pipeline.lifecycle.gc import GcStats, run_gc
 from octop_memory.pipeline.lifecycle.vacuum import (
+    MAINTENANCE_INCREMENTAL_VACUUM_PAGES,
     CompactStats,
     VacuumStats,
     check_storage,
@@ -111,7 +112,7 @@ def run_idle_maintenance(
         _LOG.warning("idle maintenance: run_gc failed", exc_info=True)
 
     try:
-        stats.vacuum = nudge_vacuum(memory)
+        stats.vacuum = nudge_vacuum(memory, pages=MAINTENANCE_INCREMENTAL_VACUUM_PAGES)
     except REPORTABLE_ERRORS as exc:
         stats.vacuum_error = f"{type(exc).__name__}: {exc}"
         _LOG.warning("idle maintenance: nudge_vacuum failed", exc_info=True)
