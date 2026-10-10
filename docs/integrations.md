@@ -191,7 +191,7 @@ hermes memory status
 | `$HERMES_HOME/memories/` | 默认 host Markdown root |
 
 `hermes memory setup` 调用 provider 的 `get_config_schema()` / `save_config()`；点号 key 会转换为嵌套配置，
-并深合并已有文件。配置支持 profile、namespace、db_path、recall/capture/privacy 与 host files，
+并深合并已有文件。配置支持 profile、namespace、db_path、recall/capture/privacy、llm/extraction 与 host files，
 实际字段见 [provider 源码](../plugins/hermes/octopmemory/__init__.py)。不要将 OpenClaw 的 TS profile 默认值照搬到 Hermes。
 
 ```json
@@ -199,9 +199,18 @@ hermes memory status
   "namespace": "hermes__default",
   "recall": {"default_max_results": 5, "raw_policy": "fallback"},
   "capture": {"min_message_chars": 0, "include_roles": ["user", "assistant"]},
-  "privacy": {"redact_secrets": true, "store_tool_payloads": false}
+  "privacy": {"redact_secrets": true, "store_tool_payloads": false},
+  "llm": {"base_url": "https://<openai-compatible>/v1", "model": "<model>", "model_heavy": "<model>"},
+  "extraction": {"promote": true, "regen_pages": true}
 }
 ```
+
+`llm` / `extraction` 块与桥的 `--config-json` 同名同义（字段语义见上文配置表）：写入 `llm` 后，宿主进程内的
+运行时不再回退到 `NoopLLMClient`，模型辅助抽取（candidate、promotion、entity page 再生成）使用配置的模型；
+未配置时抽取以明确的失败原因降级、只落 raw 事件。`extraction` 控制 `promote`、`regen_pages`、
+`max_candidates`、`page_regen_limit`。
+连接凭据优先用环境变量：不设 `api_key` 时读取 `api_key_env` 指定的变量（默认 `OCTOPMEMORY_LLM_API_KEY`），
+避免把明文 key 写入共享的配置文件。
 
 ## 共同验证与排错
 
