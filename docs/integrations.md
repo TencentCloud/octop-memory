@@ -15,7 +15,7 @@ bridge 为 `octopmemory-bridge`，OpenClaw/Hermes 插件 ID 为 `octopmemory`。
 | 配置项 | 当前名称 |
 |---|---|
 | 发行包 / Python import | `octop-memory` / `octop_memory` |
-| bridge / Hermes 插件包 | `octopmemory-bridge` / `octop-memory-hermes` |
+| bridge / Hermes 插件 | `octopmemory-bridge` / 本仓 `plugins/hermes/octopmemory` |
 | OpenClaw 包 / 插件 ID | `@octop-memory/openclaw` / `octopmemory` |
 | 环境变量前缀 | `OCTOP_MEMORY_*` / `OCTOPMEMORY_*` |
 | 本地数据目录 | `~/.octop-memory/` / `~/.octopmemory/` |
@@ -54,7 +54,7 @@ Python 宿主优先使用 `MemoryService`；跨语言或隔离进程通过 stdio
 
 | | OpenClaw | Hermes |
 |---|---|---|
-| 插件 | npm `@octop-memory/openclaw` | Python `octop-memory-hermes` / native provider |
+| 插件 | npm `@octop-memory/openclaw` | native provider（本仓 `plugins/hermes/octopmemory`）|
 | 接入 | TypeScript → stdio `octopmemory-bridge` | Python provider → 进程内 `Bridge` |
 | Python 环境 | 独立 uv/pipx 环境，bridge 路径必须可用 | 必须装进 Hermes 实际使用的解释器 |
 | 存储 | 默认 SQLite，可配置 PostgreSQL | 当前 provider 构造 SQLite |
@@ -143,43 +143,32 @@ OpenClaw 的 `capture.extract_on_agent_end` 还需要配置 `llm.endpoint` 才�
 
 ## Hermes
 
-### 安装器方式
+### 安装与激活
 
-先确定 Hermes 实际使用的 Python。下列路径为默认布局，非默认安装需要替换：
-
-```bash
-HERMES_PY=~/.hermes/hermes-agent/venv/bin/python
-uv pip install --python "$HERMES_PY" octop-memory-hermes
-"$HERMES_PY" -c 'import octop_memory, octopmemory; print("ok")'
-"$HERMES_PY" -m octopmemory.installer install --no-write-pth
-hermes gateway restart
-"$HERMES_PY" -m octopmemory.installer doctor
-hermes memory status
-```
-
-这里包已安装到宿主解释器，`--no-write-pth` 避免另写共享解释器路径。
-没有 uv 时可在该解释器执行 `-m ensurepip --upgrade`，再用 `-m pip install octop-memory-hermes`。
-不要从 `hermes` 命令的 shebang 猜解释器，它可能是 shell wrapper。
-
-installer 将 provider 放到 `<hermes-source>/plugins/memory/octopmemory/`，备份并修改 config 的
-`memory.provider: octopmemory`。非默认布局用 `--hermes-home` / `--hermes-source`；
-升级覆盖需显式 `--force`。`doctor` 检查配置、文件与 import 能力，不等于完整 capture 验收。
-
-### Native plugin 方式
-
-维护者可用 `scripts/build-hermes-plugin.sh` 生成独立 plugin 目录；目录包含 provider 和 manifest，
-不包含 installer。将该目录作为独立仓库分发后，由用户使用实际的插件仓库 URL：
+Hermes 的插件安装器支持 `owner/repo/path/to/plugin` 子目录规格，可以直接从本仓安装 provider，
+不需要独立的插件仓库：
 
 ```bash
-hermes plugins install --enable <plugin-repository-url>
+hermes plugins install TencentCloud/octop-memory/plugins/hermes/octopmemory \
+  --ref <完整 40 位 commit SHA>
 hermes memory setup
 hermes gateway restart
 hermes memory status
 ```
 
-在 setup 中选择 `octopmemory`，由宿主安装 manifest 声明的核心依赖。
-此分发方式没有 `octopmemory.installer`，不要照抄安装器方式的 doctor；以宿主 status 和实际搜索验收。
-本仓不假定插件已被上游内置收录。
+`--ref` 需要完整的 40 位 commit SHA（短 SHA 会被宿主拒绝），用来把插件钉在验证过的 revision 上；
+安装来源与 revision 会记录在 `~/.hermes/plugins/.install-metadata.json`。
+在 `hermes memory setup` 中选择 `octopmemory`，宿主会安装 `plugin.yaml` 声明的 `octop-memory[cli]` 依赖；
+随后用 `hermes memory status` 确认加载，并用 `hermes octopmemory search "Python" -n 5 --corpus all`
+搜索测试对话中的词完成验收。
+
+依赖安装失败时，先确定网关实际使用的解释器：`hermes --print-runtime-command` 返回的第一个参数
+才是真正的 Python，依赖必须装进该解释器；不要从 `hermes` 命令的 shebang 猜测，它可能是 shell wrapper。
+在该解释器中安装 `octop-memory[cli]` 后再重启网关。
+
+仓库没有向 PyPI 发布独立的 `octop-memory-hermes` 插件包（按该命令执行会 404）；
+`plugins/hermes/octopmemory/installer.py` 是仓库内 E2E 验证使用的 copy + 激活工具，不属于发布的安装路径。
+维护者也可用 `scripts/build-hermes-plugin.sh` 生成独立插件目录另行分发。本仓不假定插件已被上游内置收录。
 
 ### 配置和文件
 
@@ -220,7 +209,7 @@ hermes octopmemory search "Python" -n 5 --corpus all
 | 现象 | 检查顺序 |
 |---|---|
 | bridge 启动失败 | probe 的 FTS5、有效 Python 路径、依赖、handshake 日志 |
-| Hermes import 失败 | 宿主解释器是否能 import，而非终端默认 Python |
+| Hermes import 失败 | `hermes --print-runtime-command` 返回的实际解释器是否能 import，而非终端默认 Python |
 | 插件未加载 | memory slot/provider、安装目录、重启和宿主 status |
 | 没有 raw | conversation access、capture 开关、roles、短消息阈值、privacy、实际 db/namespace |
 | 没有 atom | 是否有 LLM、是否触发 extraction、Candidate 的 review 状态 |
