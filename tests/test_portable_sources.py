@@ -11,8 +11,8 @@ from octop_memory.operations.migration.portable.sources import list_sources
 @pytest.fixture()
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     def expanduser(path: Path) -> Path:
-        text = str(path)
-        return tmp_path / text[2:] if text.startswith("~/") else path
+        parts = path.parts
+        return tmp_path.joinpath(*parts[1:]) if parts and parts[0] == "~" else path
 
     monkeypatch.setattr(Path, "expanduser", expanduser)
     return tmp_path

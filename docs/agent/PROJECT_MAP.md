@@ -40,6 +40,7 @@ CLI → application / operations ───────────────�
 
 portable 的 Agent 默认发现目录为 `~/.octop/agents/*/memory.sqlite` 与 `~/.octop-harness/*/memory.sqlite`；
 其它位置由 `list_sources(extra_paths=...)` 显式加入，不自动搬移数据。
+宿主文件 allowlist 仅接受相对 Markdown glob；以 `Path.anchor` 拒绝绝对路径、Windows 根相对路径和驱动器相对路径，避免扫描抛错。
 
 外部 Agent 适配位于根目录 `plugins/<host>/`，当前包括 OpenClaw、Hermes；验证位于 `tests/`、`evals/`，示例位于 `examples/`。
 `examples/basic_usage.py` 合并基础读写、树和 prompt recall，仅通过公共 API 写入临时库；
