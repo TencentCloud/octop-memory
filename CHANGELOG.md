@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- `memory_search` 支持 `corpus="episodes"`：显式读取 M5 日记层（episode），新增 `recall_episodes()` 入口，`layer_order` 加入 `episode`。路由矩阵保持不变——默认召回行为不变，episode 仅通过显式 corpus 暴露（issue #18 的方案 B）。
+
 ## [1.0.2] - 2026-10-16
 
 ### 新增

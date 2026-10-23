@@ -37,7 +37,7 @@ from octop_memory.types import AtomCard, RawEvent
 
 _log = logging.getLogger(__name__)
 
-RecallLayer = Literal["atom", "raw"]
+RecallLayer = Literal["atom", "raw", "episode"]
 """Which storage layer a snippet came from. Used by adapters / debug trace."""
 
 
@@ -288,6 +288,7 @@ __all__ = [
     "RecallLayer",
     "RecallResult",
     "RecallSnippet",
+    "recall_episodes",
     "recall_for_prompt",
     "recall_multi_source",
 ]
@@ -527,6 +528,74 @@ def _recall_for_prompt_impl(
     if typed_cache is not None and cache_thread is not None:
         typed_cache.set(thread_id=cache_thread, query=query, value=result)
     return result
+
+
+def recall_episodes(
+    memory: Memory,
+    query: str,
+    *,
+    limit: int = DEFAULT_RECALL_LIMIT,
+    per_source_limit: int | None = None,
+    suppress_threshold: float = 0.85,
+    total_budget_ms: int = 200,
+    now: datetime | None = None,
+) -> list[RecallSnippet]:
+    """Episode-only recall for explicit opt-in queries (M5 diary layer).
+
+    The router's decision matrix never selects the ``episode`` source, so
+    episodes are written but unreachable from the default pipeline. This
+    entry point (exposed as ``memory_search`` ``corpus="episodes"``) reads
+    the diary directly; default recall behaviour is unchanged. Snippets
+    keep ``layer="episode"`` so callers can tell diary hits apart from
+    atom / raw layers.
+    """
+    if not query or not query.strip():
+        return []
+
+    from datetime import UTC
+
+    from octop_memory.pipeline.recall.multi_source import gather_candidates
+    from octop_memory.pipeline.recall.parser import parse_query
+    from octop_memory.pipeline.recall.rerank import rerank
+    from octop_memory.pipeline.recall.suppress import suppress_duplicates
+    from octop_memory.pipeline.recall.timeout import Stopwatch
+
+    pin = now or datetime.now(UTC)
+    sw = Stopwatch(total_budget_ms=total_budget_ms)
+    try:
+        parsed = parse_query(query, now=pin)
+        candidates = gather_candidates(
+            memory,
+            parsed,
+            sources=("episode",),
+            per_source_limit=max(limit * 4, 10) if per_source_limit is None else per_source_limit,
+            sw=sw,
+        )
+        if not candidates:
+            return []
+        ranked = rerank(candidates, now=pin)
+        suppressed = suppress_duplicates(ranked, threshold=suppress_threshold)
+        snippets: list[RecallSnippet] = []
+        for ranked_snippet in suppressed.kept:
+            if len(snippets) >= limit:
+                break
+            candidate = ranked_snippet.candidate
+            text = candidate.text.strip()
+            if not text:
+                continue
+            snippets.append(
+                RecallSnippet(
+                    source_id=candidate.source_id,
+                    timestamp_iso=candidate.occurred_at.isoformat(),
+                    role_hint="episode",
+                    text=text,
+                    layer="episode",
+                )
+            )
+        return snippets
+    except DRIVER_ERRORS:
+        _log.warning("recall_episodes failed; degrading to empty result", exc_info=True)
+        return []
 
 
 def _role_for_layer(layer: str, *, importance: str) -> str:
