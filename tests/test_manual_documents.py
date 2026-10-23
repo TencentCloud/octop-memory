@@ -253,3 +253,89 @@ def test_duplicate_normalization_preserves_negation_case_and_numbers(memory: Mem
     result = MemoryService(memory).reconcile_manual_documents({"MEMORY.md": other})
     assert result["duplicates"] == 0 and result["status"] == "unavailable"
     assert len(memory.list_atoms()) == 1
+
+
+class UncertainLLM:
+    """Every atom comes back uncertain: no verdict, no conflict, no duplicate."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call_llm(self, prompt: str, **kwargs: Any) -> str:
+        self.calls += 1
+        data = json.loads(prompt)
+        return json.dumps(
+            {
+                "matches": [
+                    {
+                        "atom_id": atom["id"],
+                        "relation": "unrelated",
+                        "document": "MEMORY.md",
+                        "quote": "",
+                        "confidence": "uncertain",
+                        "same_subject": False,
+                        "same_scope": False,
+                    }
+                    for atom in data["atoms"]
+                ]
+            }
+        )
+
+
+def test_uncertain_comparisons_still_advance_the_audit_cursor(memory: Memory) -> None:
+    """An audit that only ever answers "uncertain" must still make progress.
+
+    Regression: ``unseen[:100]`` selects the next batch by ``checked``, so leaving
+    uncertain atoms unchecked re-scanned the same atoms on every run and the audit
+    could never reach "complete".
+    """
+    memory.store("The user keeps backups on the NAS.")
+    memory.store("The lab router is reachable on the second subnet.")
+    llm = UncertainLLM()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "", "MEMORY.md": "Unrelated owner notes."}
+
+    first = service.reconcile_manual_documents(documents)
+    assert first["status"] == "uncertain"
+    assert first["remaining"] == 0
+    assert first["checked"] == 2
+
+    calls = llm.calls
+    second = service.reconcile_manual_documents(documents)
+    assert second["remaining"] == 0
+    assert llm.calls == calls, "already-audited atoms must not be re-sent to the model"
+
+
+def test_unchanged_documents_are_audited_only_once(memory: Memory) -> None:
+    """A memory write must not re-audit documents whose revision is already audited."""
+    llm = ManualLLM()
+    documents = {"USER.md": "The user prefers Chinese replies.", "MEMORY.md": ""}
+    service = MemoryService(memory, llm=llm, manual_documents_provider=lambda: documents)
+
+    memory.store("The user runs SQLite with WAL enabled.")
+    first = service.save("The user keeps backups in /srv/backups.")
+    assert first.metadata.get("manual_document_review"), "first write should audit"
+    calls = llm.calls
+    assert calls > 0
+
+    second = service.save("The user reviews pull requests on weekends.")
+    assert not second.metadata.get("manual_document_review")
+    assert llm.calls == calls
+
+    # A new document revision is audited again; failures are never cached as success.
+    documents["MEMORY.md"] = "Owner notes changed."
+    third = service.save("The user prefers dark terminals.")
+    assert third.metadata.get("manual_document_review")
+    assert llm.calls > calls
+
+
+def test_failed_audit_stays_retryable(memory: Memory) -> None:
+    from octop_memory.operations.retention import manual_documents_audited
+
+    memory.store("The user prefers English replies.")
+    documents = {"USER.md": "The user prefers Chinese replies.", "MEMORY.md": ""}
+    MemoryService(memory, llm=ManualLLM(broken=True)).reconcile_manual_documents(documents)
+    assert manual_documents_audited(memory, documents) is False
+
+    MemoryService(memory, llm=ManualLLM()).reconcile_manual_documents(documents)
+    assert manual_documents_audited(memory, documents) is True

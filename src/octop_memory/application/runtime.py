@@ -162,6 +162,14 @@ class MemoryRuntime:
             documents = provider()
             if not any(body.strip() for body in documents.values()):
                 return None
+            # The post-write audit only adds value when the owner documents changed.
+            # Re-auditing an unchanged revision repeats identical model calls on every
+            # memory write, so it is skipped once a revision has been audited
+            # (failures stay retryable).
+            from octop_memory.operations.retention import manual_documents_audited
+
+            if manual_documents_audited(self._memory, documents):
+                return None
             return self.reconcile_manual_documents({"documents": documents}, is_current=lambda: provider() == documents)
         except REPORTABLE_ERRORS:
             logger.warning("Manual-document review after memory write is unavailable", exc_info=True)
