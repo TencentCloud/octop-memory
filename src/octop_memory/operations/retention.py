@@ -161,13 +161,18 @@ def reconcile_manual_documents(
             current = memory.get_atom(atom.id)
             if (
                 match is None
-                or match.get("uncertain")
                 or current is None
                 or current.deprecated_at is not None
                 or current.assertion != atom.assertion
             ):
                 continue
+            # An uncertain comparison carries no verdict, but it must still advance
+            # the cursor. Otherwise the same first ``unseen[:100]`` atoms are
+            # re-scanned on every run, the audit can never reach "complete", and each
+            # memory write pays for model calls that inspect facts already inspected.
             checked[atom.id] = hashes[atom.id]
+            if match.get("uncertain"):
+                continue
             if match["relation"] == "duplicate":
                 duplicates[atom.id] = atom.assertion
             elif match["relation"] == "conflict":
@@ -244,8 +249,12 @@ def reconcile_manual_documents(
             and unresolved_candidate.status in {"conflict", "needs_review"}
         ]
         remaining = sum(checked.get(a.id) != hashes[a.id] for a in atoms)
-        if status == "complete" and remaining:
-            status = "uncertain" if any(row.get("uncertain") for row in matches.values()) else "partial"
+        # An uncertain comparison is not a verification: never report "complete"
+        # just because the cursor advanced past it.
+        if status == "complete" and any(row.get("uncertain") for row in matches.values()):
+            status = "uncertain"
+        elif status == "complete" and remaining:
+            status = "partial"
         report = {
             "status": status,
             "scanned": len(matches),
@@ -275,6 +284,24 @@ def reconcile_manual_documents(
             ),
         )
     return report
+
+
+def manual_documents_audited(
+    memory: Memory,
+    documents: dict[str, str],
+) -> bool:
+    """True when these exact documents were already audited successfully.
+
+    The audit compares memory against a *revision* of USER.md/MEMORY.md. Rerunning
+    it for an unchanged revision re-reads the same atoms and repeats the same
+    model calls, which is pure cost on every memory write. Failures stay retryable
+    so a transient model error is not cached.
+    """
+    record = json.loads(memory.get_meta(MANUAL_DOCUMENTS_META_KEY) or "{}")
+    if not record or record.get("revision") != manual_documents_revision(documents):
+        return False
+    status = (record.get("last_report") or {}).get("status")
+    return status not in {"failed", "unavailable", "stale", "not_checked", None}
 
 
 def manual_document_review_status(memory: Memory, documents: dict[str, str] | None = None) -> dict[str, Any]:
