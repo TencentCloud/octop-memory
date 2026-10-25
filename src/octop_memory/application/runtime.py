@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -60,6 +61,13 @@ The TS shell triggers ``extract`` after every agent_end, so the same
 session is re-extracted many times; tracking which raw event ids each
 session has already fed through the extractor makes repeat calls cheap
 (``no_new_events``) instead of burning an LLM call per turn."""
+
+_EXTRACTED_IDS_META_PREFIX = "extracted_ids/v1/"
+"""Meta key prefix for the durable per-session extracted-event-id cursor.
+
+The in-memory ``_extracted_ids`` LRU is lost on restart; persisting each
+session's set in ``{ns}_meta`` lets extraction resume incrementally instead of
+re-feeding the whole backlog after every restart (#25)."""
 
 
 SECRET_PATTERNS = [
@@ -599,6 +607,9 @@ class MemoryRuntime:
             return response
 
         seen.update(e.id for e in new_events)
+        # Persist the cursor so a restart resumes incrementally instead of
+        # re-feeding the whole session backlog (#25).
+        self._persist_seen_ids(session_id, seen)
         response["candidates"] = len(result.candidates)
         if result.candidates:
             self._memory.add_candidates(result.candidates)
@@ -715,11 +726,40 @@ class MemoryRuntime:
         if session_id in self._extracted_ids:
             self._extracted_ids.move_to_end(session_id)
             return self._extracted_ids[session_id]
-        seen: set[str] = set()
+        seen = self._load_seen_ids(session_id)
         self._extracted_ids[session_id] = seen
         while len(self._extracted_ids) > _MAX_TRACKED_SESSIONS:
             self._extracted_ids.popitem(last=False)
         return seen
+
+    def _load_seen_ids(self, session_id: str) -> set[str]:
+        """Restore the persisted extracted-id set for a session (empty if none)."""
+        try:
+            raw = self._memory.get_meta(f"{_EXTRACTED_IDS_META_PREFIX}{session_id}")
+        except REPORTABLE_ERRORS:  # pragma: no cover - best-effort persistence
+            logger.warning("failed to load extracted ids; treating as empty", exc_info=True)
+            return set()
+        if not raw:
+            return set()
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {item for item in data if isinstance(item, str)}
+
+    def _persist_seen_ids(self, session_id: str, seen: set[str]) -> None:
+        """Persist the extracted-id set so a restart resumes incrementally."""
+        try:
+            self._memory.set_meta(
+                f"{_EXTRACTED_IDS_META_PREFIX}{session_id}",
+                json.dumps(sorted(seen), ensure_ascii=False),
+            )
+        except REPORTABLE_ERRORS:  # pragma: no cover - observability, never load-bearing
+            # Persistence is an optimization; a write failure must not fail
+            # extraction (the in-memory set still advances this process).
+            logger.warning("failed to persist extracted ids", exc_info=True)
 
     def _recall_cfg(self) -> dict[str, Any]:
         return {**DEFAULT_RECALL_CFG, **self._config.recall}
