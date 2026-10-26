@@ -121,17 +121,36 @@ def test_candidate_from_an_older_manual_revision_cannot_be_approved(memory: Memo
         promote_candidate(memory, {"candidate_id": candidate.id})
 
 
-def test_save_checks_current_manual_documents_and_returns_candidate_status(memory: Memory) -> None:
+def test_save_persists_without_waiting_for_manual_review(memory: Memory) -> None:
+    llm = ManualLLM()
+    scheduled: list[str] = []
     service = MemoryService(
-        memory, llm=ManualLLM(), manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+        memory, llm=llm, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
     )
+    service.set_manual_review_scheduler(lambda: scheduled.append("review"))
     node = service.save("The user prefers English replies.")
-    assert node.metadata["manual_document_conflict"] is True
-    assert node.metadata["manual_document_review"]["conflicts"] == 1
+    assert scheduled == ["review"]
+    assert llm.calls == 0
+    assert "manual_document_review" not in node.metadata
+    assert len(memory.list_atoms()) == 1
+    review = service._runtime.review_new_memory()
+    assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
 
 
-def test_automatic_promotion_also_checks_registered_owner_documents(memory: Memory) -> None:
+def test_save_survives_a_broken_review_scheduler(memory: Memory) -> None:
+    service = MemoryService(memory)
+
+    def boom() -> None:
+        raise RuntimeError("scheduler down")
+
+    service.set_manual_review_scheduler(boom)
+    node = service.save("The user prefers English replies.")
+    assert node.atom_id is not None
+    assert len(memory.list_atoms()) == 1
+
+
+def test_automatic_promotion_leaves_manual_review_to_the_host(memory: Memory) -> None:
     memory.store("The user prefers English replies.")
     original = memory.list_candidates()[0]
     memory.add_candidate(replace(original, id="pending-copy", status="pending", decided_by=None, decided_at=None))
@@ -139,8 +158,70 @@ def test_automatic_promotion_also_checks_registered_owner_documents(memory: Memo
         memory, llm=ManualLLM(), manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
     )
     result = service._runtime.promote({"regen_pages": False})
-    assert result["manual_documents"]["conflicts"] == 1
+    assert "manual_documents" not in result
+    assert memory.list_atoms()
+    review = service._runtime.review_new_memory()
+    assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
+
+
+def test_background_review_checks_one_batch(memory: Memory) -> None:
+    for number in range(25):
+        memory.store(f"Project {number} has a verified troubleshooting history.")
+    llm = ManualLLM()
+    service = MemoryService(
+        memory, llm=llm, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+    )
+    report = service._runtime.review_new_memory(max_atoms=20)
+    assert report is not None
+    assert llm.calls == 1
+    assert report["status"] == "partial"
+    assert report["remaining"] == 5
+
+
+def test_failed_comparison_is_deferred_until_later(memory: Memory) -> None:
+    class Boom(ManualLLM):
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError("model down")
+
+    memory.store("The user prefers English replies.")
+    llm = Boom()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "The user prefers Chinese replies."}
+    first = service.reconcile_manual_documents(documents)
+    assert first["status"] == "failed"
+    assert llm.calls == 1
+    assert len(memory.list_atoms()) == 1
+    second = service.reconcile_manual_documents(documents)
+    assert llm.calls == 1
+    assert second["status"] == "partial"
+    assert len(memory.list_atoms()) == 1
+
+
+def test_repeated_comparison_failures_are_skipped_without_retiring(
+    memory: Memory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Boom(ManualLLM):
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError("model down")
+
+    monkeypatch.setattr("octop_memory.operations.retention._COMPARE_DEFER_SECONDS", -1)
+    memory.store("The user prefers English replies.")
+    llm = Boom()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "The user prefers Chinese replies."}
+    result = None
+    for _ in range(3):
+        result = service.reconcile_manual_documents(documents)
+    assert result is not None and result["status"] == "uncertain"
+    assert llm.calls == 3
+    assert len(memory.list_atoms()) == 1
+    assert memory.list_candidates(status="conflict") == []
+    again = service.reconcile_manual_documents(documents)
+    assert llm.calls == 3
+    assert again["remaining"] == 0
 
 
 def test_concurrent_file_edit_cancels_the_audit(memory: Memory) -> None:
