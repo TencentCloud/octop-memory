@@ -1084,11 +1084,13 @@ class PostgresMemoryBackend:
         raw_event_ids: list[str],
         subject_name: str | None = None,
     ) -> bool:
-        """True when a ``promoted`` candidate with identical assertion + subject_name + raw_event_ids already exists.
+        """True when a decided candidate with identical assertion + subject_name + raw_event_ids already exists.
 
-        Mirrors the SQLite backend: only ``promoted`` rows are considered so
-        still-``pending`` duplicates (test scenarios) are not skipped. The
-        raw_event_ids set is compared in Python to stay order-insensitive.
+        Mirrors the SQLite backend: ``promoted`` and ``rejected`` rows are
+        considered, but still-``pending`` duplicates are not skipped (they may
+        still be under review). Matching ``rejected`` keeps a user's "ignore"
+        decision across a restart instead of re-queueing the same item (#27).
+        The raw_event_ids set is compared in Python to stay order-insensitive.
         """
         if not raw_event_ids:
             return False
@@ -1097,7 +1099,7 @@ class PostgresMemoryBackend:
             cur.execute(
                 """SELECT raw_event_ids FROM candidates
                     WHERE namespace = %s AND assertion = %s AND subject_name = %s
-                      AND status = 'promoted'""",
+                      AND status IN ('promoted', 'rejected')""",
                 (self._ns, assertion, subject_name),
             )
             rows = cur.fetchall()

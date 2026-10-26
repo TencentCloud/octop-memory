@@ -16,6 +16,14 @@
 
 ## 当前任务
 
+### 候选去重尊重「忽略」终态（#27 切片）
+
+- **状态 / 链接**：实现与定向验证完成，待审阅；[octop-memory#27](https://github.com/TencentCloud/octop-memory/issues/27)。
+- **问题与场景**：`find_duplicate_candidate` 只匹配 `status='promoted'`，于是用户「忽略」（`rejected`）的候选在重启 / 重扫同一批 raw 事件后会被重新入队，「忽略」无法稳定表达「以后不要再问」。这是 #27（语义去重）中可独立、无 schema 变更的一层。
+- **范围与验收**：把终态匹配从 `promoted` 扩到 `promoted OR rejected`（SQLite + PostgreSQL 两后端），仍**不跳过 `pending`**（仍在评审中，避免静默丢弃）；`raw_event_ids` 仍按集合精确匹配，所以不同来源的新证据仍可生成新候选。不改 schema / 公共 API / 语义匹配。
+- **验证**：`uv run pytest tests/test_backend_parity.py tests/test_memory_m2_api.py -q` → **118 passed / 106 skipped**（skip 为 PostgreSQL 与可选环境）；`ruff check` / `format --check` / `mypy --strict src`(111 files) 全过。新增用例覆盖 rejected 命中、不同 raw_event_ids 不命中。
+- **接续**：语义（同义改写）去重、已决策指纹持久化、冲突/更新模型仍属 #27 后续；本 PR 只收「同证据重扫尊重忽略」这一层。
+
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 
 - **状态 / 场景**：三个仓库实现、验证和配套宿主提交已完成。用户明确要求 USER.md 与 MEMORY.md 只由用户修改；冲突时手动文档优先，通知用户并降级到 Candidate 更新 octop-memory。

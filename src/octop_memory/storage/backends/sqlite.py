@@ -1058,25 +1058,27 @@ class SqliteMemoryBackend:
 
     @locked_sqlite_operation
     def find_duplicate_candidate(self, assertion: str, raw_event_ids: list[str], subject_name: str) -> bool:
-        """Whether an identical promoted candidate already exists.
+        """Whether an identical decided candidate already exists.
 
         Check whether a candidate with the exact same assertion, raw_event_ids,
-        and subject_name already exists with status 'promoted'.
+        and subject_name already exists with a terminal decision status
+        (``promoted`` or ``rejected``).
 
         Used to prevent a duplicate candidate from being generated when an old
-        raw_event gets re-scanned after a process restart. Only the 'promoted'
-        status is checked, to avoid mistakenly skipping duplicate content that
-        is still 'pending' (test scenarios).
+        raw_event gets re-scanned after a process restart. Only terminal statuses
+        are matched: a ``pending`` candidate is deliberately not skipped (it may
+        still be under review), but a ``rejected`` one is, so a user's "ignore"
+        decision survives a restart instead of re-queueing the same item (#27).
         """
         if not raw_event_ids:
             return False
         ns = self._ns
         target_ids = frozenset(raw_event_ids)
-        # Only look up candidates matching assertion + subject_name + status='promoted'
+        # Only look up candidates matching assertion + subject_name + a terminal status.
         rows = self._conn.execute(
             (
                 f"SELECT raw_event_ids FROM {ns}_candidates "
-                "WHERE assertion = ? AND subject_name = ? AND status = 'promoted'"
+                "WHERE assertion = ? AND subject_name = ? AND status IN ('promoted', 'rejected')"
             ),
             (assertion, subject_name),
         ).fetchall()
