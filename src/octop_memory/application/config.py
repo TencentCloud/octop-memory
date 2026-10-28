@@ -24,7 +24,7 @@ DEFAULT_RECALL_CFG = {
     "default_corpus": "all",
     "raw_policy": "fallback",
     "host_files_policy": "include",
-    "layer_order": ["atom", "host_file", "page", "raw"],
+    "layer_order": ["atom", "host_file", "page", "episode", "raw"],
 }
 DEFAULT_CAPTURE_CFG = {
     "min_message_chars": 12,

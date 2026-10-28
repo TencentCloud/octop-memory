@@ -106,8 +106,6 @@ memory = Memory(
 
 Use deployment configuration for real credentials. SQLite isolates memory with table prefixes; PostgreSQL uses namespace-first keys in the shared `octop_memory` schema.
 
-Within one process, PostgreSQL instances with the same connection settings share a business pool (up to 8 connections) and a checkpoint/maintenance pool (up to 4), independent of agent count. Each pool allows at most 64 queued requests with a 30-second checkout timeout; saturation raises an explicit error. Idle pools can shrink to zero, and closing one instance leaves other instances usable. Budget separately for multiple processes, different connection settings, and the host's own database connections.
-
 ## CLI
 
 Install `[cli]`. Global options precede subcommands; use an explicit database and namespace when following examples.
@@ -129,6 +127,8 @@ octop-memory --help
 | `config`, `openclaw`, `backfill` | Configuration, integration, historical extraction |
 
 Run `<command> --help` for arguments. `db slim FILE` previews SQLite checkpoint deduplication; `--apply --offline` creates a backup and performs it without deleting history. Read [checkpoint compatibility and maintenance](CONTRIBUTING.md#checkpoint-维护) before migration or reader downgrade.
+
+Two lifecycle notes for hosts: `run_idle_maintenance()` covers prune / gc / nudge only — episode digest generation is host-scheduled, so call `Memory.generate_digest()` (or CLI `episode digest`) on your own cadence (daily recommended, weekly/monthly roll up from dailies). Episode recall is opt-in: default recall never reads the diary layer; use `MemoryService.search(..., corpus="episodes")` (or `memory_search` with `corpus="episodes"`) to query it explicitly.
 
 The dashboard is available from a source checkout with `[dashboard]` dependencies; its modules are currently excluded from the wheel. Installing `octop-memory[dashboard]` from PyPI alone does not provide the dashboard command.
 

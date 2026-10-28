@@ -34,7 +34,7 @@ from octop_memory.pipeline.extractor import CandidateExtractor
 from octop_memory.pipeline.page.regenerator import regenerate_dirty
 from octop_memory.pipeline.promotion import PromotionWorker
 from octop_memory.pipeline.promotion.llm_hook import ModelEscalationHook
-from octop_memory.pipeline.recall import recall_for_prompt
+from octop_memory.pipeline.recall import recall_episodes, recall_for_prompt
 from octop_memory.pipeline.recall.cache import RecallCache
 from octop_memory.ports.llm import LLMClient, NoopLLMClient, OpenAICompatClient
 from octop_memory.ports.llm._protocol import LLMClientError
@@ -229,13 +229,17 @@ class MemoryRuntime:
         our additive ``thread_id`` extension::
 
             { query: string!, maxResults?: int>=1, minScore?: number,
-              corpus?: "memory" | "wiki" | "all" | "sessions",
+              corpus?: "memory" | "wiki" | "all" | "sessions" | "episodes",
               thread_id?: string }
 
         ``thread_id`` enables the M4 thread features: co-reference
         resolution against the active-entity stack ("那个项目怎么样")
         and the per-thread recall cache. The TS shell passes the
         session key it received at tool-registration time.
+
+        ``corpus="episodes"`` reads the M5 diary layer directly via
+        :func:`recall_episodes`; the router never selects episodes on
+        its own, so the default corpora never surface them.
 
         We project our :class:`RecallResult` snippets onto::
 
@@ -262,7 +266,7 @@ class MemoryRuntime:
         # error — agents will pass it through).
         _ = params.get("minScore")
         corpus = params.get("corpus") or recall_cfg["default_corpus"]
-        if corpus not in {"memory", "wiki", "all", "sessions"}:
+        if corpus not in {"memory", "wiki", "all", "sessions", "episodes"}:
             raise ValueError(f"memory_search: unknown corpus {corpus!r}")
         thread_id = params.get("thread_id")
         if thread_id is not None and not isinstance(thread_id, str):
@@ -273,6 +277,23 @@ class MemoryRuntime:
 
         host_files_policy = recall_cfg["host_files_policy"]
         raw_policy = recall_cfg["raw_policy"]
+
+        # Layer 0: explicit diary-layer opt-in. The router never selects
+        # the episode source, so this corpus is the only path that
+        # surfaces M5 episodes through the public search surface.
+        if corpus == "episodes":
+            for snip in recall_episodes(self._memory, query, limit=max_results):
+                hits.append(
+                    {
+                        "path": _project_snippet_path(snip),
+                        "score": None,  # rerank scores not exported yet (D38 internal)
+                        "snippet": snip.text,
+                        "layer": snip.layer,
+                        "role_hint": snip.role_hint,
+                        "occurred_at": snip.timestamp_iso,
+                        "source_id": snip.source_id,
+                    }
+                )
 
         # Layer 1: SQLite-backed atom / raw recall. Skipped when
         # the agent explicitly asks for sessions/host files, or when the
@@ -1099,6 +1120,8 @@ def _project_snippet_path(snip: Any) -> str:
     timestamp_iso = getattr(snip, "timestamp_iso", "")
     if layer == "atom":
         return f"atom/{source_id}.md"
+    if layer == "episode":
+        return f"episode/{source_id}.md"
     # The current runtime recall path emits atom/raw snippets.
     date = (timestamp_iso[:_ISO_DATE_LEN]) if len(timestamp_iso) >= _ISO_DATE_LEN else "unknown"
     return f"raw/{date}/{source_id}.md"
