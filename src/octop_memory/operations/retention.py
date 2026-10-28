@@ -159,15 +159,9 @@ def reconcile_manual_documents(
         for atom in selected:
             match = matches.get(atom.id)
             current = memory.get_atom(atom.id)
-            if (
-                match is None
-                or match.get("uncertain")
-                or current is None
-                or current.deprecated_at is not None
-                or current.assertion != atom.assertion
-            ):
-                continue
             checked[atom.id] = hashes[atom.id]
+            if match is None or match.get("uncertain") or current is None or current.deprecated_at is not None or current.assertion != atom.assertion:
+                continue
             if match["relation"] == "duplicate":
                 duplicates[atom.id] = atom.assertion
             elif match["relation"] == "conflict":
