@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -60,6 +61,28 @@ The TS shell triggers ``extract`` after every agent_end, so the same
 session is re-extracted many times; tracking which raw event ids each
 session has already fed through the extractor makes repeat calls cheap
 (``no_new_events``) instead of burning an LLM call per turn."""
+
+EXTRACTED_IDS_META_KEY = "memory.extraction.extracted_ids.v1"
+"""SQLite meta key storing extracted-id sets across restarts.
+
+Prior to v1 this lived only in :attr:`_extracted_ids` (an in-process
+LRU); a restart wiped it and every session's history was fed back into
+the LLM, growing the prompt until LengthFinishReasonError (issue #25).
+"""
+
+_EXTRACT_BATCH_SIZE = 15
+"""Max raw events fed to the extractor in a single LLM call.
+
+Matches the per-batch cap used by ``reconcile_manual_documents`` at the
+LLM step but kept more conservative (15 vs 20) because raw events carry
+free-form user/assistant content, not structured atoms.
+"""
+
+_EXTRACT_MAX_CHARS_PER_BATCH = 80_000
+"""Char budget per extractor prompt. Overflows beyond this split into
+multiple LLM calls in :meth:`_extract_impl`, accumulating candidates so a
+single oversized session no longer burns a +100k-token prompt.
+"""
 
 
 SECRET_PATTERNS = [
@@ -603,27 +626,74 @@ class MemoryRuntime:
             return response
 
         extractor = CandidateExtractor(llm=self._llm, max_candidates=max_candidates, max_tokens=max_tokens)
-        result = extractor.extract(new_events, session_id=session_id)
-        response["warnings"] = result.warnings
-        response["cap_warning"] = result.cap_warning
-        response["llm_calls"] = result.llm_calls
-        if result.failure_reason is not None:
-            # Leave the events unmarked so a later call (next turn, or
-            # after the LLM endpoint recovers) retries them.
-            response["failure_reason"] = result.failure_reason
+
+        # ---- BATCHED EXTRACTION (issue #25) ----
+        # Feed raw events to the extractor in capped slices so that a single
+        # long session does not blow past the LLM output limit and fail with
+        # LengthFinishReasonError. Each batch commits its seen ids so a failure
+        # in a later batch does not roll back earlier progress.
+        all_candidates: list[Any] = []
+        batch_warnings: list[str] = []
+        cap_warnings: list[str] = []
+        total_llm_calls = 0
+        batch_failure: str | None = None
+        pending_ids: list[str] = []
+
+        def _batch_slice(remaining: list[Any]) -> list[Any]:
+            """Yield the next slice of raw events honouring both caps."""
+            slice_end = 0
+            slice_chars = 0
+            for ev in remaining:
+                ev_chars = len(ev.content) + 80  # event_id/type/timestamp/session_id overhead
+                if slice_end >= _EXTRACT_BATCH_SIZE or (
+                    slice_chars and slice_chars + ev_chars > _EXTRACT_MAX_CHARS_PER_BATCH
+                ):
+                    break
+                slice_chars += ev_chars
+                slice_end += 1
+            return remaining[:slice_end] or remaining[:1]  # always advance
+
+        remaining = list(new_events)
+        while remaining:
+            batch = _batch_slice(remaining)
+            batch_ids = {e.id for e in batch}
+            result = extractor.extract(batch, session_id=session_id)
+            total_llm_calls += result.llm_calls
+            batch_warnings.extend(result.warnings)
+            if result.cap_warning:
+                cap_warnings.append(result.cap_warning)
+            if result.failure_reason is not None:
+                # Commit only what was in earlier successful batches. This batch
+                # stays "pending" so the next extract() retry picks it up.
+                batch_failure = result.failure_reason
+                break
+            all_candidates.extend(result.candidates)
+            pending_ids.extend(batch_ids)
+            # Advance the cursor after each successful batch so a later failure
+            # does not replay already-extracted events.
+            seen.update(batch_ids)
+            self._persist_seen_ids(session_id)
+            remaining = [e for e in remaining if e.id not in batch_ids]
+
+        response["warnings"] = batch_warnings
+        response["cap_warning"] = cap_warnings[-1] if cap_warnings else None
+        response["llm_calls"] = total_llm_calls
+
+        if batch_failure is not None:
+            response["failure_reason"] = batch_failure
+            response["events_extracted"] = len(pending_ids)
             return response
 
-        seen.update(e.id for e in new_events)
-        response["candidates"] = len(result.candidates)
-        if result.candidates:
-            self._memory.add_candidates(result.candidates)
+        response["candidates"] = len(all_candidates)
+        if all_candidates:
+            self._memory.add_candidates(all_candidates)
 
-        if promote and result.candidates:
+        if promote and all_candidates:
             worker = PromotionWorker(
                 self._memory,
                 llm_hook=ModelEscalationHook(self._llm) if self._llm_configured else None,
             )
-            promo = worker.promote(result.candidates)
+            promo = worker.promote(all_candidates)
             response["promotion"] = {
                 "promoted": promo.promoted,
                 "merged": promo.merged,
@@ -722,15 +792,64 @@ class MemoryRuntime:
         return response
 
     def _seen_ids_for(self, session_id: str) -> set[str]:
-        """Fetch (or create) the extracted-id set for a session, LRU-evicting."""
+        """Fetch (or create) the extracted-id set for a session, LRU-evicting.
+
+        The set is sourced from the in-process LRU if present, otherwise from
+        the SQLite meta store (``EXTRACTED_IDS_META_KEY``, loaded once per
+        runtime lifetime), falling back to an empty set. This means a clean
+        restart does not replay every raw event through the LLM (issue #25).
+        """
         if session_id in self._extracted_ids:
             self._extracted_ids.move_to_end(session_id)
             return self._extracted_ids[session_id]
-        seen: set[str] = set()
-        self._extracted_ids[session_id] = seen
+        loaded = self._load_seen_ids_from_meta(session_id)
+        self._extracted_ids[session_id] = loaded
         while len(self._extracted_ids) > _MAX_TRACKED_SESSIONS:
             self._extracted_ids.popitem(last=False)
-        return seen
+        return loaded
+
+    def _load_seen_ids_from_meta(self, session_id: str) -> set[str]:
+        """Restore the extracted-id set for *session_id* from SQLite meta."""
+        try:
+            blob = self._memory.get_meta(EXTRACTED_IDS_META_KEY)
+        except Exception:
+            logger.warning("extract cursor: could not read meta %s", EXTRACTED_IDS_META_KEY, exc_info=True)
+            return set()
+        if not blob:
+            return set()
+        try:
+            parsed = json.loads(blob)
+        except (TypeError, ValueError):
+            logger.warning("extract cursor: meta %s is not valid JSON", EXTRACTED_IDS_META_KEY)
+            return set()
+        if not isinstance(parsed, dict):
+            return set()
+        raw = parsed.get(session_id)
+        if isinstance(raw, list):
+            return {str(x) for x in raw}
+        return set()
+
+    def _persist_seen_ids(self, session_id: str) -> None:
+        """Persist the extracted-id set for *session_id* to SQLite meta.
+
+        Called after every successful batch in :meth:`_extract_impl` so the
+        cursor survives a process restart and subsequent extract() calls do
+        not re-feed already-extracted raw events (issue #25).
+        """
+        try:
+            blob = self._memory.get_meta(EXTRACTED_IDS_META_KEY) or "{}"
+            parsed = json.loads(blob) if blob else {}
+        except Exception:
+            logger.warning("extract cursor: cannot decode meta, resetting", exc_info=True)
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        seen = self._extracted_ids.get(session_id) or set()
+        parsed[session_id] = list(seen)
+        try:
+            self._memory.set_meta(EXTRACTED_IDS_META_KEY, json.dumps(parsed, ensure_ascii=False))
+        except Exception:
+            logger.warning("extract cursor: set_meta failed, will retry next batch", exc_info=True)
 
     def _recall_cfg(self) -> dict[str, Any]:
         return {**DEFAULT_RECALL_CFG, **self._config.recall}
