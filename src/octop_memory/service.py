@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 
 from octop_memory.application.config import MemoryRuntimeConfig
@@ -52,7 +51,7 @@ class MemoryService:
         host: the ``RawEvent.host`` tag stamped on captured events
             (e.g. ``"octop-harness"`` / ``"hermes"``).
         manual_documents_provider: optional backend-aware reader of USER.md and
-            MEMORY.md, used after saves/promotions, never per prompt turn.
+            MEMORY.md. Background review reads it; ``save`` does not.
     """
 
     def __init__(
@@ -74,6 +73,7 @@ class MemoryService:
             llm=llm,
             manual_documents_provider=manual_documents_provider,
         )
+        self._manual_review_scheduler: Callable[[], None] | None = None
 
     @property
     def memory(self) -> Memory:
@@ -111,16 +111,31 @@ class MemoryService:
             manual_context=manual_context,
         )
 
+    def set_manual_review_scheduler(self, scheduler: Callable[[], None] | None) -> None:
+        """Register a non-blocking hook invoked after a fact is stored.
+
+        The hook must return immediately. Document comparison belongs on the
+        host's background worker, not on the call that stored the fact.
+        """
+        self._manual_review_scheduler = scheduler
+
     def reconcile_manual_documents(
-        self, documents: dict[str, str], *, is_current: Callable[[], bool] | None = None
+        self,
+        documents: dict[str, str],
+        *,
+        is_current: Callable[[], bool] | None = None,
+        max_atoms: int = 100,
     ) -> dict[str, Any]:
         """Compare user-owned documents with atoms; quarantine conflicts for review.
 
         The caller supplies current file contents, never a stale chat snapshot.
         ``is_current`` can cancel applying a plan if files changed during analysis.
         Partial/unavailable semantic checks are explicit in the result.
+        ``max_atoms`` caps this call; the host's background drain uses a smaller batch.
         """
-        return self._runtime.reconcile_manual_documents({"documents": documents}, is_current=is_current)
+        return self._runtime.reconcile_manual_documents(
+            {"documents": documents, "maxAtoms": max_atoms}, is_current=is_current
+        )
 
     def search(
         self,
@@ -171,20 +186,16 @@ class MemoryService:
         This is the in-process equivalent of a host exposing a
         ``memory_save`` tool. It uses :meth:`Memory.store`, so manual saves
         enter the canonical atom/tree path instead of being kept only as raw
-        transcript events.
+        transcript events. Comparison with USER.md and MEMORY.md is not done
+        here; a registered scheduler is notified so the host can review later.
         """
         node = self._memory.store(content, topic=topic, metadata=metadata)
-        review = self._runtime.review_new_memory()
-        if review is not None:
-            atom = self._memory.get_atom(node.atom_id) if node.atom_id else None
-            node = replace(
-                node,
-                metadata={
-                    **node.metadata,
-                    "manual_document_review": review,
-                    "manual_document_conflict": bool(atom and atom.deprecated_at),
-                },
-            )
+        scheduler = self._manual_review_scheduler
+        if scheduler is not None:
+            try:
+                scheduler()
+            except Exception:
+                logger.warning("manual review scheduler failed", exc_info=True)
         return node
 
     def capture_turn(
