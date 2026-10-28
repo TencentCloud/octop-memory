@@ -385,12 +385,18 @@ class OctopMemoryProvider(MemoryProvider):
         capture_cfg: dict[str, Any] = {"min_message_chars": 0, "host_files_watcher": True}
         if isinstance(self._config.get("capture"), dict):
             capture_cfg.update(self._config["capture"])
+        # ``llm`` and ``extraction`` config blocks enable model-assisted
+        # extraction and episode summarisation. They were silently dropped
+        # (issue #9) — pass them through so Hermes can opt into LLM-backed
+        # pipeline stages.
         return MemoryRuntimeConfig(
             profile=self._config.get("profile") if isinstance(self._config.get("profile"), str) else None,
             mode="self-hosted",
             recall=self._config.get("recall") if isinstance(self._config.get("recall"), dict) else {},
             capture=capture_cfg,
             privacy=self._config.get("privacy") if isinstance(self._config.get("privacy"), dict) else {},
+            llm=self._config.get("llm") if isinstance(self._config.get("llm"), dict) else {},
+            extraction=self._config.get("extraction") if isinstance(self._config.get("extraction"), dict) else {},
         )
 
     def _build_host_files_index(self, *, db_path: Path, namespace: str) -> HostFilesIndex | None:
