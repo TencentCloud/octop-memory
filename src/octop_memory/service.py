@@ -119,6 +119,16 @@ class MemoryService:
         """
         self._manual_review_scheduler = scheduler
 
+    def review_new_memory(self, *, max_atoms: int = 20) -> dict[str, Any] | None:
+        """Review one batch against current owner documents on a host worker.
+
+        This synchronous operation may call the model. Hosts must run it
+        outside the chat turn, for example from the registered scheduler or
+        a maintenance worker. Return the audit report, or ``None`` when no
+        document provider is configured or its documents are empty.
+        """
+        return self._runtime.review_new_memory(max_atoms=max_atoms)
+
     def reconcile_manual_documents(
         self,
         documents: dict[str, str],
