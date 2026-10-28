@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+- 重新扫描同一批 raw 事件时，已「忽略」（rejected）的候选不再被重新入队：去重现在同时匹配 promoted 与 rejected 的终态决定（pending 仍不跳过，仍在评审中），使「忽略」在重启 / 重提炼后保持（#27）。
 ## [1.0.2] - 2026-10-16
 
 ### 新增

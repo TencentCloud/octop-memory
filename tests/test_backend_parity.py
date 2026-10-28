@@ -821,7 +821,7 @@ class TestCandidateParity:
         backend.save_candidate(_make_candidate(id="miss", assertion="buy more coffee"))
         assert {c.id for c in backend.search_candidates("postgres")} == {"hit"}
 
-    def test_find_duplicate_only_matches_promoted(self, backend: Any) -> None:
+    def test_find_duplicate_matches_terminal_decisions_not_pending(self, backend: Any) -> None:
         cand = _make_candidate(status="pending")
         backend.save_candidate(cand)
         # Identical `pending` content must not count, or a re-extract would
@@ -830,6 +830,17 @@ class TestCandidateParity:
 
         backend.update_candidate_status("cand-1", status="promoted")
         assert backend.find_duplicate_candidate(cand.assertion, ["raw-1"], cand.subject_name) is True
+
+    def test_find_duplicate_matches_rejected_so_ignore_survives_restart(self, backend: Any) -> None:
+        cand = _make_candidate(status="pending")
+        backend.save_candidate(cand)
+        backend.update_candidate_status("cand-1", status="rejected")
+
+        # A user's "ignore" is terminal: re-scanning the same evidence must not
+        # re-queue the same candidate (issue #27).
+        assert backend.find_duplicate_candidate(cand.assertion, ["raw-1"], cand.subject_name) is True
+        # Different provenance is still a fresh candidate the user can review.
+        assert backend.find_duplicate_candidate(cand.assertion, ["raw-2"], cand.subject_name) is False
 
     def test_find_duplicate_needs_the_same_raw_event_set(self, backend: Any) -> None:
         cand = _make_candidate(status="promoted", raw_event_ids=["raw-1", "raw-2"])
