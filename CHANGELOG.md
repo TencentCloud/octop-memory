@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- EntityPage 再生成写回校验页面修订号，拒绝覆盖模型调用期间的用户编辑、事实 dirty 标记或更新的生成结果；迟到的生成失败不会重新污染已成功的新页。SQLite/PostgreSQL schema 2 自动补充修订列，SQLite 并发首次迁移使用短写事务；原有 summary_version 含义及不带条件的旧页接口调用保持兼容。
+
 ## [1.0.2] - 2026-10-16
 
 ### 新增

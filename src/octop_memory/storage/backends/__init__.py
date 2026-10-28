@@ -428,7 +428,8 @@ class MemoryBackend(Protocol):
         If no page row exists yet (first promotion against this entity),
         a stub row is inserted with empty ``summary_markdown`` /
         ``headline`` so the cron worker has something to materialize.
-        Idempotent — safe to call repeatedly.
+        Repeated invalidation advances ``mutation_version`` even when
+        already dirty, so an in-flight generation cannot clear new work.
         """
         ...
 
@@ -440,13 +441,16 @@ class MemoryBackend(Protocol):
         headline: str,
         topics: list[str],
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         """Store a successful entity-page regeneration.
 
         Apply a successful regen: replace summary fields, clear dirty,
         bump ``summary_version``, reset ``regen_attempt_count``.
 
-        Returns ``True`` if the row existed and was updated.
+        Returns ``True`` if the row existed and was updated. When supplied,
+        ``expected_mutation_version`` must match in the same UPDATE;
+        otherwise no fields change and ``False`` is returned.
         """
         ...
 
@@ -455,6 +459,7 @@ class MemoryBackend(Protocol):
         entity_id: str,
         *,
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         """Record a failed entity-page regeneration.
 
@@ -462,7 +467,10 @@ class MemoryBackend(Protocol):
         ``regen_attempt_count``, leave ``summary_markdown`` /
         ``headline`` untouched (D35-A — keep old version on failure).
 
-        Returns ``True`` if the row existed.
+        Returns ``True`` if the row existed and its optional expected
+        mutation version matched. A stale attempt leaves the page untouched.
+        Failure bookkeeping does not advance ``mutation_version``; a
+        valid generation based on unchanged inputs can still commit.
         """
         ...
 

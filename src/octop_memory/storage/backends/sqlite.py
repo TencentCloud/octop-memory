@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Stamped into {ns}_meta on every open. External tools (portable doctor,
 # portable list-sources) read it to distinguish a healthy octop-memory
 # store from a foreign/corrupt SQLite file. Bump when the DDL changes shape.
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 """Wait this long on a locked connection before raising ``database is locked``.
 
@@ -318,6 +318,7 @@ class SqliteMemoryBackend:
                 dirty INTEGER NOT NULL DEFAULT 1,
                 regen_attempt_count INTEGER NOT NULL DEFAULT 0,
                 summary_version INTEGER NOT NULL DEFAULT 0,
+                mutation_version INTEGER NOT NULL DEFAULT 0,
                 last_regen_at TEXT,
                 last_user_edit_at TEXT,
                 created_at TEXT NOT NULL,
@@ -620,6 +621,16 @@ class SqliteMemoryBackend:
             self._commit()
         self._conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {ns}_memory_nodes_atom ON {nodes_table}(atom_id)")
         self._commit()
+
+        page_table = f"{ns}_entity_pages"
+        # Schema initialization only: take the write reservation before
+        # inspecting columns, so independent openers cannot both ALTER.
+        # The connection context commits/rolls back this short migration.
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            page_cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({page_table})").fetchall()}
+            if "mutation_version" not in page_cols:
+                self._conn.execute(f"ALTER TABLE {page_table} ADD COLUMN mutation_version INTEGER NOT NULL DEFAULT 0")
 
         # CJK FTS segmentation (fts_text v2): rebuild triggers + index
         # for databases created before the segmentation fix.
@@ -1719,6 +1730,7 @@ class SqliteMemoryBackend:
                     dirty = excluded.dirty,
                     regen_attempt_count = excluded.regen_attempt_count,
                     summary_version = excluded.summary_version,
+                    mutation_version = mutation_version + 1,
                     last_regen_at = excluded.last_regen_at,
                     last_user_edit_at = excluded.last_user_edit_at,
                     updated_at = excluded.updated_at
@@ -1782,33 +1794,22 @@ class SqliteMemoryBackend:
 
     @locked_sqlite_operation
     def mark_entity_page_dirty(self, entity_id: str, *, when: datetime) -> None:
-        """Mark dirty (or insert a stub row + dirty if absent). Idempotent."""
+        """Mark dirty and advance the revision, or insert a dirty stub."""
         ns = self._ns
-        cur = self._conn.execute(
-            f"""UPDATE {ns}_entity_pages
-                SET dirty = 1, updated_at = ?
-                WHERE entity_id = ?""",
-            (when.isoformat(), entity_id),
-        )
-        if cur.rowcount == 0:
-            # No existing row → insert a dirty stub. Page id is just
-            # the entity_id with a stable prefix so collisions are
-            # impossible across entities.
-            self._conn.execute(
-                f"""INSERT INTO {ns}_entity_pages
+        self._conn.execute(
+            f"""INSERT INTO {ns}_entity_pages
                     (id, entity_id, summary_markdown, headline, topics,
                      dirty, regen_attempt_count, summary_version,
                      last_regen_at, last_user_edit_at,
                      created_at, updated_at)
                     VALUES (?, ?, '', '', '[]', 1, 0, 0, NULL, NULL, ?, ?)
+                    ON CONFLICT(entity_id) DO UPDATE SET
+                        dirty = 1,
+                        mutation_version = mutation_version + 1,
+                        updated_at = excluded.updated_at
                 """,
-                (
-                    f"page_{entity_id}",
-                    entity_id,
-                    when.isoformat(),
-                    when.isoformat(),
-                ),
-            )
+            (f"page_{entity_id}", entity_id, when.isoformat(), when.isoformat()),
+        )
         self._commit()
 
     @locked_sqlite_operation
@@ -1820,6 +1821,7 @@ class SqliteMemoryBackend:
         headline: str,
         topics: list[str],
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         ns = self._ns
         cur = self._conn.execute(
@@ -1830,9 +1832,11 @@ class SqliteMemoryBackend:
                     dirty = 0,
                     regen_attempt_count = 0,
                     summary_version = summary_version + 1,
+                    mutation_version = mutation_version + 1,
                     last_regen_at = ?,
                     updated_at = ?
-                WHERE entity_id = ?""",
+                WHERE entity_id = ?
+                  AND (? IS NULL OR mutation_version = ?)""",
             (
                 summary_markdown,
                 headline,
@@ -1840,6 +1844,8 @@ class SqliteMemoryBackend:
                 when.isoformat(),
                 when.isoformat(),
                 entity_id,
+                expected_mutation_version,
+                expected_mutation_version,
             ),
         )
         self._commit()
@@ -1851,6 +1857,7 @@ class SqliteMemoryBackend:
         entity_id: str,
         *,
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         ns = self._ns
         cur = self._conn.execute(
@@ -1858,8 +1865,9 @@ class SqliteMemoryBackend:
                 SET regen_attempt_count = regen_attempt_count + 1,
                     dirty = 1,
                     updated_at = ?
-                WHERE entity_id = ?""",
-            (when.isoformat(), entity_id),
+                WHERE entity_id = ?
+                  AND (? IS NULL OR mutation_version = ?)""",
+            (when.isoformat(), entity_id, expected_mutation_version, expected_mutation_version),
         )
         self._commit()
         return cur.rowcount > 0
@@ -1877,6 +1885,7 @@ class SqliteMemoryBackend:
             f"""UPDATE {ns}_entity_pages
                 SET summary_markdown = ?,
                     summary_version = summary_version + 1,
+                    mutation_version = mutation_version + 1,
                     last_user_edit_at = ?,
                     updated_at = ?
                 WHERE entity_id = ?""",
@@ -2398,6 +2407,7 @@ class SqliteMemoryBackend:
             dirty=bool(row["dirty"]),
             regen_attempt_count=int(row["regen_attempt_count"]),
             summary_version=int(row["summary_version"]),
+            mutation_version=int(row["mutation_version"]),
             last_regen_at=datetime.fromisoformat(row["last_regen_at"]) if row["last_regen_at"] else None,
             last_user_edit_at=datetime.fromisoformat(row["last_user_edit_at"]) if row["last_user_edit_at"] else None,
             created_at=datetime.fromisoformat(row["created_at"]),

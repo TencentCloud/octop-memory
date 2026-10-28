@@ -16,6 +16,15 @@
 
 ## 当前任务
 
+### EntityPage 再生成的旧快照覆盖
+
+- **状态 / 场景**：实现、专项审查修复与完整 Linux 门禁通过，准备本地提交交付，尚未推送；以 `develop` 345c600 为基线。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
+- **范围与验收**：SQLite/PostgreSQL 同步增加 mutation_version，正文写入和 dirty 失效递增，失败计数不推进；生成成功/失败写回均在同条 SQL 核对读取版本。summary_version 含义保留，模型调用无长事务；旧快照拒绝写入、不伪造成功 journal，后续显式重试可成功。
+- **方案 / 假设**：事实变化使用既有 mark_entity_page_dirty 调用链；绕过该调用链的低层 Atom 写入不新增自动治理。已有页面自动补零版本列；低层 apply 方法新增可选条件参数，旧调用保持原行为。
+- **验证**：原实现 12 项交错用例失败；后续兼容/并发迁移先 3 failed / 2 passed，专项审查新增五项先全部失败。当前 `PageRegenerationConcurrency / PageRevisionBootstrap / LegacyPageBackend / ConcurrentPageRevisionMigration` 共 28 passed，真实 PG 无 skip。Ubuntu / Python 3.12.3 / 专用 PostgreSQL 16.15 执行 `make all RUN='<venv-python> -m'`，format/lint/strict mypy 通过，1533 passed / 3 skipped。跳过为 dashboard extra 和两个 Hermes checkout E2E；Windows 相关定向回归与文档/架构检查均通过。
+- **兼容 / 迁移**：普通调用保留旧 backend 签名；显式条件不支持时保留错误，不降级重放。SQLite BEGIN IMMEDIATE 保护检查/加列，PG 初始化锁内先查列、仅缺列时 ALTER；schema 标记 2，旧页正文和 summary_version 保留。第三方 backend 和所有写入进程仍须维护新契约，见 KNOWN_RISKS。
+- **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。本地提交与补丁以完整门禁为准交付，用户按安排向 develop 提 PR；Python 3.13 与 GitHub-hosted CI 尚待运行。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
+
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 
 - **状态 / 场景**：三个仓库实现、验证和配套宿主提交已完成。用户明确要求 USER.md 与 MEMORY.md 只由用户修改；冲突时手动文档优先，通知用户并降级到 Candidate 更新 octop-memory。

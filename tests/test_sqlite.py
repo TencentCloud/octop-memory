@@ -361,6 +361,50 @@ class TestSharedConnectionLifecycle:
             backend.get_meta("committed")
 
 
+class TestConcurrentPageRevisionMigration:
+    def test_independent_backends_can_open_the_same_legacy_store(self, tmp_path: Path, monkeypatch) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        db_path = tmp_path / "legacy_page.sqlite"
+        original = SqliteMemoryBackend(namespace="legacy", db_path=db_path)
+        try:
+            memory = Memory(namespace="legacy", backend=original)
+            _, entity, _ = memory.create_atom("Atlas uses SQLite", entity_name="Atlas", entity_type="Project")
+            memory.apply_entity_page_user_edit(entity.id, summary_markdown="## My Notes\nKEEP ME")
+            original._conn.execute("ALTER TABLE legacy_entity_pages DROP COLUMN mutation_version")
+            original._conn.commit()
+            previous = original._conn.execute(
+                "SELECT summary_markdown, summary_version FROM legacy_entity_pages"
+            ).fetchone()
+        finally:
+            original.close()
+
+        workers = 4
+        barrier = threading.Barrier(workers)
+        migrate = SqliteMemoryBackend._migrate_schema
+
+        def migrate_together(self: SqliteMemoryBackend) -> None:
+            barrier.wait(timeout=10)
+            migrate(self)
+
+        monkeypatch.setattr(SqliteMemoryBackend, "_migrate_schema", migrate_together)
+
+        def open_legacy_store() -> None:
+            connection = SqliteMemoryBackend(namespace="legacy", db_path=db_path)
+            try:
+                page = connection.get_entity_page(entity.id)
+                assert page is not None
+                assert (page.summary_markdown, page.summary_version) == tuple(previous)
+                assert page.mutation_version == 0
+            finally:
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(open_legacy_store) for _ in range(workers)]
+            for future in futures:
+                future.result(timeout=20)
+
+
 posix_only = pytest.mark.skipif(
     not os.path.isdir("/proc"),
     reason="counts fds via /proc",

@@ -5,7 +5,7 @@
 | 核对项 | 当前约束 / 代码依据 |
 |---|---|
 | 代码架构 | README 展示源码目录职责、宿主调用链和长期记忆数据流；详细入口见 PROJECT_MAP |
-| Candidate / 页面 | 候选可由 promotion 自动处理，不等于全量人工审核；dirty page 按触发再生成，Episode 从 raw 独立提炼 |
+| Candidate / 页面 | 候选可由 promotion 自动处理，不等于全量人工审核；dirty page 按触发再生成，mutation_version 条件写回拒绝旧快照；summary_version 仍只随正文生成/编辑增加，Episode 从 raw 独立提炼 |
 | 项目命名 | `octop-memory` / `octop_memory` / `octopmemory`；Python Agent 宿主名为 `octop-harness`；默认目录与 PG schema 改名，升级入口链接集成指南 |
 | 快速开始 | core 不要求可选依赖；MemoryService.recall 返回 snippets/rendered；`core.py`、`service.py` |
 | 事实与树 | AtomCard 是事实真源，leaf 是引用；`core.py`、`storage/backends/` |

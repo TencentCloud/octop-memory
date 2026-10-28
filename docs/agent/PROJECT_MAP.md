@@ -83,6 +83,14 @@ octop-harness 主路径使用 `on_failure="error"`，失败写入 checkpoint tas
 `root → branch → leaf` 是组织树，leaf 用 `atom_id` 投影事实正文，不复制第二份事实。
 人工 correction 创建 successor、active-only supersede 旧 atom 并写 `user_edit` journal；
 不伪造新对话证据。page regeneration 保护 `## My Notes`，绝对事件时间统一为 aware UTC。
+页面另有 storage 管理的 `mutation_version`：正文 upsert、dirty 失效、人工编辑及生成成功时推进；
+`summary_version` 仍只表示正文生成/编辑版本。regenerator 在读取 Atom 前取得页面修订号，
+成功与失败写回均使用 backend 条件 UPDATE；旧快照返回 `stale_snapshot` 或保留原失败原因，
+记录失败 journal，但不改变较新页面的正文、dirty 或失败次数。当前修订的失败只更新重试状态，
+不推进 mutation_version，避免使同输入的有效并发结果失效。模型调用期间不持有数据库事务。
+无页面时先创建 dirty stub，条件写入失败后不再无条件 upsert。事实变化沿用既有 dirty 调用链。
+SQLite/PG 的 schema 2 自动补默认零修订列；SQLite 先 BEGIN IMMEDIATE 再检查并添加列，PG 在初始化 advisory lock 内检查列，仅缺列时执行 ALTER，避免已迁移库的初始化独占锁。
+Memory 的普通页 apply 调用保留旧 backend 签名，显式版本条件才转发新参数；自动再生成要求 backend 支持该能力，错误不降级成无条件写入。
 
 ### 读取与隔离
 
