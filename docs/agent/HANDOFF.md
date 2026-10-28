@@ -16,6 +16,15 @@
 
 ## 当前任务
 
+### Windows 宿主文件 glob 与 portable 测试隔离
+
+- **状态 / 问题**：`/tmp/*.md` 在 Windows 有 root 而无 drive，`is_absolute()` 为 false，进入 `Path.glob` 后抛错；`C:topics/*.md` 同样不是安全相对 glob。portable 测试 fixture 假定 `str(Path)` 使用 `/`，Windows 上未隔离默认用户目录。
+- **方案 / 范围**：`application/host_files.py` 用 `Path.anchor` 拒绝带锚点模式；以 PureWindowsPath 在任意平台覆盖 rooted、drive-relative、absolute、UNC。fixture 按 `Path.parts` 展开 `~`，只修改测试隔离，不改变迁移扫描逻辑或数据。
+- **⚠️ 召回/写入路径变更**：仅影响 host Markdown 文件 allowlist：不安全模式在 glob 前跳过，安全相对模式照常索引；source、排序、记忆写入与双 backend contract 不变。
+- **验证**：修改前相关测试 6 failed / 19 passed；修改后 25 passed。`make all` format/lint/strict mypy 通过，1348 passed / 165 skipped；skip 包含不可用的真实 PostgreSQL、Hermes checkout、dashboard extra 与平台特定环境，不表示这些场景验收通过。
+- **接续**：PROJECT_MAP、TEST_MATRIX 和 CHANGELOG 已同步；待维护者审阅，无数据迁移。
+
+
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 
 - **状态 / 场景**：三个仓库实现、验证和配套宿主提交已完成。用户明确要求 USER.md 与 MEMORY.md 只由用户修改；冲突时手动文档优先，通知用户并降级到 Candidate 更新 octop-memory。

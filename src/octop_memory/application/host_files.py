@@ -495,7 +495,7 @@ def _safe_include_globs(patterns: Iterable[str]) -> Iterable[str]:
         if not pattern or not pattern.endswith(".md"):
             continue
         path = Path(pattern)
-        if path.is_absolute():
+        if path.anchor:
             continue
         parts = path.parts
         if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):

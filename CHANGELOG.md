@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Windows 宿主文件扫描忽略带根或驱动器的 allowlist glob，避免 rooted pattern 抛错；portable source 测试正确隔离 Windows 用户目录。
+
 ## [1.0.2] - 2026-10-16
 
 ### 新增
