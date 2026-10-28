@@ -102,6 +102,12 @@ def route(
     #
     # vector: added automatically when Memory has a vector_index configured.
     base_sources: list[str] = ["atom", "raw"]
+    # Episode recall (L2.5): scored by rerank.py (prior 0.65, between
+    # raw=0.50 and atom=1.00) and gathered by multi_source::_gather_episodes,
+    # but was never selected by the router. Enable it as a default source so
+    # diary-style summaries are reachable. Kept after raw because raw carries
+    # the freshest facts; episodes are durable but summarized (issue #18).
+    base_sources.append("episode")
     if resolved:
         base_sources.insert(1, "page_headline")  # after atom, before raw
     if memory.vector_index is not None:
