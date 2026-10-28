@@ -133,7 +133,7 @@ def test_save_persists_without_waiting_for_manual_review(memory: Memory) -> None
     assert llm.calls == 0
     assert "manual_document_review" not in node.metadata
     assert len(memory.list_atoms()) == 1
-    review = service._runtime.review_new_memory()
+    review = service.review_new_memory()
     assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
 
@@ -160,23 +160,45 @@ def test_automatic_promotion_leaves_manual_review_to_the_host(memory: Memory) ->
     result = service._runtime.promote({"regen_pages": False})
     assert "manual_documents" not in result
     assert memory.list_atoms()
-    review = service._runtime.review_new_memory()
+    review = service.review_new_memory()
     assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
 
 
-def test_background_review_checks_one_batch(memory: Memory) -> None:
+@pytest.mark.parametrize("max_atoms", [7, 20])
+def test_background_review_checks_one_batch(memory: Memory, max_atoms: int) -> None:
     for number in range(25):
         memory.store(f"Project {number} has a verified troubleshooting history.")
     llm = ManualLLM()
     service = MemoryService(
         memory, llm=llm, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
     )
-    report = service._runtime.review_new_memory(max_atoms=20)
+    report = service.review_new_memory(max_atoms=max_atoms)
     assert report is not None
     assert llm.calls == 1
     assert report["status"] == "partial"
-    assert report["remaining"] == 5
+    assert report["remaining"] == 25 - max_atoms
+
+
+@pytest.mark.parametrize("documents", [None, {"USER.md": "", "MEMORY.md": ""}])
+def test_background_review_without_manual_documents_is_a_noop(memory: Memory, documents: Any) -> None:
+    llm = ManualLLM()
+    service = MemoryService(
+        memory, llm=llm, manual_documents_provider=(lambda: documents) if documents is not None else None
+    )
+    service.save("The user prefers English replies.")
+    assert service.review_new_memory() is None
+    assert llm.calls == 0
+    assert len(memory.list_atoms()) == 1
+
+
+def test_background_review_without_a_model_preserves_the_fact(memory: Memory) -> None:
+    service = MemoryService(memory, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."})
+    service.save("The user prefers English replies.")
+    report = service.review_new_memory()
+    assert report is not None and report["status"] == "unavailable"
+    assert len(memory.list_atoms()) == 1
+    assert not memory.list_candidates(status="conflict")
 
 
 def test_failed_comparison_is_deferred_until_later(memory: Memory) -> None:
