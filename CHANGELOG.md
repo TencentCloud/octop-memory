@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+- 候选提炼按单批事件数（默认 100）与字符预算（默认 20,000）分批调用模型，不再把整个 session 的事件塞进一次请求；此前长会话积压会让 prompt 超出上下文、以「长度截断 / 超时」失败（#25）。
+- 「已提炼」游标写入 `{ns}_meta`（`extracted_ids/v1/<session>`），重启后从 meta 恢复，不再整段重跑；持久化失败只告警、不影响提炼（#25）。
 ## [1.0.2] - 2026-10-16
 
 ### 新增
