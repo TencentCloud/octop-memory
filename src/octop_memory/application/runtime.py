@@ -606,13 +606,17 @@ class MemoryRuntime:
             response["failure_reason"] = result.failure_reason
             return response
 
-        seen.update(e.id for e in new_events)
-        # Persist the cursor so a restart resumes incrementally instead of
-        # re-feeding the whole session backlog (#25).
-        self._persist_seen_ids(session_id, seen)
+        # Candidates and the extraction cursor must commit in ONE transaction.
+        # Previously the cursor was persisted first, so a failed candidate write
+        # left those events marked as extracted: they were skipped forever and a
+        # plain retry could not recover them (#25 review, P1).
+        next_seen = seen | {e.id for e in new_events}
+        with self._memory.backend.transaction():
+            if result.candidates:
+                self._memory.add_candidates(result.candidates)
+            self._persist_seen_ids(session_id, next_seen, strict=True)
+        seen.update(next_seen)
         response["candidates"] = len(result.candidates)
-        if result.candidates:
-            self._memory.add_candidates(result.candidates)
 
         if promote and result.candidates:
             worker = PromotionWorker(
@@ -749,16 +753,25 @@ class MemoryRuntime:
             return set()
         return {item for item in data if isinstance(item, str)}
 
-    def _persist_seen_ids(self, session_id: str, seen: set[str]) -> None:
-        """Persist the extracted-id set so a restart resumes incrementally."""
+    def _persist_seen_ids(self, session_id: str, seen: set[str], *,
+                          strict: bool = False) -> None:
+        """Persist the extracted-id set so a restart resumes incrementally.
+
+        ``strict`` is used on the incremental extraction path: there the write
+        must fail loudly so the surrounding transaction also rolls back the
+        candidate writes, instead of advancing the cursor past events that were
+        never stored (#25 review).
+        """
         try:
             self._memory.set_meta(
                 f"{_EXTRACTED_IDS_META_PREFIX}{session_id}",
                 json.dumps(sorted(seen), ensure_ascii=False),
             )
-        except REPORTABLE_ERRORS:  # pragma: no cover - observability, never load-bearing
-            # Persistence is an optimization; a write failure must not fail
-            # extraction (the in-memory set still advances this process).
+        except REPORTABLE_ERRORS:
+            if strict:
+                raise
+            # Non-strict callers treat persistence as an optimization: the
+            # in-memory set still advances, and a restart simply re-extracts.
             logger.warning("failed to persist extracted ids", exc_info=True)
 
     def _recall_cfg(self) -> dict[str, Any]:
