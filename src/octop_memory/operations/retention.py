@@ -159,8 +159,17 @@ def reconcile_manual_documents(
         for atom in selected:
             match = matches.get(atom.id)
             current = memory.get_atom(atom.id)
+            # 只有"确实比较过"的原子才推进游标。三种情况必须分开：
+            #   1) match is None  → 没比较（LLM 异常 / 不可用 / 批次中断），不能记，
+            #      否则一次瞬时故障会把事实永久标成已核对（假绿）。
+            #   2) 事实已变/已废止 → 需要重审，不能记。
+            #   3) match.uncertain → 比较过但结论不确定，记下游标避免无限重审（本 PR 的初衷）。
+            if match is None:
+                continue
+            if current is None or current.deprecated_at is not None or current.assertion != atom.assertion:
+                continue
             checked[atom.id] = hashes[atom.id]
-            if match is None or match.get("uncertain") or current is None or current.deprecated_at is not None or current.assertion != atom.assertion:
+            if match.get("uncertain"):
                 continue
             if match["relation"] == "duplicate":
                 duplicates[atom.id] = atom.assertion
