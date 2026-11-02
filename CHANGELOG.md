@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - Windows 宿主文件扫描忽略带根或驱动器的 allowlist glob，避免 rooted pattern 抛错；portable source 测试正确隔离 Windows 用户目录。
+- **Hermes 适配器不再丢弃 `llm` / `extraction` 配置**：`_bridge_config()` 现在按桥解析器的同一语义把两个配置块转发进 `MemoryRuntimeConfig`，`$HERMES_HOME/octopmemory.json` 里的模型端点与抽取开关能真正抵达运行时；非对象值按缺省处理，坏配置不会挡住启动，`stats` 输出依旧不回显 `api_key`。此前 Hermes 宿主永远落到 `NoopLLMClient`，模型辅助抽取静默不可用（无 candidate/atom，也不报错）（#9）。
 - 补齐 `MemoryService.review_new_memory(max_atoms=20)` 公共入口，修复宿主保存后和定时维护静默跳过手动文档审核的问题；保存仍不等待模型。新增真实 octop-harness 中间件与 SQLite/PostgreSQL 的跨包测试，并纳入 CI 和发布检查（TencentCloud/Octop#2358）。
 
 ## [1.0.2] - 2026-10-16
