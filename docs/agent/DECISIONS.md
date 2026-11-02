@@ -215,3 +215,22 @@ memory 接收当前文件作治理，不负责文件读写或刷新提示词；�
 采纳检查最后对账版本，宿主附当前文档可拦截未重新对账的变化。使用既有 Service/Bridge/
 retention/promotion/recall 模块及 backend contract，不建新 schema、全文索引或独立加载器。
 SQLite/真实 PG 同组测试验证事务、幂等、证据保留及 prompt 过滤。
+
+## ADR-043：页面生成使用独立变更修订进行条件写回（Proposed）
+
+`summary_version` 只随成功生成与人工编辑变化，不能检测已 dirty 页面上的新事实；时间戳也可能相同。
+新增 storage 管理的 `mutation_version`，正文写入和 dirty 标记时原子递增，不改变 summary_version 的既有含义。
+regenerator 先确保 stub 存在，再读取修订、笔记和 Atom，模型调用在事务外执行。
+写回成功或失败状态时在同条 UPDATE 核对读取修订。冲突不覆盖、不清新 dirty、不累加较新页的失败数；
+失败状态本身不递增修订：失败次数和 dirty 状态不改变生成输入，仍有效的并发结果可以提交，
+而成功写回推进修订后，迟到失败仍会被原来的条件拦截。
+旧生成结果记 `page_regen_failed: stale_snapshot`，由后续显式调用或 dirty 批次重试，不在一次调用中无界重试。
+条件更新失败不能再用无条件 upsert 兜底。人工编辑、重复 dirty、其它生成和低层 upsert 都推进修订；
+调用方传入的 EntityPage 修订不作为 upsert 的赋值来源，导入在目标 store 重新建立修订。
+SQLite/PG schema 2 均增加默认零列并自动迁移已有页面；SQLite 在 BEGIN IMMEDIATE 短事务内检查列并 ALTER，
+序列化不同连接的首次迁移，PG 在初始化事务级 advisory lock 内先检查列是否存在，仅缺列时 ALTER，
+避免 no-op ALTER 对共享页面表申请独占锁。无生产依赖变更。
+Memory 在未指定版本条件时不向 backend 转发新参数，保留旧调用方式；条件写入要求自定义 backend 实现新签名、
+维护修订号并进行原子比较。不捕获 TypeError 再无条件重放，避免将兼容处理变成覆盖缺口。
+范围是遵守现有 dirty 契约的写入，
+不为绕过 dirty 的低层 Atom SQL 增加新治理，也不承诺页面 journal 与正文提交是同一事务。

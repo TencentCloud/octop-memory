@@ -287,19 +287,25 @@ class EntityPage:
       (``memory page regen --dirty``) clears it on successful regen.
       New rows default to ``True`` so a brand-new entity is always
       regenerated at least once.
-    - ``regen_attempt_count``: increments on each LLM regen failure.
+    - ``regen_attempt_count``: increments on regen failure of the current
+      mutation revision. Stale attempts leave the counter unchanged.
       Stays ``dirty=True`` so the next cron tick retries (D35-A: keep
       old summary on failure rather than blank it out). Reset to 0 on
       success.
     - ``last_regen_at``: timestamp of the last successful regeneration
       (None until the first one).
     - ``last_user_edit_at``: timestamp of the last user-applied edit to
-      ``summary_markdown`` (via ``memory entity edit``). The regenerator
-      uses this to detect concurrent user changes.
+      ``summary_markdown`` (via ``memory entity edit``).
     - ``summary_version``: monotonically increasing integer — bumped on
       every successful regen and on every user edit. Useful for D35
       rollback debugging and for clients that want to detect "page
       changed since I last looked".
+    - ``mutation_version``: storage-managed revision incremented on
+      content writes and dirty invalidation. Regeneration compares it
+      atomically on writeback, without holding a lock during the model
+      call. Unlike ``summary_version``, it also detects facts changing
+      while a page is already dirty. Failure bookkeeping does not advance
+      it, so a concurrent valid result from the same inputs can commit.
 
     Page rows are upserted by ``entity_id``; they are NOT append-only
     (in contrast to atoms). The journal captures every regen success,
@@ -318,6 +324,7 @@ class EntityPage:
     updated_at: datetime
     last_regen_at: datetime | None = None
     last_user_edit_at: datetime | None = None
+    mutation_version: int = 0
 
 
 # ---------------------------------------------------------------------------

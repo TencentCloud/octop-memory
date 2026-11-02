@@ -10,9 +10,12 @@ Implements the M3 D33-B / D36-A / D37-B contract:
 - The user's hand-edited ``## My Notes`` block from the previous page
   is extracted before the LLM sees anything, and re-spliced into the
   freshly generated body afterwards (D34-A).
-- On any failure (LLM error, malformed JSON, dropped notes) we keep
-  the previous summary verbatim and increment ``regen_attempt_count``;
-  the page stays ``dirty=True`` so the next cron tick retries (D35-A).
+- On LLM / parse / notes failure of the current revision, we keep the
+  previous summary and increment ``regen_attempt_count``; the page stays
+  ``dirty=True`` for a later retry (D35-A).
+- Writeback compares the page's mutation revision. An obsolete attempt
+  cannot overwrite newer notes, clear a newer dirty mark, or apply its
+  failure state to a newer successful regeneration.
 
 Public API:
 
@@ -41,7 +44,7 @@ from octop_memory.pipeline.page.user_notes import (
     merge_user_notes,
 )
 from octop_memory.ports.llm._protocol import LLMClient, LLMClientError
-from octop_memory.types import AtomCard, EntityPage, JournalEntry
+from octop_memory.types import AtomCard, JournalEntry
 
 if TYPE_CHECKING:
     from octop_memory.core import Memory
@@ -113,9 +116,15 @@ def regenerate_page(
 
     when = now or datetime.now(UTC)
     existing = memory.get_entity_page(entity_id)
-    preserved_notes = ""
-    if existing is not None:
-        _, preserved_notes = extract_user_notes(existing.summary_markdown)
+    if existing is None:
+        # Materialize a stub before taking the snapshot. Writeback must
+        # never use an unconditional upsert after a failed version check.
+        memory.mark_entity_page_dirty(entity_id, when=when)
+        existing = memory.get_entity_page(entity_id)
+    if existing is None:
+        return PageRegenResult(entity_id=entity_id, success=False, reason="page missing")
+    expected_version = existing.mutation_version
+    _, preserved_notes = extract_user_notes(existing.summary_markdown)
 
     atoms = memory.list_atoms(
         entity_id=entity_id,
@@ -127,7 +136,7 @@ def regenerate_page(
     # than calling the LLM. Still counts as a success.
     if not atoms:
         empty_md = merge_user_notes("", preserved_notes)
-        _apply_success(
+        updated = _apply_success(
             memory,
             entity_id=entity_id,
             summary_markdown=empty_md,
@@ -135,7 +144,10 @@ def regenerate_page(
             topics=[],
             when=when,
             note=f"empty entity (no atoms); {PAGE_REGEN_VERSION}",
+            expected_mutation_version=expected_version,
         )
+        if not updated:
+            return PageRegenResult(entity_id=entity_id, success=False, reason="stale_snapshot")
         return PageRegenResult(
             entity_id=entity_id,
             success=True,
@@ -163,6 +175,7 @@ def regenerate_page(
             entity_id=entity_id,
             when=when,
             reason=f"llm_error: {exc}",
+            expected_mutation_version=expected_version,
         )
         return PageRegenResult(
             entity_id=entity_id,
@@ -180,6 +193,7 @@ def regenerate_page(
             entity_id=entity_id,
             when=when,
             reason=f"parse_error: {exc}",
+            expected_mutation_version=expected_version,
         )
         return PageRegenResult(
             entity_id=entity_id,
@@ -201,6 +215,7 @@ def regenerate_page(
             entity_id=entity_id,
             when=when,
             reason="user notes dropped after merge (defensive refuse)",
+            expected_mutation_version=expected_version,
         )
         return PageRegenResult(
             entity_id=entity_id,
@@ -209,7 +224,7 @@ def regenerate_page(
             llm_calls=1,
         )
 
-    _apply_success(
+    updated = _apply_success(
         memory,
         entity_id=entity_id,
         summary_markdown=merged,
@@ -217,7 +232,10 @@ def regenerate_page(
         topics=topics,
         when=when,
         note=f"{PAGE_REGEN_VERSION}; atoms={len(atoms)}",
+        expected_mutation_version=expected_version,
     )
+    if not updated:
+        return PageRegenResult(entity_id=entity_id, success=False, reason="stale_snapshot", llm_calls=1)
     return PageRegenResult(
         entity_id=entity_id,
         success=True,
@@ -336,9 +354,10 @@ def _apply_success(
     topics: list[str],
     when: datetime,
     note: str,
-) -> None:
-    # Mutating call sequence: page row first (so a journal-only orphan is
-    # impossible), then journal append.
+    expected_mutation_version: int,
+) -> bool:
+    # Journal success only after the conditional page update succeeds;
+    # a rejected snapshot records an attempt without mutating the page.
     headline_clamped = truncate_headline(headline)
     updated = memory.apply_entity_page_regen(
         entity_id,
@@ -346,26 +365,20 @@ def _apply_success(
         headline=headline_clamped,
         topics=topics,
         when=when,
+        expected_mutation_version=expected_mutation_version,
     )
     if not updated:
-        # Page row was missing (race vs. delete or migration gap):
-        # upsert a fresh row to recover gracefully.
-        memory.upsert_entity_page(
-            EntityPage(
-                id=f"page_{entity_id}",
-                entity_id=entity_id,
-                summary_markdown=summary_markdown,
-                headline=headline_clamped,
-                topics=topics,
-                dirty=False,
-                regen_attempt_count=0,
-                summary_version=1,
-                last_regen_at=when,
-                last_user_edit_at=None,
-                created_at=when,
-                updated_at=when,
+        memory.append_journal(
+            JournalEntry(
+                id=str(uuid.uuid4()),
+                timestamp=when,
+                action="page_regen_failed",
+                actor="auto",
+                target_entity_id=entity_id,
+                note="stale_snapshot",
             )
         )
+        return False
     memory.append_journal(
         JournalEntry(
             id=str(uuid.uuid4()),
@@ -376,6 +389,7 @@ def _apply_success(
             note=note,
         )
     )
+    return True
 
 
 def _apply_failure(
@@ -384,8 +398,9 @@ def _apply_failure(
     entity_id: str,
     when: datetime,
     reason: str,
+    expected_mutation_version: int,
 ) -> None:
-    memory.record_entity_page_regen_failure(entity_id, when=when)
+    memory.record_entity_page_regen_failure(entity_id, when=when, expected_mutation_version=expected_mutation_version)
     memory.append_journal(
         JournalEntry(
             id=str(uuid.uuid4()),

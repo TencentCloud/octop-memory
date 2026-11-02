@@ -15,6 +15,7 @@
 | Harness 后台审核契约 | 安装 CI 固定提交的真实 octop-harness 后，`uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs`；SQLite/真实 PG 同组验证保存回调、维护拍、冲突软停用及证据、阻塞模型不阻塞 save、20 条批次与续查。真实 Service / Middleware / 后台线程，只替换模型响应 |
 | 宿主失败来源边界 | 在 octop-harness 运行 `pytest tests/test_model_retry_middleware.py tests/test_memory_middleware.py tests/test_teams/test_inbox.py`：真实图 checkpoint error / 恢复、零错误 raw 写入、团队自动通知排除；WebUI / IM / 团队失败展示在 Octop 测试 |
 | 写入 / backend | `uv run pytest tests/test_memory_atom_write.py tests/test_backend_parity.py -q -rs` |
+| EntityPage 并发 / 修订迁移 | `uv run pytest tests/test_core.py tests/test_sqlite.py tests/test_page_regen.py tests/test_entity_page_schema.py tests/test_page_user_notes.py tests/test_page_trigger.py tests/test_backend_parity.py tests/test_postgres.py -q -rs`；设置专用 `TEST_POSTGRES_DSN`，`-k PageRegenerationConcurrency` 同组验证用户编辑/Atom dirty/并发生成/upsert、成功/失败两种完成顺序、同时间戳失效、双连接提交及旧列迁移；`-k 'LegacyPageBackend or ConcurrentPageRevisionMigration or PageRevisionBootstrap'` 验证旧签名、不降级条件、四连接迁移及 PG 读事务下打开已迁移库 |
 | 连接 / 事务 / fd | `uv run pytest tests/test_sqlite.py tests/test_fd_pressure.py tests/test_postgres_pool.py tests/test_backend_parity.py -q -rs`；设置专用 `TEST_POSTGRES_DSN`，确认 PG 用例实际运行 |
 | 向量接口 / 可选 index | `uv run pytest tests/test_vector_chroma.py -q`；使用 mock index 和 `tmp_path` 数据库，不访问默认数据目录 |
 | Checkpoint | `uv run pytest tests/test_checkpoint_compaction.py tests/test_checkpoint_gc_safety.py -q` |

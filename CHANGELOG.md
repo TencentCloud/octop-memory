@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **修正 Hermes 安装文档**：`docs/integrations.md` 与 provider README 收敛为一条可用路径——用 `hermes plugins install TencentCloud/octop-memory/plugins/hermes/octopmemory --ref <完整 40 位 SHA>` 从本仓子目录直接安装，无需独立插件仓库；并补充用 `hermes --print-runtime-command` 获取网关实际解释器。同时写明仓库未向 PyPI 发布独立的 `octop-memory-hermes` 插件包（按旧命令执行会 404），`installer.py` 仅为仓库内 E2E 工具（#10）。
 ### 修复
 
+- EntityPage 再生成写回校验页面修订号，拒绝覆盖模型调用期间的用户编辑、事实 dirty 标记或更新的生成结果；迟到的生成失败不会重新污染已成功的新页。SQLite/PostgreSQL schema 2 自动补充修订列，SQLite 并发首次迁移使用短写事务；原有 summary_version 含义及不带条件的旧页接口调用保持兼容。
 - Windows 宿主文件扫描忽略带根或驱动器的 allowlist glob，避免 rooted pattern 抛错；portable source 测试正确隔离 Windows 用户目录。
 - **Hermes 适配器不再丢弃 `llm` / `extraction` 配置**：`_bridge_config()` 现在按桥解析器的同一语义把两个配置块转发进 `MemoryRuntimeConfig`，`$HERMES_HOME/octopmemory.json` 里的模型端点与抽取开关能真正抵达运行时；非对象值按缺省处理，坏配置不会挡住启动，`stats` 输出依旧不回显 `api_key`。此前 Hermes 宿主永远落到 `NoopLLMClient`，模型辅助抽取静默不可用（无 candidate/atom，也不报错）（#9）。
 - 补齐 `MemoryService.review_new_memory(max_atoms=20)` 公共入口，修复宿主保存后和定时维护静默跳过手动文档审核的问题；保存仍不等待模型。新增真实 octop-harness 中间件与 SQLite/PostgreSQL 的跨包测试，并纳入 CI 和发布检查（TencentCloud/Octop#2358）。
