@@ -21,6 +21,7 @@ import os
 import threading
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,115 @@ from octop_memory.types import (
 )
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
+
+
+class TestHarnessManualReview:
+    """Exercise the real host/service contract, including its background worker.
+
+    Harness is optional locally. CI and release install a pinned host and run
+    this class explicitly; missing host imports fail that dedicated gate.
+    """
+
+    class Model:
+        def __init__(self) -> None:
+            self.batches: list[list[str]] = []
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.release.set()
+
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            atoms = json.loads(prompt)["atoms"]
+            self.batches.append([atom["id"] for atom in atoms])
+            self.started.set()
+            if not self.release.wait(timeout=10):
+                raise TimeoutError("test did not release the model")
+            return json.dumps(
+                {
+                    "matches": [
+                        {
+                            "atom_id": atom["id"],
+                            "relation": "conflict"
+                            if atom["assertion"] == "The user prefers English replies."
+                            else "unrelated",
+                            "document": "USER.md",
+                            "quote": "The user prefers Chinese replies.",
+                            "confidence": "high",
+                            "same_subject": True,
+                            "same_scope": True,
+                        }
+                        for atom in atoms
+                    ]
+                }
+            )
+
+    @pytest.fixture
+    def stack(self, backend: Any) -> Iterator[Any]:
+        from octop_memory import Memory, MemoryService
+
+        harness = pytest.importorskip("octop_harness.middleware.memory")
+        memory = Memory(namespace="harness_review", backend=backend)
+        model = self.Model()
+        service = MemoryService(
+            memory, llm=model, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+        )
+        middleware = harness.MemoryMiddleware(service=service, jsonl_enabled=False)
+        service.set_manual_review_scheduler(middleware.schedule_manual_review)
+        try:
+            yield memory, service, middleware, model
+        finally:
+            model.release.set()
+            with middleware.pause_background(timeout=10):
+                middleware.shutdown()
+
+    @pytest.mark.parametrize("trigger", ["save", "maintenance"])
+    def test_real_host_reviews_and_quarantines_conflicts(self, stack: Any, trigger: str) -> None:
+        memory, service, middleware, model = stack
+        if trigger == "save":
+            node = service.save("The user prefers English replies.")
+        else:
+            node = memory.store("The user prefers English replies.")
+            middleware._run_maintenance_tick(service)
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        atom = memory.get_atom(node.atom_id)
+        assert atom.deprecated_at is not None
+        assert memory.get_raw(atom.quote_event_id) is not None
+        candidates = memory.list_candidates(status="conflict")
+        assert len(candidates) == 1
+        assert candidates[0].payload["demoted_atom_id"] == atom.id
+        assert candidates[0].assertion == "The user prefers Chinese replies."
+
+    def test_save_returns_while_the_real_worker_is_waiting_for_the_model(self, stack: Any) -> None:
+        memory, service, middleware, model = stack
+        model.release.clear()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            saved = executor.submit(service.save, "The user prefers English replies.")
+            try:
+                node = saved.result(timeout=3)
+                assert model.started.wait(timeout=3), "background review was never started"
+                assert not model.release.is_set()
+                assert memory.get_atom(node.atom_id).deprecated_at is None
+                assert not memory.list_candidates(status="conflict")
+            finally:
+                model.release.set()
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        assert memory.get_atom(node.atom_id).deprecated_at is not None
+        assert len(memory.list_candidates(status="conflict")) == 1
+
+    def test_host_drains_one_bounded_batch_without_rechecking_completed_atoms(self, stack: Any) -> None:
+        memory, _service, middleware, model = stack
+        for number in range(25):
+            memory.store(f"Project {number} uses PostgreSQL.")
+        for expected_sizes in ([20], [20, 5], [20, 5]):
+            middleware.schedule_manual_review()
+            with middleware.pause_background(timeout=10):
+                pass
+            assert [len(batch) for batch in model.batches] == expected_sizes
+        assert len(set(model.batches[0]) | set(model.batches[1])) == 25
+        assert len(memory.list_atoms()) == 25
 
 
 class TestManualDocumentGovernanceParity:
