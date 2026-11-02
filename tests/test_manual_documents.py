@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,24 @@ class ManualLLM:
 @pytest.fixture
 def memory(tmp_path: Path) -> Memory:
     return Memory(namespace="manual_docs", backend_config={"db_path": str(tmp_path / "memory.sqlite")})
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def both_backends(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Memory]:
+    """One ``Memory`` per backend: the review state lives in ``meta`` JSON, so both share the bug."""
+    if request.param == "sqlite":
+        yield Memory(namespace="manual_docs_parity", backend_config={"db_path": str(tmp_path / "parity.sqlite")})
+        return
+
+    dsn = request.getfixturevalue("postgres_dsn")
+    memory = Memory(
+        namespace=f"manual_docs_parity_{uuid.uuid4().hex[:12]}", backend="postgres", backend_config={"dsn": dsn}
+    )
+    try:
+        yield memory
+    finally:
+        memory.backend.purge_namespace()
+        memory.backend.close()
 
 
 def test_conflict_is_quarantined_and_replacement_is_a_review_candidate(memory: Memory) -> None:
@@ -426,3 +446,34 @@ def test_a_new_document_revision_can_clear_the_uncertain_state(memory: Memory) -
     result = service.reconcile_manual_documents(revised)
     assert result["status"] == "complete" and result["uncertain"] == 0
     assert manual_document_review_status(memory, revised)["status"] == "complete"
+
+
+def test_a_disabled_atom_cannot_pin_the_uncertain_state(both_backends: Memory) -> None:
+    """A fact the user switched off is no longer pending review, on either backend.
+
+    The unresolved set is persisted per atom id, so comparing it only against the
+    historical ``checked`` map keeps a disabled, deleted or reworded fact in it
+    forever: every later pass reports ``uncertain`` while zero live facts are
+    pending, and only a document revision edit can clear it. Both the reconcile
+    path and the status reader have to be driven by the current live atoms.
+    """
+    memory = both_backends
+    memory.store("The user keeps backups on the NAS.")
+    atom = memory.list_atoms()[0]
+    service = MemoryService(memory, llm=VerdictlessLLM())
+    documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+
+    first = service.reconcile_manual_documents(documents)
+    assert (first["checked"], first["remaining"], first["uncertain"]) == (1, 0, 1)
+    assert first["status"] == "uncertain"
+
+    assert memory.deprecate_atom(atom.id, actor="user", note="the user disabled this fact") is True
+    assert memory.list_atoms() == []
+
+    second = service.reconcile_manual_documents(documents)
+    assert second["uncertain"] == 0, "no live fact is pending, so nothing is unresolved"
+    assert second["status"] == "complete", "a disabled fact must not hold the audit at uncertain"
+
+    persisted = manual_document_review_status(memory, documents)
+    assert persisted["uncertain"] == 0
+    assert persisted["status"] == "complete"

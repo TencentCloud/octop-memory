@@ -306,7 +306,12 @@ def reconcile_manual_documents(
         unresolved = {
             atom_id: digest
             for atom_id, digest in unresolved.items()
-            if atom_id not in matches and checked.get(atom_id) == digest
+            if atom_id not in matches
+            and checked.get(atom_id) == digest
+            # Only a live, unchanged fact can still be unresolved: a disabled or
+            # deleted atom is gone from ``hashes``, a reworded one has a new digest.
+            # Keeping those would pin the audit at uncertain with nothing pending.
+            and hashes.get(atom_id) == digest
         }
         for atom_id, row in matches.items():
             if isinstance(row, dict) and row.get("uncertain") and checked.get(atom_id) == hashes.get(atom_id):
@@ -362,20 +367,31 @@ def manual_document_review_status(memory: Memory, documents: dict[str, str] | No
     if documents is not None and record.get("revision") != manual_documents_revision(documents):
         return {"status": "stale"}
     report = dict(record.get("last_report", {"status": "not_checked"}))
-    unchecked = sum(
-        record.get("checked", {}).get(atom.id) != hashlib.sha256(atom.assertion.encode()).hexdigest()
-        for atom in memory.list_atoms(limit=_SCAN_LIMIT)
-    )
+    # Count only live atoms: a disabled, deleted or reworded fact is no longer part
+    # of the audit, so it must not contribute to ``remaining`` either.
+    live = {
+        atom.id: hashlib.sha256(atom.assertion.encode()).hexdigest() for atom in memory.list_atoms(limit=_SCAN_LIMIT)
+    }
+    unchecked = sum(record.get("checked", {}).get(atom_id) != digest for atom_id, digest in live.items())
     report["remaining"] = unchecked
     if unchecked and report.get("status") == "complete":
         report["status"] = "partial"
     # A stored "complete" is only trustworthy while no compared atom lacks a verdict.
+    # Same rule as the reconcile path: the stored ids are historical, so they only
+    # count while the atom is still live with the same assertion.
     unverified = sum(
-        record.get("checked", {}).get(atom_id) == digest for atom_id, digest in record.get("uncertain", {}).items()
+        live.get(atom_id) == digest
+        for atom_id, digest in record.get("uncertain", {}).items()
+        if record.get("checked", {}).get(atom_id) == digest
     )
     report["uncertain"] = unverified
-    if unverified and report.get("status") == "complete":
-        report["status"] = "uncertain"
+    if unverified:
+        if report.get("status") in {"complete", "uncertain"}:
+            report["status"] = "uncertain"
+    elif report.get("status") == "uncertain":
+        # Nothing unresolved is left, so the persisted verdict has to follow the
+        # live set instead of staying uncertain until the documents change.
+        report["status"] = "partial" if unchecked else "complete"
     pending = []
     for candidate_id in record.get("candidate_ids", []):
         candidate = memory.get_candidate(candidate_id)

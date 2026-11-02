@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 补齐 `MemoryService.review_new_memory(max_atoms=20)` 公共入口，修复宿主保存后和定时维护静默跳过手动文档审核的问题；保存仍不等待模型。新增真实 octop-harness 中间件与 SQLite/PostgreSQL 的跨包测试，并纳入 CI 和发布检查（TencentCloud/Octop#2358）。
 - 手动文档审计中，无结论（`uncertain`）的比较仍推进游标，但不再被报告为 `complete`：未验证的 atom 按断言哈希记录，后续无待比对项的巡检仍返回 `uncertain`；新文档 revision 重新比对后可恢复 `complete`（TencentCloud/octop-memory#33）。
+- 手动文档审计的未决集合改按当前活跃 atom 计算：已停用、已删除或断言已变的记录不再滞留，`remaining` 与状态读取同样只统计活跃 atom，因此停用一个 atom 后无需修改文档即可清除 `uncertain`，SQLite/PostgreSQL 同组回归（TencentCloud/octop-memory#33）。
 
 ## [1.0.2] - 2026-10-16
 
