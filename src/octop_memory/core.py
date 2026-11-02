@@ -900,14 +900,29 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         headline: str,
         topics: list[str],
         when: datetime | None = None,
+        expected_mutation_version: int | None = None,
     ) -> bool:
-        """Apply a successful regen result to the page row."""
+        """Apply regen, optionally refusing a stale page mutation version.
+
+        Unconditional calls keep the legacy backend signature. Guarded
+        calls require a backend that implements mutation revisions; a
+        backend error must never fall back to an unconditional write.
+        """
+        if expected_mutation_version is None:
+            return self._backend.apply_entity_page_regen(
+                entity_id,
+                summary_markdown=summary_markdown,
+                headline=headline,
+                topics=topics,
+                when=when or datetime.now(UTC),
+            )
         return self._backend.apply_entity_page_regen(
             entity_id,
             summary_markdown=summary_markdown,
             headline=headline,
             topics=topics,
             when=when or datetime.now(UTC),
+            expected_mutation_version=expected_mutation_version,
         )
 
     def record_entity_page_regen_failure(
@@ -915,10 +930,15 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         entity_id: str,
         *,
         when: datetime | None = None,
+        expected_mutation_version: int | None = None,
     ) -> bool:
+        """Record failure, preserving a newer page when a revision is supplied."""
+        if expected_mutation_version is None:
+            return self._backend.record_entity_page_regen_failure(entity_id, when=when or datetime.now(UTC))
         return self._backend.record_entity_page_regen_failure(
             entity_id,
             when=when or datetime.now(UTC),
+            expected_mutation_version=expected_mutation_version,
         )
 
     def apply_entity_page_user_edit(

@@ -66,6 +66,18 @@ from octop_memory.types import (  # noqa: E402
 )
 
 
+class TestPageRevisionBootstrap:
+    def test_migrated_store_opens_another_namespace_during_page_read(self, backend) -> None:
+        # Ordinary page reads hold ACCESS SHARE until their transaction ends.
+        # An already-migrated store must not request ACCESS EXCLUSIVE just
+        # to discover that its revision column already exists.
+        with psycopg.connect(DSN) as reader:
+            reader.execute("SELECT entity_id FROM octop_memory.entity_pages LIMIT 1").fetchall()
+            assert reader.info.transaction_status == TransactionStatus.INTRANS
+            with contextlib.closing(_open_backend(f"page_boot_{uuid.uuid4().hex[:12]}")) as other:
+                assert other.get_entity_page("missing") is None
+
+
 class TestSaveAndGetNode:
     def test_save_and_get_children(self, backend) -> None:
         root = MemoryNode(

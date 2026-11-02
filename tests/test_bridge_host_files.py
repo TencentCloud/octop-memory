@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
+from octop_memory.application import host_files
 from octop_memory.application.host_files import HostFilesIndex
 
 # ---------------------------------------------------------------------------
@@ -230,3 +231,18 @@ class TestPolling:
         assert index._thread is not None
         index.stop()
         assert index._thread is None
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "/tmp/*.md",
+        r"\topics\*.md",
+        "C:topics/*.md",
+        "C:/topics/*.md",
+        r"\\server\share\*.md",
+    ],
+)
+def test_safe_include_globs_rejects_windows_anchors(pattern: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host_files, "Path", PureWindowsPath)
+    assert list(host_files._safe_include_globs([pattern, "topics/*.md"])) == ["topics/*.md"]

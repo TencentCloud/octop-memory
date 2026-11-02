@@ -23,6 +23,29 @@
 - **范围与验收**：把终态匹配从 `promoted` 扩到 `promoted OR rejected`（SQLite + PostgreSQL 两后端），仍**不跳过 `pending`**（仍在评审中，避免静默丢弃）；`raw_event_ids` 仍按集合精确匹配，所以不同来源的新证据仍可生成新候选。不改 schema / 公共 API / 语义匹配。
 - **验证**：`uv run pytest tests/test_backend_parity.py tests/test_memory_m2_api.py -q` → **118 passed / 106 skipped**（skip 为 PostgreSQL 与可选环境）；`ruff check` / `format --check` / `mypy --strict src`(111 files) 全过。新增用例覆盖 rejected 命中、不同 raw_event_ids 不命中。
 - **接续**：语义（同义改写）去重、已决策指纹持久化、冲突/更新模型仍属 #27 后续；本 PR 只收「同证据重扫尊重忽略」这一层。
+### EntityPage 再生成的旧快照覆盖
+
+- **状态 / 场景**：[PR #24](https://github.com/TencentCloud/octop-memory/pull/24) 的原始实现与专项回归通过；维护者同步当前 `develop`，保留两侧文档，合并前完整门禁与 CI 在 PR 中记录。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
+- **范围与验收**：SQLite/PostgreSQL 同步增加 mutation_version，正文写入和 dirty 失效递增，失败计数不推进；生成成功/失败写回均在同条 SQL 核对读取版本。summary_version 含义保留，模型调用无长事务；旧快照拒绝写入、不伪造成功 journal，后续显式重试可成功。
+- **方案 / 假设**：事实变化使用既有 mark_entity_page_dirty 调用链；绕过该调用链的低层 Atom 写入不新增自动治理。已有页面自动补零版本列；低层 apply 方法新增可选条件参数，旧调用保持原行为。
+- **验证**：原实现 12 项交错用例失败；后续兼容/并发迁移先 3 failed / 2 passed，专项审查新增五项先全部失败。当前 `PageRegenerationConcurrency / PageRevisionBootstrap / LegacyPageBackend / ConcurrentPageRevisionMigration` 共 28 passed，真实 PG 无 skip。Ubuntu / Python 3.12.3 / 专用 PostgreSQL 16.15 执行 `make all RUN='<venv-python> -m'`，format/lint/strict mypy 通过，1533 passed / 3 skipped。跳过为 dashboard extra 和两个 Hermes checkout E2E；Windows 相关定向回归与文档/架构检查均通过。
+- **兼容 / 迁移**：普通调用保留旧 backend 签名；显式条件不支持时保留错误，不降级重放。SQLite BEGIN IMMEDIATE 保护检查/加列，PG 初始化锁内先查列、仅缺列时 ALTER；schema 标记 2，旧页正文和 summary_version 保留。第三方 backend 和所有写入进程仍须维护新契约，见 KNOWN_RISKS。
+- **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。以当前合并结果的完整门禁及 Python 3.12/3.13 CI 为合并依据，不以旧基线验证替代。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
+### Windows 宿主文件 glob 与 portable 测试隔离
+
+- **状态 / 问题**：`/tmp/*.md` 在 Windows 有 root 而无 drive，`is_absolute()` 为 false，进入 `Path.glob` 后抛错；`C:topics/*.md` 同样不是安全相对 glob。portable 测试 fixture 假定 `str(Path)` 使用 `/`，Windows 上未隔离默认用户目录。
+- **方案 / 范围**：`application/host_files.py` 用 `Path.anchor` 拒绝带锚点模式；以 PureWindowsPath 在任意平台覆盖 rooted、drive-relative、absolute、UNC。fixture 按 `Path.parts` 展开 `~`，只修改测试隔离，不改变迁移扫描逻辑或数据。
+- **⚠️ 召回/写入路径变更**：仅影响 host Markdown 文件 allowlist：不安全模式在 glob 前跳过，安全相对模式照常索引；source、排序、记忆写入与双 backend contract 不变。
+- **验证**：修改前相关测试 6 failed / 19 passed；修改后 25 passed。`make all` format/lint/strict mypy 通过，1348 passed / 165 skipped；skip 包含不可用的真实 PostgreSQL、Hermes checkout、dashboard extra 与平台特定环境，不表示这些场景验收通过。
+- **接续**：PROJECT_MAP、TEST_MATRIX 和 CHANGELOG 已同步；待维护者审阅，无数据迁移。
+
+### 后台手动文档审核公共入口（Octop #2358）
+
+- **状态 / 链接**：实现与本地验证完成，待审阅；[Octop #2358](https://github.com/TencentCloud/Octop/issues/2358)，接续 memory #31 / harness #110。
+- **问题与验收**：宿主检查 `MemoryService.review_new_memory` 时方法不存在，保存回调和维护拍均静默跳过审核。补公开转发，真实宿主两条路径须生成冲突候选并保留证据；阻塞模型时 save 须已返回；每批最多 20 条并可续查。
+- **范围**：`service.py` 公共入口、公共 API 与真实 Harness 跨包测试、CI/release 及相关说明。复用原 Runtime，不改 schema、语义审核规则、召回排序或后台调度。
+- **验证**：公共接口与跨包回归修复前 15 failed；修复后 `pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs` 247 passed。真实 Harness 固定提交 `84c1953`，`-k HarnessManualReview` 8 passed / 0 skipped，包含 SQLite 和专用 PostgreSQL。设置专用 `TEST_POSTGRES_DSN` 后 `make all RUN='.venv/bin/python -m'` 格式/lint/strict mypy 通过，1520 passed / 4 skipped；跨包测试只替换模型响应，未调用真实模型。
+- **接续**：发布包含本接口的 memory 版本后，宿主需提高最低依赖；旧版 1.0.2 不具备该公共入口。PROJECT_MAP / TEST_MATRIX / README 同步此契约。
 
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 
