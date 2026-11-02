@@ -16,6 +16,14 @@
 
 ## 当前任务
 
+### 后台手动文档审核公共入口（Octop #2358）
+
+- **状态 / 链接**：实现与本地验证完成，待审阅；[Octop #2358](https://github.com/TencentCloud/Octop/issues/2358)，接续 memory #31 / harness #110。
+- **问题与验收**：宿主检查 `MemoryService.review_new_memory` 时方法不存在，保存回调和维护拍均静默跳过审核。补公开转发，真实宿主两条路径须生成冲突候选并保留证据；阻塞模型时 save 须已返回；每批最多 20 条并可续查。
+- **范围**：`service.py` 公共入口、公共 API 与真实 Harness 跨包测试、CI/release 及相关说明。复用原 Runtime，不改 schema、语义审核规则、召回排序或后台调度。
+- **验证**：公共接口与跨包回归修复前 15 failed；修复后 `pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs` 247 passed。真实 Harness 固定提交 `84c1953`，`-k HarnessManualReview` 8 passed / 0 skipped，包含 SQLite 和专用 PostgreSQL。设置专用 `TEST_POSTGRES_DSN` 后 `make all RUN='.venv/bin/python -m'` 格式/lint/strict mypy 通过，1520 passed / 4 skipped；跨包测试只替换模型响应，未调用真实模型。
+- **接续**：发布包含本接口的 memory 版本后，宿主需提高最低依赖；旧版 1.0.2 不具备该公共入口。PROJECT_MAP / TEST_MATRIX / README 同步此契约。
+
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 
 - **状态 / 场景**：三个仓库实现、验证和配套宿主提交已完成。用户明确要求 USER.md 与 MEMORY.md 只由用户修改；冲突时手动文档优先，通知用户并降级到 Candidate 更新 octop-memory。
