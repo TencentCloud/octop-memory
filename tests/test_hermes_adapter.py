@@ -324,6 +324,100 @@ def test_on_memory_write_respects_store_raw_content_false(tmp_path: Path) -> Non
     assert events[0].payload["content_redacted"] is True
 
 
+def _stats_config(provider) -> dict:
+    resp = provider._require_bridge().handle({"jsonrpc": "2.0", "id": 1, "method": "stats", "params": {}})
+    return resp["result"]["config"]
+
+
+def test_llm_block_reaches_runtime_and_enables_model_assisted_extraction(tmp_path: Path) -> None:
+    """Regression: the adapter used to drop the ``llm`` block on the floor.
+
+    Without it the runtime always fell back to ``NoopLLMClient``, so Hermes
+    users could not enable model-assisted extraction no matter what they put
+    in ``octopmemory.json`` (silently, with no error).
+    """
+    (tmp_path / "octopmemory.json").write_text(
+        json.dumps(
+            {
+                "namespace": "hermes__llm",
+                "llm": {
+                    "base_url": "https://llm.example.test/v1",
+                    "model": "light-model",
+                    "model_heavy": "heavy-model",
+                    "api_key": "sk-hermes-secret",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = OctopMemoryProvider()
+    provider.initialize("sess_llm", hermes_home=str(tmp_path), platform="cli")
+    try:
+        config = _stats_config(provider)
+        assert config["llm"]["configured"] is True
+        assert config["llm"]["endpoint"] == "https://llm.example.test/v1"
+        assert config["llm"]["model"] == "light-model"
+        assert config["llm"]["model_heavy"] == "heavy-model"
+        # stats output lands in logs — the api_key must never be echoed there.
+        assert "sk-hermes-secret" not in json.dumps(config)
+    finally:
+        provider.shutdown()
+
+
+def test_extraction_block_reaches_runtime(tmp_path: Path) -> None:
+    (tmp_path / "octopmemory.json").write_text(
+        json.dumps({"extraction": {"promote": False, "regen_pages": False, "max_candidates": 7}}),
+        encoding="utf-8",
+    )
+    provider = OctopMemoryProvider()
+    provider.initialize("sess_extract", hermes_home=str(tmp_path), platform="cli")
+    try:
+        extraction = _stats_config(provider)["extraction"]
+        assert extraction["promote"] is False
+        assert extraction["regen_pages"] is False
+        assert extraction["max_candidates"] == 7
+        assert extraction["page_regen_limit"] == 5  # untouched defaults survive
+    finally:
+        provider.shutdown()
+
+
+def test_non_dict_llm_and_extraction_blocks_are_ignored(tmp_path: Path) -> None:
+    (tmp_path / "octopmemory.json").write_text(
+        json.dumps({"llm": "not-a-dict", "extraction": ["not", "a", "dict"]}),
+        encoding="utf-8",
+    )
+    provider = OctopMemoryProvider()
+    provider.initialize("sess_bad_cfg", hermes_home=str(tmp_path), platform="cli")
+    try:
+        config = _stats_config(provider)
+        assert config["llm"]["configured"] is False
+        assert config["extraction"]["promote"] is True  # default
+        assert config["extraction"]["max_candidates"] == 20  # default
+    finally:
+        provider.shutdown()
+
+
+def test_incomplete_llm_block_keeps_capture_working(tmp_path: Path) -> None:
+    # A present-but-broken llm block must degrade to Noop instead of failing
+    # startup: capture / search keep working without a model endpoint.
+    (tmp_path / "octopmemory.json").write_text(
+        json.dumps({"llm": {"base_url": "https://llm.example.test/v1"}}),
+        encoding="utf-8",
+    )
+    provider = OctopMemoryProvider()
+    provider.initialize("sess_broken_llm", hermes_home=str(tmp_path), platform="cli")
+    try:
+        assert _stats_config(provider)["llm"]["configured"] is False
+        provider.sync_turn(
+            "Capture must keep working when the Hermes llm block is incomplete.",
+            "Acknowledged.",
+            session_id="sess_broken_llm",
+        )
+    finally:
+        provider.shutdown()
+    assert provider._require_memory().list_raw(limit=10)
+
+
 def test_provider_cli_search_and_show_use_active_store(tmp_path: Path, capsys) -> None:
     provider = OctopMemoryProvider()
     provider.initialize("sess_1", hermes_home=str(tmp_path), platform="cli")
