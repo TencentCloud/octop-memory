@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - Windows 宿主文件扫描忽略带根或驱动器的 allowlist glob，避免 rooted pattern 抛错；portable source 测试正确隔离 Windows 用户目录。
+- 补齐 `MemoryService.review_new_memory(max_atoms=20)` 公共入口，修复宿主保存后和定时维护静默跳过手动文档审核的问题；保存仍不等待模型。新增真实 octop-harness 中间件与 SQLite/PostgreSQL 的跨包测试，并纳入 CI 和发布检查（TencentCloud/Octop#2358）。
 
 ## [1.0.2] - 2026-10-16
 

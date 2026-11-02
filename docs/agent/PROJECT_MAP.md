@@ -32,7 +32,11 @@ CLI → application / operations ───────────────�
 | `domain/retention.py`、`operations/retention.py` | 系统报错来源判定；存量预览和软停用；USER.md/MEMORY.md 原文核对、冲突软停用/替代候选/审计元数据 |
 
 手动文档治理由 `MemoryService` / Bridge → `application.MemoryRuntime` → `operations.retention`
-共享实现。宿主提供当前文档/可选 freshness callback；save/自动 promotion 可注册 provider。
+共享实现。宿主提供当前文档/可选 freshness callback；provider 供后台审核读取当前文档。
+`MemoryService.save()` 仅落库并通知 `set_manual_review_scheduler()` 注册的非阻塞回调；
+宿主 worker / 维护拍调用公共 `MemoryService.review_new_memory(max_atoms=20)`，转发 Runtime 的一批审核。
+该方法本身是同步的，必须在用户回合外运行；未注册 provider 或文档为空返回 None，否则返回审核报告。
+显式 `reconcile_manual_documents()` 默认最多 100 条，后台默认 20 条；失败推迟、不确定跳过，不强制停用。
 `manual_documents/v1` 保存比较版本、已核对 assertion hash、未决候选和审计快照；小型
 `manual_documents/recall/v1` 保存召回抑制清单。原文不会批量导入 Atom/FTS。
 召回通过实际 session `manual_context` 去重，并屏蔽冲突旧 Atom 的 raw fallback 和待重建页面。
