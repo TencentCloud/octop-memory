@@ -6,6 +6,7 @@
 |---|---|
 | 包名 / 宿主命名 | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`；`uv build`；在 `plugins/openclaw/octopmemory/` 执行 `npm test`、`npm run typecheck`、`npm run build` |
 | 文档 / import 边界 | `uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q` |
+| 宿主文件 glob / Windows 路径 | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`；PureWindowsPath 用例在任意平台检查 rooted / drive-relative / UNC 拒绝，portable fixture 按 Path.parts 隔离用户目录 |
 | Memory / runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |
 | 召回 | `uv run pytest tests/test_recall_pipeline.py tests/test_recall_multi_source.py tests/test_recall_risk_fixes.py -q` |
 | 提炼 | `uv run pytest tests/test_extractor.py tests/test_promotion.py -q` |
