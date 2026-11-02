@@ -887,6 +887,14 @@ def promote_candidate(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
         raise _NotFoundError(f"candidate {cand_id!r} not found")
     if cand.status not in {"pending", "needs_review", "conflict"}:
         raise ValueError(f"candidate {cand_id!r} cannot be promoted (current status={cand.status!r})")
+    if cand.payload.get("manual_revision") and "manual_documents" in params:
+        from octop_memory.domain.retention import manual_documents_revision
+
+        documents = params["manual_documents"]
+        if not isinstance(documents, dict) or any(not isinstance(v, str) for v in documents.values()):
+            raise ValueError("manual_documents must map filenames to text")
+        if manual_documents_revision(documents) != cand.payload["manual_revision"]:
+            raise ValueError("The manual document changed; review the current version before approving")
     if cand.status == "pending":
         result = memory.promote_candidates([cand])
     else:

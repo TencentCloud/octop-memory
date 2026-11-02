@@ -2,7 +2,14 @@
 
 只记录仍影响维护的风险：触发条件、影响、应对与验证。修复后删除失效描述或保留简短 Resolved 条目和对应 PR。
 
-- PG fixtures 在服务不可用时 skip，当前 CI/release workflow 未配置专用 PG service；不能仅凭基础 CI 证明兼容。
+- 后台手动文档审核需要宿主注册非阻塞 scheduler，并在 worker / 维护拍调用公共 `MemoryService.review_new_memory`。仅升级宿主而保留旧 memory 1.0.2 会缺少该入口并跳过审核；发布本修复后宿主应提高最低依赖。该公开方法同步执行一批模型调用，不能直接放回用户保存路径。
+
+- 手动文档语义对账依赖辅助模型；只接受原文引用、明确主体/范围和高置信结果，不确定/失败不强制停用。单次最多 100 条未核对 Atom、100,000 文档字符，宿主需呈现 partial/uncertain/unavailable 状态并支持续查。外部宿主未注册 provider 时，仅显式对账生效。外部文件并发写依赖宿主 freshness callback；采纳需传当前文档，底层 worker 至少校验最后对账版本。旧版本候选保留审计但不可直接采纳，需拒绝并核对新版。冲突 raw 整条从自动 fallback 排除，其中混合的其它事实仍可经有效 Atom/直接证据读取；不批量删除历史 Episode。见 ADR-042。
+
+- PG 共享池预算仅覆盖同一进程、同一连接配置；多进程、不同配置和宿主控制面要额外预留服务端连接。长事务会占用业务池，饱和时有界等待后报错，不会无限扩容。CI/release 已使用专用 PG；本地未配置测试服务的 skip 仍不算 PG 验收。
+
+- 未带结构化标记的合成报错无法可靠区别于正常对话，在线链路保留，不能声称已隔离所有旧报错。octop-harness / Octop 主路径已抛出异常；自定义宿主仍合成错误时必须传 `payload.octop_runtime_error=true`。旧版固定报错格式仅用于存量审核提示；缺失/混合来源的 review_*_ids 是只读清单，不是新增 UI 待办或自动停用，需人工核对。手工保存/批准/编辑不按措辞推断。见 ADR-041。
+
 - `run_gc()` retention 当前仅 SQLite 实现，PG 返回空统计，是待修复的既有能力缺口。
   删除行、checkpoint retention 和物理空间回收是不同操作；不能据此推断宿主已自动调度。
 - PostgreSQL 的 `btree_gin` 不可用时退回普通 GIN，namespace 过滤正确性保留，性能隔离减弱。

@@ -54,9 +54,12 @@ can reuse them; the CLI deliberately exposes no ``--dry-run`` option.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from octop_memory.storage.backends.sqlite import locked_sqlite_operation
 
 if TYPE_CHECKING:
     from octop_memory.core import Memory
@@ -304,6 +307,7 @@ def check_storage(memory: Memory) -> StorageCheck:
 # ---------------------------------------------------------------------------
 
 
+@locked_sqlite_operation
 def _sqlite_nudge_vacuum(backend: SqliteMemoryBackend, *, pages: int, dry_run: bool) -> VacuumStats:
     conn = backend._conn
     auto_vacuum_mode = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
@@ -311,12 +315,12 @@ def _sqlite_nudge_vacuum(backend: SqliteMemoryBackend, *, pages: int, dry_run: b
     freelist_before = conn.execute("PRAGMA freelist_count").fetchone()[0]
 
     if not dry_run and conn.in_transaction:
-        # This thread already has an open write transaction on its own
-        # connection (``SqliteMemoryBackend.transaction()``). Reclaiming
+        # This backend already has an open write transaction owned by this
+        # thread (``SqliteMemoryBackend.transaction()``). Reclaiming
         # now would enlist vacuum in *that* transaction: a later rollback
         # undoes the reclaim, so we would report pages we did not free.
         # Skip — the idle timer retries on the next tick. Other threads
-        # have their own connections and are unaffected.
+        # wait for the backend's transaction lock before reaching here.
         return VacuumStats(
             backend="sqlite",
             dry_run=False,
@@ -419,6 +423,7 @@ def _sqlite_store_bytes(db_path: Path) -> int:
     return total
 
 
+@locked_sqlite_operation
 def _sqlite_compact_vacuum(backend: SqliteMemoryBackend, *, dry_run: bool) -> CompactStats:
     conn = backend._conn
     db_path = backend._db_path
@@ -468,6 +473,7 @@ def _sqlite_compact_vacuum(backend: SqliteMemoryBackend, *, dry_run: bool) -> Co
     )
 
 
+@locked_sqlite_operation
 def _sqlite_check(backend: SqliteMemoryBackend) -> StorageCheck:
     conn = backend._conn
     db_path = backend._db_path
@@ -520,9 +526,11 @@ def _postgres_nudge_vacuum(backend: PostgresMemoryBackend, *, dry_run: bool) -> 
 
 
 def _postgres_database_bytes(dsn: str) -> int:
-    import psycopg
+    from psycopg.rows import tuple_row
 
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+    from octop_memory.storage.backends.postgres_pool import maintenance_connection
+
+    with maintenance_connection(dsn) as conn, conn.cursor(row_factory=tuple_row) as cur:
         cur.execute("SELECT pg_database_size(current_database())")
         row = cur.fetchone()
     return int(row[0]) if row and row[0] is not None else 0
@@ -550,10 +558,12 @@ def _postgres_check(backend: PostgresMemoryBackend) -> StorageCheck:
     autovacuum ships enabled — so the recommendations here are about
     whether it is keeping *up*, not whether it exists.
     """
-    import psycopg
+    from psycopg.rows import tuple_row
+
+    from octop_memory.storage.backends.postgres_pool import maintenance_connection
 
     check = StorageCheck(backend="postgres")
-    with psycopg.connect(backend._dsn, autocommit=True) as conn, conn.cursor() as cur:
+    with maintenance_connection(backend._dsn) as conn, conn.cursor(row_factory=tuple_row) as cur:
         for qualified in _postgres_target_tables():
             schema, _, table = qualified.partition(".")
             cur.execute(
@@ -602,10 +612,12 @@ def _postgres_vacuum_tables(dsn: str, tables: tuple[str, ...], *, full: bool, dr
     of ``PostgresMemoryBackend`` is concurrently using (same rationale as
     ``core.py`` giving the checkpointer its own connection).
     """
-    import psycopg
+    from psycopg.rows import tuple_row
+
+    from octop_memory.storage.backends.postgres_pool import maintenance_connection
 
     results: list[TableVacuumResult] = []
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+    with maintenance_connection(dsn) as conn, conn.cursor(row_factory=tuple_row) as cur:
         for table in tables:
             cur.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
             row = cur.fetchone()
@@ -626,7 +638,7 @@ def _postgres_vacuum_tables(dsn: str, tables: tuple[str, ...], *, full: bool, dr
     return results
 
 
-def tune_checkpoint_autovacuum(dsn: str) -> None:
+def tune_checkpoint_autovacuum(dsn: str, *, connection: Any = None) -> None:
     """Loosen autovacuum thresholds on LangGraph's checkpoint tables.
 
     Called once after ``PostgresSaver.setup()`` creates them
@@ -637,9 +649,12 @@ def tune_checkpoint_autovacuum(dsn: str) -> None:
     the table set). Idempotent: re-running with the same values is a
     cheap no-op ALTER, safe to call on every checkpointer construction.
     """
-    import psycopg
+    from psycopg.rows import tuple_row
 
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+    from octop_memory.storage.backends.postgres_pool import maintenance_connection
+
+    connection_scope = nullcontext(connection) if connection is not None else maintenance_connection(dsn)
+    with connection_scope as conn, conn.cursor(row_factory=tuple_row) as cur:
         for table in _POSTGRES_CHECKPOINT_TABLES:
             cur.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
             row = cur.fetchone()

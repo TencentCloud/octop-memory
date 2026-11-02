@@ -6,19 +6,17 @@ import json
 import logging
 import re
 import threading
-import time
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
-from psycopg.pq import TransactionStatus
-from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from octop_memory.domain.datetime import as_utc
 from octop_memory.storage.backends import _UNSET, _Unset
+from octop_memory.storage.backends.postgres_pool import acquire_pool
 from octop_memory.types import (
     ActiveEntity,
     Alias,
@@ -53,14 +51,6 @@ SCHEMA_VERSION = "1"
 # serialize their CREATE-IF-NOT-EXISTS work instead of racing in pg_catalog.
 _DDL_LOCK_KEY = 0x68_6D_65_6D  # "hmem"
 _DDL_LOCK_TIMEOUT = "5s"
-
-# A loaded but unused Memory must not hold one of ``max_connections`` until
-# its process exits — dozens of idle agents otherwise exhaust the server
-# (TencentCloud/Octop#1795). After this long with no use, the client closes
-# its own socket; the next operation redials in ``_reconnect_if_dead``.
-# ``idle_session_timeout`` (PostgreSQL 14+) is also set, so the server drops
-# the session even if this process never gets back to it.
-_IDLE_SESSION_TIMEOUT_S = 10 * 60
 
 # Tables with a generated tsvector column, and that column's name. Their FTS
 # indexes are namespace-scoped by ``_scope_fts_indexes_by_namespace``.
@@ -112,9 +102,6 @@ class PostgresMemoryBackend:
     Default DSN: ``postgresql://localhost/octop_memory``.
     """
 
-    # Spacing between redial attempts while the server is unreachable.
-    _RECONNECT_COOLDOWN_S = 2.0
-
     def __init__(
         self,
         namespace: str,
@@ -123,305 +110,70 @@ class PostgresMemoryBackend:
     ) -> None:
         self._ns = re.sub(r"[^a-z0-9_]", "_", namespace.lower())
         self._dsn = dsn
-        # Kept so a reconnect reproduces the caller's original settings.
-        self._connect_kwargs: dict[str, Any] = dict(kwargs)
-        self._conn = self._connect()
-        self._in_transaction: bool = False
-        self._closed: bool = False
-        self._last_reconnect_at: float = 0.0
-        self._last_used_at: float = time.monotonic()
-        # Flipped by ``_init_schema`` when the server accepts
-        # ``idle_session_timeout`` (PostgreSQL 14+). Client-side release does
-        # not consult this flag — a server that rejects the SET must still
-        # lose the session once it sits idle.
-        self._idle_release_enabled: bool = False
-        self._idle_timer: threading.Timer | None = None
-        # Serializes query use with the idle-release timer. The connection is
-        # not safe to share across threads; the lock also stops the timer from
-        # closing it mid-statement. Re-entrant: ``transaction()`` yields into
-        # code that calls ``_cursor``.
+        self._connect_kwargs = dict(kwargs)
+        self._conn: Any = None  # only held while an operation/transaction owns it
+        self._in_transaction = False
+        self._closed = False
         self._conn_lock = threading.RLock()
-        # Schema bootstrap owns its own transactions and error handling; an
-        # automatic rollback in the middle would undo half-built DDL.
-        self._booting: bool = True
+        self._booting = True
+        self._pool = acquire_pool(dsn, purpose="business", connect_kwargs=kwargs)
         try:
-            try:
+            with self._connection():
                 self._init_schema()
                 self._migrate_legacy_schema()
-            finally:
-                self._booting = False
-        except Exception:
-            # A timer armed during bootstrap would keep this object (and its
-            # connection) alive after the constructor fails.
-            with suppress(Exception):
-                self.close()
+        except BaseException:
+            self.close()
             raise
+        finally:
+            self._booting = False
 
     def close(self) -> None:
-        """Close the database connection.
-
-        Sets ``_closed`` so :meth:`_reconnect_if_dead` leaves it shut: a
-        use-after-close must stay an error rather than silently reopening
-        what the caller asked to release.
-        """
+        """Wait for this backend's operation, then release its pool reference."""
         with self._conn_lock:
-            self._closed = True
-            self._cancel_idle_timer()
-            conn = self._conn
-            if not getattr(conn, "closed", True):
-                conn.close()
+            if not self._closed:
+                self._closed = True
+                self._pool.close()
 
-    def __del__(self) -> None:
-        timer = getattr(self, "_idle_timer", None)
-        if timer is not None:
-            timer.cancel()
+    @contextmanager
+    def _connection(self) -> Generator[Any, None, None]:
+        """Borrow once per operation; nested calls retain the transaction."""
+        with self._conn_lock:
+            if self._closed:
+                raise psycopg.OperationalError("the memory backend is closed")
+            if self._conn is not None:
+                yield self._conn
+                return
+            with self._pool.connection() as conn:
+                self._conn = conn
+                try:
+                    yield conn
+                finally:
+                    self._conn = None
 
     @contextmanager
     def transaction(self) -> Generator[None, None, None]:
-        """Wrap multiple writes in a single atomic PostgreSQL transaction.
-
-        Re-entrant safe: nested calls are no-ops (the outer transaction owns
-        the commit/rollback boundary).
-        """
-        with self._conn_lock:
+        """Hold one connection and lock for the complete atomic transaction."""
+        with self._connection() as conn:
             if self._in_transaction:
                 yield
                 return
-            # Before the block owns anything: a dead connection here has no
-            # pending writes to lose, so redialling is safe. Once inside,
-            # ``_reconnect_if_dead`` refuses (see its docstring).
-            self._reconnect_if_dead()
-            self._reset_if_aborted()
-            self._in_transaction = True
-            committed = False
-            try:
-                yield
-                self._conn.commit()
-                committed = True
-            finally:
+            with conn.transaction():
+                self._in_transaction = True
                 try:
-                    if not committed:
-                        self._conn.rollback()
+                    yield
                 finally:
                     self._in_transaction = False
-                    self._last_used_at = time.monotonic()
-                    self._arm_idle_timer()
 
     @contextmanager
     def _cursor(self) -> Generator[Any, None, None]:
-        """Open a cursor with one operation-scoped transaction.
-
-        Single chokepoint for every data-access method. psycopg refuses *all*
-        commands — reads included — on a connection in ``INERROR``, so without
-        this one failed statement anywhere disables memory for the rest of the
-        process. That has happened twice (lifecycle GC and the exporter both
-        ran SQLite SQL against Postgres); recovering per operation keeps a
-        future instance of that class from being silently fatal.
-
-        Bootstrap and explicit ``transaction()`` blocks are exempt — see
-        :meth:`_reset_if_aborted`.
-        """
-        with self._conn_lock:
-            self._reconnect_if_dead()
-            self._reset_if_aborted()
-            try:
-                if self._in_transaction or self._booting:
-                    with self._conn.cursor() as cur:
-                        yield cur
-                        return
-                with self._conn.transaction(), self._conn.cursor() as cur:
-                    yield cur
-            finally:
-                self._last_used_at = time.monotonic()
-                self._arm_idle_timer()
-
-    def _commit(self) -> None:
-        """Commit only when not inside an explicit transaction block."""
-        if not self._in_transaction:
-            self._conn.commit()
-
-    def _connect(self) -> Any:
-        """Open one connection with the settings this backend was built with."""
-        return psycopg.connect(self._dsn, row_factory=dict_row, **self._connect_kwargs)
-
-    def _cancel_idle_timer(self) -> None:
-        """Drop the armed idle-release timer. Caller holds ``_conn_lock``."""
-        timer = self._idle_timer
-        self._idle_timer = None
-        if timer is not None:
-            timer.cancel()
-
-    def _arm_idle_timer(self, *, delay: float | None = None) -> None:
-        """Schedule a client-side close. Caller holds ``_conn_lock``.
-
-        Each use replaces the previous deadline. The timer only closes the
-        socket; the next operation redials.
-        """
-        self._cancel_idle_timer()
-        if self._closed:
-            return
-        wait = _IDLE_SESSION_TIMEOUT_S if delay is None else max(0.0, delay)
-        timer = threading.Timer(wait, self._release_idle_connection)
-        timer.daemon = True
-        timer.name = "octop-memory-pg-idle"
-        self._idle_timer = timer
-        timer.start()
-
-    def _release_idle_connection(self) -> None:
-        """Close the session once it has sat unused.
-
-        Does not redial. An agent that is loaded but never queried must drop
-        its ``max_connections`` slot without waiting for the next statement,
-        including on servers that reject ``idle_session_timeout``.
-        """
-        with self._conn_lock:
-            if self._closed:
-                return
-            me = threading.current_thread()
-            armed = self._idle_timer
-            # A newer deadline replaced this callback, which may already have
-            # been in flight when the new timer was armed.
-            if armed is not None and armed is not me:
-                return
-            if armed is me:
-                self._idle_timer = None
-            conn = self._conn
-            if getattr(conn, "closed", True):
-                return
+        """Finish standalone transactions before returning the connection."""
+        with self._connection() as conn:
             if self._in_transaction or self._booting:
-                self._arm_idle_timer()
-                return
-            slack = _IDLE_SESSION_TIMEOUT_S - (time.monotonic() - self._last_used_at)
-            # ``Timer`` can fire a little early; a shortfall under a second
-            # still counts as idle. A larger gap means a use landed without
-            # replacing this timer — wait out the rest, don't add another
-            # full interval.
-            if slack > 1.0:
-                self._arm_idle_timer(delay=slack)
-                return
-            logger.info("releasing idle postgres connection after %ss", _IDLE_SESSION_TIMEOUT_S)
-            try:
-                conn.close()
-            except psycopg.Error:
-                logger.warning("failed to close idle postgres connection", exc_info=True)
-
-    def _reconnect_if_dead(self) -> None:
-        """Redial a connection the server has dropped.
-
-        :meth:`_reset_if_aborted` only revives a *live* connection whose
-        transaction is poisoned. A server restart, a network blip or an idle
-        timeout is a different failure: ``closed`` is 1 and
-        ``transaction_status`` reports ``UNKNOWN``, where ``rollback()`` is a
-        no-op. Nothing reopened the connection, so the backend stayed dead for
-        the rest of the process — memory writes failing with
-        ``OperationalError: the connection is closed`` until a restart.
-
-        Three exemptions, each deliberate:
-
-        - after :meth:`close`, so a use-after-close stays an error instead of
-          silently reopening what the caller asked to release
-        - inside an explicit :meth:`transaction` block, whose earlier writes
-          died with the old connection — continuing on a fresh one would
-          commit a half-applied change set, exactly the silent corruption
-          ``_reset_if_aborted`` also refuses to paper over
-        - during schema bootstrap, which owns its own connection handling
-
-        Redialling also happens *before* a server-side idle release is
-        visible. A session idle past ``_IDLE_SESSION_TIMEOUT_S`` is treated as
-        already gone: the idle timer may have closed it, PostgreSQL 14+ may
-        have closed it after ``idle_session_timeout``, and libpq only notices
-        a server-side close on the next I/O. Without this, the first statement
-        after an idle period would fail instead of transparently getting a
-        fresh connection.
-
-        Attempts are spaced by ``_RECONNECT_COOLDOWN_S``. When the server is
-        genuinely down, every call would otherwise block on a connect timeout;
-        failing fast and retrying on the next operation is cheaper.
-        """
-        with self._conn_lock:
-            if self._closed or self._in_transaction or self._booting:
-                return
-            dead = self._conn.closed
-            if not dead and not self._idle_session_expired():
-                return
-            now = time.monotonic()
-            if now - self._last_reconnect_at < self._RECONNECT_COOLDOWN_S:
-                return
-            self._last_reconnect_at = now
-            if dead:
-                logger.warning("postgres connection was closed; reconnecting")
+                with conn.cursor() as cur:
+                    yield cur
             else:
-                logger.info("postgres connection idle past the release threshold; reconnecting")
-                self._conn.close()
-            self._conn = self._connect()
-            self._restore_session_state()
-            self._last_used_at = time.monotonic()
-
-    def _restore_session_state(self) -> None:
-        """Re-apply settings that live on the connection, not in the database.
-
-        ``search_path`` is set once at the end of :meth:`_init_schema` and every
-        statement here uses unqualified table names, so a fresh connection
-        without it resolves them against ``public`` and raises ``UndefinedTable``
-        — a reconnect that skipped this would look like a working connection
-        while every query failed.
-
-        The idle timeout is session-scoped too, so a redialled connection
-        re-applies it here and refreshes the flag that consults it.
-        """
-        self._conn.execute(f"SET search_path TO {SHARED_SCHEMA}, public")
-        self._conn.commit()
-        self._idle_release_enabled = self._enable_idle_release()
-
-    def _enable_idle_release(self) -> bool:
-        """Ask the server to release this session after an idle period.
-
-        Best-effort: ``idle_session_timeout`` exists on PostgreSQL 14+ only.
-        Older servers reject the ``SET`` with ``UndefinedObject`` (42704) —
-        which is why the broad ``psycopg.Error`` is caught rather than a named
-        class (psycopg ships no ``UnrecognizedConfigurationParameter``). A
-        ``False`` leaves client-side release in place: the idle timer still
-        closes the socket, and the next operation still redials.
-        """
-        try:
-            self._conn.execute(f"SET idle_session_timeout = '{_IDLE_SESSION_TIMEOUT_S}s'")
-            self._conn.commit()
-        except psycopg.Error:
-            with suppress(psycopg.Error):
-                self._conn.rollback()
-            logger.info("server rejected idle_session_timeout; client-side idle release still applies")
-            return False
-        return True
-
-    def _idle_session_expired(self) -> bool:
-        """Whether this session has been idle long enough to release.
-
-        Independent of ``idle_session_timeout``. Servers older than PostgreSQL
-        14 reject that setting; the client still has to drop the connection.
-        Local time is what the next operation consults, because a server-side
-        close stays invisible to libpq until the following read or write.
-        """
-        return time.monotonic() - self._last_used_at >= _IDLE_SESSION_TIMEOUT_S
-
-    def _reset_if_aborted(self) -> None:
-        """Roll back a connection stuck in an aborted transaction.
-
-        One failed statement leaves psycopg in ``INERROR``, where every later
-        command raises ``InFailedSqlTransaction`` until something rolls back.
-        Without this, a single bad statement disables writes on this connection
-        for the rest of the process — observed as memory capture failing for a
-        whole session after a GC pass ran SQLite SQL against Postgres.
-
-        Skipped inside an explicit :meth:`transaction` block, which owns its
-        own rollback and must not have the error swallowed underneath it, and
-        during schema bootstrap for the same reason.
-        """
-        if self._in_transaction or self._booting:
-            return
-        if self._conn.info.transaction_status != TransactionStatus.INERROR:
-            return
-        logger.warning("postgres connection left in an aborted transaction; rolling back")
-        self._conn.rollback()
+                with conn.transaction(), conn.cursor() as cur:
+                    yield cur
 
     # ------------------------------------------------------------------
     # Schema
@@ -770,12 +522,6 @@ class PostgresMemoryBackend:
         # shared schema for this connection's lifetime.
         self._conn.execute(f"SET search_path TO {SHARED_SCHEMA}, public")
         self._conn.commit()
-        # Same session-level category: ask the server to release this
-        # connection once it sits idle, instead of holding a
-        # ``max_connections`` slot for the whole process lifetime
-        # (TencentCloud/Octop#1795). Best-effort — see
-        # :meth:`_enable_idle_release`.
-        self._idle_release_enabled = self._enable_idle_release()
 
     def _scope_fts_indexes_by_namespace(self, cur: Any) -> None:
         """Replace single-column FTS indexes with ``(namespace, tsv)`` ones.
@@ -980,7 +726,6 @@ class PostgresMemoryBackend:
             for table in _TABLES:
                 cur.execute(f"DELETE FROM {table} WHERE namespace = %s", (self._ns,))
                 total += _rowcount(cur.rowcount)
-        self._commit()
         return total
 
     # ------------------------------------------------------------------
@@ -1015,7 +760,6 @@ class PostgresMemoryBackend:
                     Jsonb(node.metadata),
                 ),
             )
-        self._commit()
 
     def get_node(self, node_id: str) -> MemoryNode | None:
         with self._cursor() as cur:
@@ -1105,7 +849,6 @@ class PostgresMemoryBackend:
                 params,
             )
             updated = _rowcount(cur.rowcount) > 0
-        self._commit()
         return updated
 
     def delete_node(self, node_id: str, *, cascade: bool = False) -> bool:
@@ -1153,7 +896,6 @@ class PostgresMemoryBackend:
                     "DELETE FROM memory_nodes WHERE namespace = %s AND id = %s",
                     (self._ns, node_id),
                 )
-        self._commit()
         return True
 
     def search_memories(self, query: str, limit: int = 5) -> list[MemoryNode]:
@@ -1210,14 +952,10 @@ class PostgresMemoryBackend:
                     Jsonb(event.payload),
                 ),
             )
-        self._commit()
 
     def save_raw_batch(self, events: list[RawEvent]) -> None:
         if not events:
             return
-        # Hot capture path: recover before writing so an unrelated failed
-        # statement cannot silently disable memory capture for the session.
-        self._reset_if_aborted()
         rows = [
             (
                 self._ns,
@@ -1242,7 +980,6 @@ class PostgresMemoryBackend:
                 """,
                 rows,
             )
-        self._commit()
 
     def get_raw(self, event_id: str) -> RawEvent | None:
         with self._cursor() as cur:
@@ -1323,7 +1060,6 @@ class PostgresMemoryBackend:
                 (self._ns, before),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count
 
     def get_raw_events_by_ids(self, event_ids: list[str]) -> list[RawEvent]:
@@ -1409,7 +1145,6 @@ class PostgresMemoryBackend:
                     Jsonb(candidate.payload),
                 ),
             )
-        self._commit()
 
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         with self._cursor() as cur:
@@ -1497,7 +1232,6 @@ class PostgresMemoryBackend:
                 params,
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def search_candidates(self, query: str, *, limit: int = 10) -> list[Candidate]:
@@ -1544,7 +1278,6 @@ class PostgresMemoryBackend:
                     atom.created_at,
                 ),
             )
-        self._commit()
 
     def get_atom(self, atom_id: str) -> AtomCard | None:
         with self._cursor() as cur:
@@ -1603,7 +1336,6 @@ class PostgresMemoryBackend:
                 (new_atom_id, deprecated_at, self._ns, old_atom_id),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def deprecate_atom(self, atom_id: str, *, deprecated_at: datetime) -> bool:
@@ -1613,7 +1345,6 @@ class PostgresMemoryBackend:
                 (deprecated_at, self._ns, atom_id),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def search_atoms(
@@ -1775,7 +1506,6 @@ class PostgresMemoryBackend:
                     entity.created_at,
                 ),
             )
-        self._commit()
 
     def get_entity(self, entity_id: str) -> Entity | None:
         with self._cursor() as cur:
@@ -1862,7 +1592,6 @@ class PostgresMemoryBackend:
                     (delta, self._ns, entity_id),
                 )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def update_entity_canonical_name(self, entity_id: str, canonical_name: str) -> bool:
@@ -1872,7 +1601,6 @@ class PostgresMemoryBackend:
                 (canonical_name, self._ns, entity_id),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     # ------------------------------------------------------------------
@@ -1895,7 +1623,6 @@ class PostgresMemoryBackend:
                     alias.created_at,
                 ),
             )
-        self._commit()
 
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         with self._cursor() as cur:
@@ -1975,7 +1702,6 @@ class PostgresMemoryBackend:
                     page.updated_at,
                 ),
             )
-        self._commit()
 
     def get_entity_page(self, entity_id: str) -> EntityPage | None:
         with self._cursor() as cur:
@@ -2047,7 +1773,6 @@ class PostgresMemoryBackend:
                         when,
                     ),
                 )
-        self._commit()
 
     def apply_entity_page_regen(
         self,
@@ -2081,7 +1806,6 @@ class PostgresMemoryBackend:
                 ),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def record_entity_page_regen_failure(
@@ -2100,7 +1824,6 @@ class PostgresMemoryBackend:
                 (when, self._ns, entity_id),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     def apply_entity_page_user_edit(
@@ -2121,7 +1844,6 @@ class PostgresMemoryBackend:
                 (summary_markdown, when, when, self._ns, entity_id),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count > 0
 
     # ------------------------------------------------------------------
@@ -2146,7 +1868,6 @@ class PostgresMemoryBackend:
                     record.source,
                 ),
             )
-        self._commit()
 
     def list_active_entities(
         self,
@@ -2185,7 +1906,6 @@ class PostgresMemoryBackend:
                 (self._ns, thread_id, self._ns, thread_id, keep),
             )
             count = _rowcount(cur.rowcount)
-        self._commit()
         return count
 
     @staticmethod
@@ -2223,7 +1943,6 @@ class PostgresMemoryBackend:
                     entry.note,
                 ),
             )
-        self._commit()
 
     def list_journal(
         self,
@@ -2298,7 +2017,6 @@ class PostgresMemoryBackend:
                 params,
             )
             deleted = int(cur.rowcount)
-        self._commit()
         return deleted
 
     def _meta_key(self, key: str) -> str:
@@ -2317,7 +2035,6 @@ class PostgresMemoryBackend:
                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
                 (self._meta_key(key), value),
             )
-        self._commit()
 
     # ------------------------------------------------------------------
     # M5 — Episodes (L2.5 diary layer)
@@ -2349,7 +2066,6 @@ class PostgresMemoryBackend:
                     as_utc(episode.created_at),
                 ),
             )
-        self._commit()
 
     def get_episode(self, episode_id: str) -> Episode | None:
         with self._cursor() as cur:
@@ -2469,7 +2185,6 @@ class PostgresMemoryBackend:
                     digest.updated_at,
                 ),
             )
-        self._commit()
 
     def get_digest(self, period_kind: DigestPeriod, period_key: str) -> DigestRecord | None:
         with self._cursor() as cur:

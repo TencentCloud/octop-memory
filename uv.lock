@@ -1832,7 +1832,7 @@ wheels = [
 
 [[package]]
 name = "octop-memory"
-version = "1.0.0"
+version = "1.0.2"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1861,6 +1861,7 @@ langgraph-postgres = [
 ]
 postgres = [
     { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
 ]
 qdrant = [
     { name = "qdrant-client" },
@@ -1893,6 +1894,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph'", specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'langgraph-postgres'", specifier = ">=3.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = ">=1.7" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'dashboard'", specifier = ">=0.29" },

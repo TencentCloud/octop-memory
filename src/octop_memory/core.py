@@ -1773,17 +1773,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             return None
 
         try:
-            import psycopg
             from langgraph.checkpoint.postgres import PostgresSaver
-            from psycopg.rows import dict_row
-            from psycopg_pool import ConnectionPool
 
             from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+            from octop_memory.storage.backends.postgres_pool import acquire_pool
         except ImportError:
-            # Base `langgraph` being importable does not mean
-            # `langgraph-checkpoint-postgres` is installed. Degrade gracefully so
-            # constructing ``Memory`` still works for consumers that never
-            # checkpoint; the caller raises the precise install hint instead.
             return None
 
         # Narrow rather than duck-type ``_dsn``: reading backend privates without
@@ -1792,47 +1786,25 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         if not isinstance(backend, PostgresMemoryBackend):
             return None
 
-        # from_conn_string() is a short-lived context manager; keep a pool for
-        # the lifetime of this Memory instance instead.
-        #
-        # ``min_size=0``: an agent that sits idle must not pin a Postgres
-        # connection for the rest of the process lifetime — dozens of loaded
-        # agents otherwise fill ``max_connections`` and never let go
-        # (TencentCloud/Octop#1795). The pool's maintenance closes connections
-        # idle beyond ``max_idle`` (psycopg_pool default: 10 minutes) and the
-        # next checkpoint operation transparently opens a fresh one.
-        #
-        # The annotation states what ``row_factory=dict_row`` below already
-        # makes true at runtime: bare ``ConnectionPool`` infers tuple rows,
-        # while ``PostgresSaver`` requires dict rows.
-        #
-        # ``check`` probes each connection on checkout: psycopg_pool's default
-        # max_lifetime recycling can otherwise hand a caller a connection the
-        # server is already terminating (AdminShutdown), and the checkpointer
-        # does not retry, so a whole invocation fails.
-        pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] = ConnectionPool(
-            conninfo=backend._dsn,
-            min_size=0,
-            max_size=4,
-            check=ConnectionPool.check_connection,
-            kwargs={
-                "autocommit": True,
-                "prepare_threshold": 0,
-                "row_factory": dict_row,
-            },
-            open=True,
-        )
-        self._checkpointer_pool = pool
-        saver = PostgresSaver(pool)
-        saver.setup()
-
+        pool = acquire_pool(backend._dsn, purpose="checkpoint", connect_kwargs=backend._connect_kwargs)
         try:
-            from octop_memory.pipeline.lifecycle.vacuum import tune_checkpoint_autovacuum
+            saver = PostgresSaver(pool)
 
-            tune_checkpoint_autovacuum(backend._dsn)
-        except DRIVER_ERRORS:  # pragma: no cover - best-effort, never load-bearing
-            logger.warning("failed to tune checkpoint table autovacuum settings", exc_info=True)
+            def initialize() -> None:
+                saver.setup()
+                try:
+                    from octop_memory.pipeline.lifecycle.vacuum import tune_checkpoint_autovacuum
 
+                    with pool.connection() as conn:
+                        tune_checkpoint_autovacuum(backend._dsn, connection=conn)
+                except DRIVER_ERRORS:  # best-effort, never load-bearing
+                    logger.warning("failed to tune checkpoint table autovacuum settings", exc_info=True)
+
+            pool.initialize(initialize)
+        except BaseException:
+            pool.close()
+            raise
+        self._checkpointer_pool = pool
         return saver
 
 

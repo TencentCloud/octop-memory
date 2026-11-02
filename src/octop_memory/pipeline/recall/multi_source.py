@@ -18,6 +18,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from octop_memory.domain.retention import is_runtime_error
 from octop_memory.pipeline.recall.parser import ParsedQuery
 from octop_memory.pipeline.recall.rerank import (
     RerankCandidate,
@@ -26,6 +27,7 @@ from octop_memory.pipeline.recall.rerank import (
     from_page_headline,
     from_raw,
 )
+from octop_memory.pipeline.recall.suppress import duplicates_manual_context, manual_recall_policy
 from octop_memory.pipeline.recall.timeout import (
     DEFAULT_ATOM_BUDGET_MS,
     DEFAULT_RAW_BUDGET_MS,
@@ -51,6 +53,7 @@ def gather_candidates(
     per_source_limit: int = 10,
     sw: Stopwatch | None = None,
     entity_anchor_ids: Sequence[str] = (),
+    manual_context: dict[str, str] | None = None,
 ) -> list[RerankCandidate]:
     """Run each enabled source, collect ``RerankCandidate``s.
 
@@ -73,7 +76,8 @@ def gather_candidates(
 
     stopwatch = sw or Stopwatch()
     out: list[RerankCandidate] = []
-    raw_seen_ids: set[str] = set()
+    manual_policy = manual_recall_policy(memory)
+    raw_seen_ids: set[str] = set(manual_policy.get("demoted_raw_ids", []))
     seen_atom_ids: set[str] = set()
 
     for source in sources:
@@ -95,6 +99,10 @@ def gather_candidates(
                 _log.warning("recall atom gather failed", exc_info=True)
                 continue
             for idx, atom in enumerate(atoms):
+                if duplicates_manual_context(atom, manual_policy, manual_context):
+                    raw_seen_ids.update(atom.raw_event_ids)
+                    raw_seen_ids.add(atom.quote_event_id)
+                    continue
                 if atom.id in seen_atom_ids:
                     continue
                 seen_atom_ids.add(atom.id)
@@ -120,6 +128,8 @@ def gather_candidates(
                 continue
             kept = 0
             for event in events:
+                if event.payload.get("manual_document_evidence"):
+                    continue
                 if kept >= per_source_limit:
                     break
                 if event.id in raw_seen_ids:
@@ -147,6 +157,8 @@ def gather_candidates(
                 _log.warning("recall page_headline gather failed", exc_info=True)
                 continue
             for idx, page in enumerate(pages):
+                if page.dirty and page.entity_id in manual_policy.get("demoted_entity_ids", []):
+                    continue
                 if page.entity_id in {c.entity_id for c in out}:
                     continue  # entity already represented by an atom hit
                 out.append(from_page_headline(page, rank_index=idx))
@@ -171,6 +183,10 @@ def gather_candidates(
                 _log.warning("recall vector gather failed", exc_info=True)
                 continue
             for idx, atom in enumerate(vector_atoms):
+                if duplicates_manual_context(atom, manual_policy, manual_context):
+                    raw_seen_ids.update(atom.raw_event_ids)
+                    raw_seen_ids.add(atom.quote_event_id)
+                    continue
                 if atom.id in seen_atom_ids:
                     continue  # already matched by FTS, skip duplicate
                 seen_atom_ids.add(atom.id)
@@ -326,6 +342,8 @@ def _per_token_raw_search(
             _log.warning("recall raw search failed for token %r: %s", token, exc, exc_info=True)
             continue
         for evt_idx, event in enumerate(events):
+            if is_runtime_error(event):
+                continue
             if event.id not in seen:
                 seen[event.id] = (token_idx, evt_idx, event)
     ranked = sorted(seen.values(), key=lambda kv: (kv[0], kv[1]))

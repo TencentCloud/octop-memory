@@ -21,6 +21,7 @@ disambiguation; duplicate/conflict checks remain rule-only in this worker.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -176,6 +177,14 @@ class PromotionWorker:
         """
         if candidate.status in ("promoted", "rejected"):
             raise ValueError(f"candidate {candidate.id!r} is already {candidate.status}")
+        if candidate.payload.get("manual_revision"):
+            from octop_memory.domain.retention import MANUAL_DOCUMENTS_META_KEY
+
+            with self._memory.backend.transaction():
+                record = json.loads(self._memory.get_meta(MANUAL_DOCUMENTS_META_KEY) or "{}")
+                if record.get("revision") != candidate.payload["manual_revision"]:
+                    raise ValueError("The manual document changed; review the current version before approving")
+                return self._approve_one(candidate)
         return self._approve_one(candidate)
 
     # ------------------------------------------------------------------

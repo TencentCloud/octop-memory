@@ -1,11 +1,12 @@
 """5-check promotion logic for L1 Candidate → L2 AtomCard (design §8.3.2).
 
 Demotion-only philosophy: every candidate becomes an atom by default. We
-only step away from the happy path in three cases:
+only step away from the happy path in these cases:
 
 1. ``importance=low AND confidence=low`` → drop (chit-chat noise)
-2. Existing atom is identical → merge (no new row)
-3. Existing atom directly contradicts → needs_review / conflict
+2. Synthetic runtime failure as evidence → drop (unless explicitly user-retained)
+3. Existing atom is identical → merge (no new row)
+4. Existing atom directly contradicts → needs_review / conflict
 
 The five checks run in fixed order. The first one that produces a
 terminal outcome wins; later checks are skipped. This module is **pure
@@ -22,7 +23,8 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 from octop_memory.domain.alias import normalize_alias
-from octop_memory.types import AtomCard, Candidate
+from octop_memory.domain.retention import is_runtime_error_candidate
+from octop_memory.types import AtomCard, Candidate, RawEvent
 
 # ---------------------------------------------------------------------------
 # Negation-token dictionary used by check 5
@@ -197,7 +199,7 @@ def check_value(candidate: Candidate) -> PromotionOutcome | None:
 class EvidenceLookup(Protocol):
     """Minimal duck-typed interface for the worker's raw-event store."""
 
-    def get_raw(self, event_id: str) -> object | None:
+    def get_raw(self, event_id: str) -> RawEvent | None:
         """Return the raw event for ``event_id``, or ``None``."""
         ...
 
@@ -223,6 +225,8 @@ def check_evidence(
     check lightweight saves one DB hit per cited event.
     """
     del now  # reserved for future "future-dated event" check
+    if is_runtime_error_candidate(candidate, evidence_store.get_raw):
+        return PromotionOutcome(kind="drop", reason="synthetic runtime failure has no durable memory value")
     if not candidate.raw_event_ids:
         return PromotionOutcome(
             kind="drop",

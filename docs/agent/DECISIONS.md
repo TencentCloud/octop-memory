@@ -61,7 +61,7 @@ OpenClaw 在 prompt build 前调用可选 `recallPrefetcher`，把结果交给�
 
 ## ADR-012：capture 兼容短 CJK 消息并剥离 think（Accepted）
 
-共享 capture policy 使用 CJK 加权长度和显式记忆意图，在判长与入库前剥离 `<think>`。
+共享 capture policy 使用 CJK 加权长度，在判长与入库前剥离 `<think>`；不再按显式记忆意图关键词给短消息放行，主动保存由 Agent 调用 memory_save。
 避免各宿主重复实现过滤与推理文本回灌；代价是边界消息可能被过滤，修改阈值时验证多语言样本。
 
 ## ADR-021：分层目录与共享 MemoryRuntime（Accepted）
@@ -119,7 +119,7 @@ prompt recall 在 rerank 前执行 `raw_policy=fallback`，有提炼结果时不
 pending 走自动检查；conflict/needs_review 由 approve 处理，duplicate 合并，矛盾 active atom 被 successor 替代。
 写入、candidate 状态、supersede、user journal 在同一事务内；代价是明确覆盖自动判断，不能把它当普通重试。
 
-## ADR-032：PostgreSQL 在 cursor 边界恢复连接（Accepted）
+## ADR-032：PostgreSQL 在 cursor 边界恢复连接（Superseded by ADR-040）
 
 transaction 外才允许 reset/reconnect 并恢复 search_path；显式 transaction 内失败即失败。
 避免静默提交半套写入；代价是调用方需重试整个事务。既有 SQLite-only GC 缺口不代表允许静默能力分叉。
@@ -161,3 +161,57 @@ SQLite checkpoint 编码、`hm_*` 表和 `.hmpkg` 格式属于持久化协议，
 查询、文件和超时失败使用 `storage/driver_errors.py` 的 `DRIVER_ERRORS`（`sqlite3.Error`、已安装时的 `psycopg.Error`、`OSError`、`TimeoutError`、`RuntimeError`），记 warning 后降级。向量索引使用 `VECTOR_ERRORS`。doctor、抽取入口、bridge、idle maintenance、backfill 与 host 轮询使用 `REPORTABLE_ERRORS`。
 事务回滚和 checkpoint 备份删除用 `try` / `finally`，失败和取消都会回滚。
 这些元组之外的异常向上抛。`AssertionError` 不在降级集合里。
+
+## ADR-039：SQLite 每 backend 一条连接，按操作与事务串行（Accepted）
+
+为避免多 agent 与常驻 worker 的连接数相乘，移除线程本地 SQLite 连接注册表。
+每 backend 使用一条 `check_same_thread=False` 连接和可重入锁，锁覆盖完整 execute/fetch/commit，
+显式事务与关闭也持同一锁；非显式事务中的失败写入回滚后再抛出原错误。
+vacuum、WAL truncate 和 export 的内部 SQL 同样受保护，避免维护与正常写入串入同一事务。
+
+选择单连接而非引入 SQLite 连接池，减少空闲 fd 和生命周期分支。PostgreSQL 的共享池见 ADR-040。
+代价是慢查询和长显式事务会阻塞同 backend 的其他 SQL；LLM 调用不在这些操作锁内，
+不同 backend 以及单独的 checkpoint 连接仍可并行。保留 SQLite/WAL、表、事务原子性与召回契约，
+无需数据迁移。后续若要增加同 backend SQL 并行，必须使用有界连接租约并重新验证事务与关闭行为。
+
+
+## ADR-040：PostgreSQL 按连接配置共享有界池（Accepted）
+
+每 agent 一条业务连接加独立 checkpoint 池仍会叠加容量：69 个活跃实例至少需要 138 条会话，
+10 分钟空闲释放无法覆盖活跃峰值。改为按进程、规范化 DSN 与驱动选项共享 8 条业务连接和 4 条
+checkpoint/维护连接；namespace 留在 SQL 条件中，不参与池标识。不同会话设置使用独立池，避免串用身份或配置。
+
+业务借用连接覆盖完整 cursor/结果读取/事务，显式事务跨调用保留同一连接和 backend 可重入锁。
+池在 checkout 探测坏连接，归还时提交或回滚，事务中断不重拨后续写。连接的 search_path 由池配置回调恢复。
+原 backend 私有常驻 `_conn`、逐实例空闲 Timer 和重连冷却由 psycopg_pool 的回收、探测及重连退避替代。
+`postgres` extra 显式声明已经用于 checkpoint 的 psycopg-pool，避免另写一套业务池。
+
+LangGraph 按类型要求 ConnectionPool；内部租约适配器继承该类型但不开启自身池，仅将 `connection()`
+委托给共享池，且让 saver.conn 与 Memory._checkpointer_pool 指向同一个幂等租约，兼容宿主两次 close。
+每租约只释放一次引用，关闭等待其在途操作，最后引用关闭真实池。checkpoint setup 按池串行一次，
+失败不发布 saver/租约且立即回收；autovacuum 设置与维护操作也借用池内连接。
+
+每池最多 64 个等待者、30 秒 checkout 超时，`min_size=0`、`max_idle=600`。容量不足必须报错，
+不无限开连接或重放可能已提交的写入。此预算是进程内边界；多进程、不同连接配置及宿主控制面仍需各自计入服务端容量。
+无 schema、持久化编码、召回排序或 namespace 契约变更。真实 PG 回归覆盖 69 agent、事务/隔离、
+饱和与恢复、空闲/坏连接、初始化失败及关闭引用；SQLite 保持同组公共行为断言。
+
+## ADR-041：按来源隔离运行诊断，保护用户知识（Accepted）
+
+运行失败的发生事实不等于可长期使用的知识。octop-harness / Octop 使用 `on_failure="error"` 让模型失败保留为 checkpoint 异常，由宿主单独展示；团队自动失败通知排除采集。仍合成错误回复的宿主必须标记 `payload.octop_runtime_error=true`，memory 在 capture、两类 extractor、promotion 和 raw prompt recall 仅按结构化来源排除。移除“记住”与“已验证”等意图/价值词表；主动保存由 Agent 自行调用 memory_save，手动写入、人工批准/编辑按来源保护。提炼模型判断普通对话的长期价值。⚠️ 召回/写入路径变更：后台采集不再给意图短句特例；存量治理即使 apply 也只软停用全部证据均带错误标记的自动记录。旧版严格重试失败格式仅在 operations 审核清单中使用，缺失或混合来源保留原状态、返回 review_*_ids；不据文字推断来源，不删 raw 或新增 schema。
+
+## ADR-042：手动文档为准，冲突转候选，去重绑定会话快照（Accepted）
+
+USER.md/MEMORY.md 由宿主用户维护，聊天原有统一加载器只在 session 首次加载全文。
+memory 接收当前文件作治理，不负责文件读写或刷新提示词；宿主保存后显式核对，并可在普通保存/
+自动晋升后通过 provider 检查。⚠️ 召回/写入路径变更：只有同主体/字段/时间范围的高置信互斥事实、
+且模型引用真实完整原文，才在同一 backend 事务内软停用旧 Atom、建立替代事实 Candidate 和 Journal。
+原始证据不删，未审核替代事实不晋升；旧 raw 不再自动兜底，dirty 页面等待重建。
+历史事件、正常排障经验、不同情境及两个手动文档互相矛盾时不强行改判。
+
+重复 Atom 不删，召回只在实际 session snapshot 含同一信息时抑制；不会把新文件版本硬塞入旧会话。
+元数据保存对账版本和审计比较快照；独立小清单参与 recall cache key，避免旧缓存复活。
+模型失败、不确定、伪造证据、版本变化和超限均显式报告；每次最多 100 条新 Atom 可续查。
+采纳检查最后对账版本，宿主附当前文档可拦截未重新对账的变化。使用既有 Service/Bridge/
+retention/promotion/recall 模块及 backend contract，不建新 schema、全文索引或独立加载器。
+SQLite/真实 PG 同组测试验证事务、幂等、证据保留及 prompt 过滤。

@@ -24,6 +24,22 @@ jobs:
     name: Build distributions
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: octop_test
+          POSTGRES_PASSWORD: octop_test
+          POSTGRES_DB: octop_memory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U octop_test -d octop_memory_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_DSN: postgresql://octop_test:octop_test@localhost:5432/octop_memory_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +57,13 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Test real Harness background review
+        run: |
+          # Pin the host containing the asynchronous review scheduler (Harness #110).
+          uv pip install "octop-harness @ git+https://github.com/TencentCloud/octop-harness.git@84c19536dec83a5d36e3c17a18f2df8f71c0f65e"
+          uv run --no-sync python -c "from octop_harness.middleware.memory import MemoryMiddleware"
+          uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs
 
       - name: Build package
         run: make build

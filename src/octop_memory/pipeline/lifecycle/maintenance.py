@@ -300,27 +300,28 @@ def maybe_truncate_wal(
         stats.wal_bytes_after = before
         return stats
 
-    conn = backend._conn
-    if conn.in_transaction:
-        stats.skipped_reason = "in_transaction"
-        stats.wal_bytes_after = before
-        return stats
+    with backend._conn_lock:
+        conn = backend._conn
+        if conn.in_transaction:
+            stats.skipped_reason = "in_transaction"
+            stats.wal_bytes_after = before
+            return stats
 
-    try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-    except REPORTABLE_ERRORS as exc:
-        stats.error = f"{type(exc).__name__}: {exc}"
-        _LOG.warning("wal truncate failed", exc_info=True)
-        stats.wal_bytes_after = wal_path.stat().st_size if wal_path.exists() else 0
-        return stats
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except REPORTABLE_ERRORS as exc:
+            stats.error = f"{type(exc).__name__}: {exc}"
+            _LOG.warning("wal truncate failed", exc_info=True)
+            stats.wal_bytes_after = wal_path.stat().st_size if wal_path.exists() else 0
+            return stats
 
-    if row is not None:
-        stats.busy, stats.log, stats.checkpointed = int(row[0]), int(row[1]), int(row[2])
-    after = wal_path.stat().st_size if wal_path.exists() else 0
-    stats.wal_bytes_after = after
-    if stats.busy:
-        stats.skipped_reason = "busy"
-    return stats
+        if row is not None:
+            stats.busy, stats.log, stats.checkpointed = int(row[0]), int(row[1]), int(row[2])
+        after = wal_path.stat().st_size if wal_path.exists() else 0
+        stats.wal_bytes_after = after
+        if stats.busy:
+            stats.skipped_reason = "busy"
+        return stats
 
 
 __all__ = [

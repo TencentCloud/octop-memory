@@ -106,6 +106,8 @@ memory = Memory(
 
 Use deployment configuration for real credentials. SQLite isolates memory with table prefixes; PostgreSQL uses namespace-first keys in the shared `octop_memory` schema.
 
+Within one process, PostgreSQL instances with the same connection settings share a business pool (up to 8 connections) and a checkpoint/maintenance pool (up to 4), independent of agent count. Each pool allows at most 64 queued requests with a 30-second checkout timeout; saturation raises an explicit error. Idle pools can shrink to zero, and closing one instance leaves other instances usable. Budget separately for multiple processes, different connection settings, and the host's own database connections.
+
 ## CLI
 
 Install `[cli]`. Global options precede subcommands; use an explicit database and namespace when following examples.
@@ -196,6 +198,10 @@ rather than immediately after every write. Episode extraction is a parallel path
 Manual `Memory.store()` needs no model and directly creates RawEvent/Candidate/AtomCard plus a leaf reference.
 
 Prompt recall routes `atom` and `raw` by default, adds `page_headline` when an entity is resolved, and adds `vector` when configured. With the default raw fallback policy, durable hits suppress raw; passing the current session/thread excludes its raw events from prompt injection.
+
+Synthetic runtime failures are excluded from automatic capture, extraction and raw prompt fallback. octop-harness / Octop raise model errors into checkpoint task failures and display diagnostics separately; automatic team failure notifications are excluded from capture. Hosts that still create synthetic replies must mark them with `payload.octop_runtime_error=true`; online filtering uses structured provenance only. Agents decide when to call `memory_save`; approvals and manual saves are protected by their provenance, without intent or troubleshooting-value keyword lists. Automatic capture keeps its length policy with no intent-keyword exception; explicit saves bypass that capture policy. Original diagnostics remain inspectable by ID. `operations.retention.audit_runtime_errors(memory)` previews eligible records by default; even `apply=True` retires only automatic atoms whose evidence is entirely marked as runtime failures. The fixed legacy retry envelope only nominates `review_atom_ids` / `review_candidate_ids`; missing and mixed evidence stays unchanged for human review.
+
+`MemoryService.reconcile_manual_documents({"USER.md": text, "MEMORY.md": text})` gives owner-edited documents priority. Bridge exposes the same operation and `manual_document_review_status`. Proven conflicts softly retire the old atom and create a replacement review candidate with original evidence and a journal trail; acceptance makes the replacement a confirmed fact. Duplicate atoms remain stored; pass the actual session snapshot as `recall(..., manual_context=documents)` to suppress repeated context. An optional `manual_documents_provider` supplies current files to background review. `save`, extraction, and promotion do not synchronously run manual-document comparison; the host calls the public `MemoryService.review_new_memory(max_atoms=20)` on a background worker (the method itself is synchronous). An explicit reconcile still checks up to 100 new facts per call and accepts at most 100,000 document characters. A failed model batch is deferred, and three failures mark those facts uncertain without retiring them. Partial checks are resumable; unavailable/uncertain/invalid semantic checks are explicit and never force retirement. Full documents are comparison metadata, not indexed atoms. See ADR-042.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md); the [project map](docs/agent/PROJECT_MAP.md) covers architecture and data flow. AI contributors use [AGENTS.md](AGENTS.md), with task clarification and handoff in [HANDOFF.md](docs/agent/HANDOFF.md).
 

@@ -57,6 +57,8 @@ class Bridge:
             "capture": self._runtime.capture,
             "extract": self._runtime.extract,
             "promote": self._runtime.promote,
+            "reconcile_manual_documents": self._runtime.reconcile_manual_documents,
+            "manual_document_review_status": self._runtime.manual_document_review_status,
         }
         self._dispatch.update(dashboard_data.build_dispatch(memory))
 

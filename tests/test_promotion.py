@@ -743,19 +743,16 @@ def memory_both(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Memo
         yield Memory(namespace="promo_both", backend_config={"db_path": str(tmp_path / "both.sqlite")})
         return
 
-    psycopg = pytest.importorskip("psycopg", reason="psycopg not installed")
+    request.getfixturevalue("postgres_dsn")
     from octop_memory.storage.backends.postgres import PostgresMemoryBackend
 
     ns = f"promo_{uuid.uuid4().hex[:12]}"
-    try:
-        backend = PostgresMemoryBackend(namespace=ns, dsn=_PG_DSN)
-    except psycopg.OperationalError:
-        pytest.skip("PostgreSQL not available")
+    backend = PostgresMemoryBackend(namespace=ns, dsn=_PG_DSN)
     memory = Memory(namespace=ns, backend=backend)
     try:
         yield memory
     finally:
-        if not backend._conn.closed:
+        if not backend._closed:
             backend.purge_namespace()
         backend.close()
 
