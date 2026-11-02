@@ -391,6 +391,11 @@ class OctopMemoryProvider(MemoryProvider):
             recall=self._config.get("recall") if isinstance(self._config.get("recall"), dict) else {},
             capture=capture_cfg,
             privacy=self._config.get("privacy") if isinstance(self._config.get("privacy"), dict) else {},
+            # Forward the model-assist blocks exactly like the bridge's own
+            # `_parse_bridge_config` does; without them the runtime always
+            # falls back to NoopLLMClient and extraction is silently off.
+            llm=self._config.get("llm") if isinstance(self._config.get("llm"), dict) else {},
+            extraction=(self._config.get("extraction") if isinstance(self._config.get("extraction"), dict) else {}),
         )
 
     def _build_host_files_index(self, *, db_path: Path, namespace: str) -> HostFilesIndex | None:

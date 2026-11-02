@@ -138,8 +138,15 @@ class MemoryRuntime:
             not isinstance(k, str) or not isinstance(v, str) for k, v in documents.items()
         ):
             raise ValueError("documents must map filenames to text")
+        raw_limit = params.get("maxAtoms", 100)
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit < 1:
+            raise ValueError("maxAtoms must be a positive integer")
         return reconcile_manual_documents(
-            self._memory, documents, llm=self._llm if self._llm_configured else None, is_current=is_current
+            self._memory,
+            documents,
+            llm=self._llm if self._llm_configured else None,
+            is_current=is_current,
+            max_atoms=raw_limit,
         )
 
     def manual_document_review_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -153,8 +160,13 @@ class MemoryRuntime:
             raise ValueError("documents must map filenames to text")
         return manual_document_review_status(self._memory, documents)
 
-    def review_new_memory(self) -> dict[str, Any] | None:
-        """Check writes against current owner files without refreshing chat snapshots."""
+    def review_new_memory(self, *, max_atoms: int = 20) -> dict[str, Any] | None:
+        """Check one background batch against current owner files.
+
+        Callers on a chat turn must not wait for this. The host drains a
+        bounded batch after the save returns. An explicit
+        ``reconcile_manual_documents`` call still uses its own limit.
+        """
         provider = self._manual_documents_provider
         if provider is None:
             return None
@@ -162,7 +174,10 @@ class MemoryRuntime:
             documents = provider()
             if not any(body.strip() for body in documents.values()):
                 return None
-            return self.reconcile_manual_documents({"documents": documents}, is_current=lambda: provider() == documents)
+            return self.reconcile_manual_documents(
+                {"documents": documents, "maxAtoms": max_atoms},
+                is_current=lambda: provider() == documents,
+            )
         except REPORTABLE_ERRORS:
             logger.warning("Manual-document review after memory write is unavailable", exc_info=True)
             return {"status": "unavailable"}
@@ -618,8 +633,6 @@ class MemoryRuntime:
                 "llm_calls": promo.llm_calls,
             }
             response["llm_calls"] += promo.llm_calls
-            if promo.promoted or promo.merged:
-                response["manual_documents"] = self.review_new_memory()
 
         # Page regen needs the heavy tier — pointless against a Noop
         # client (every page would just record a regen failure).
@@ -694,8 +707,6 @@ class MemoryRuntime:
             "llm_calls": promo.llm_calls,
             "pages": None,
         }
-        if promo.promoted or promo.merged:
-            response["manual_documents"] = self.review_new_memory()
         if regen_pages and self._llm_configured:
             extraction_cfg = self._extraction_cfg()
             batch = regenerate_dirty(

@@ -18,12 +18,19 @@
 
 ### EntityPage 再生成的旧快照覆盖
 
-- **状态 / 场景**：实现、专项审查修复与完整 Linux 门禁通过，准备本地提交交付，尚未推送；以 `develop` 345c600 为基线。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
+- **状态 / 场景**：[PR #24](https://github.com/TencentCloud/octop-memory/pull/24) 的原始实现与专项回归通过；维护者同步当前 `develop`，保留两侧文档，合并前完整门禁与 CI 在 PR 中记录。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
 - **范围与验收**：SQLite/PostgreSQL 同步增加 mutation_version，正文写入和 dirty 失效递增，失败计数不推进；生成成功/失败写回均在同条 SQL 核对读取版本。summary_version 含义保留，模型调用无长事务；旧快照拒绝写入、不伪造成功 journal，后续显式重试可成功。
 - **方案 / 假设**：事实变化使用既有 mark_entity_page_dirty 调用链；绕过该调用链的低层 Atom 写入不新增自动治理。已有页面自动补零版本列；低层 apply 方法新增可选条件参数，旧调用保持原行为。
 - **验证**：原实现 12 项交错用例失败；后续兼容/并发迁移先 3 failed / 2 passed，专项审查新增五项先全部失败。当前 `PageRegenerationConcurrency / PageRevisionBootstrap / LegacyPageBackend / ConcurrentPageRevisionMigration` 共 28 passed，真实 PG 无 skip。Ubuntu / Python 3.12.3 / 专用 PostgreSQL 16.15 执行 `make all RUN='<venv-python> -m'`，format/lint/strict mypy 通过，1533 passed / 3 skipped。跳过为 dashboard extra 和两个 Hermes checkout E2E；Windows 相关定向回归与文档/架构检查均通过。
 - **兼容 / 迁移**：普通调用保留旧 backend 签名；显式条件不支持时保留错误，不降级重放。SQLite BEGIN IMMEDIATE 保护检查/加列，PG 初始化锁内先查列、仅缺列时 ALTER；schema 标记 2，旧页正文和 summary_version 保留。第三方 backend 和所有写入进程仍须维护新契约，见 KNOWN_RISKS。
-- **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。本地提交与补丁以完整门禁为准交付，用户按安排向 develop 提 PR；Python 3.13 与 GitHub-hosted CI 尚待运行。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
+- **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。以当前合并结果的完整门禁及 Python 3.12/3.13 CI 为合并依据，不以旧基线验证替代。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
+### 后台手动文档审核公共入口（Octop #2358）
+
+- **状态 / 链接**：实现与本地验证完成，待审阅；[Octop #2358](https://github.com/TencentCloud/Octop/issues/2358)，接续 memory #31 / harness #110。
+- **问题与验收**：宿主检查 `MemoryService.review_new_memory` 时方法不存在，保存回调和维护拍均静默跳过审核。补公开转发，真实宿主两条路径须生成冲突候选并保留证据；阻塞模型时 save 须已返回；每批最多 20 条并可续查。
+- **范围**：`service.py` 公共入口、公共 API 与真实 Harness 跨包测试、CI/release 及相关说明。复用原 Runtime，不改 schema、语义审核规则、召回排序或后台调度。
+- **验证**：公共接口与跨包回归修复前 15 failed；修复后 `pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs` 247 passed。真实 Harness 固定提交 `84c1953`，`-k HarnessManualReview` 8 passed / 0 skipped，包含 SQLite 和专用 PostgreSQL。设置专用 `TEST_POSTGRES_DSN` 后 `make all RUN='.venv/bin/python -m'` 格式/lint/strict mypy 通过，1520 passed / 4 skipped；跨包测试只替换模型响应，未调用真实模型。
+- **接续**：发布包含本接口的 memory 版本后，宿主需提高最低依赖；旧版 1.0.2 不具备该公共入口。PROJECT_MAP / TEST_MATRIX / README 同步此契约。
 
 ### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
 

@@ -16,7 +16,7 @@
 | 运行报错 | 在线仅按结构化错误标记排除，主动记忆由 Agent 调用 memory_save；无记忆意图/排障价值关键词。维护操作仅停用全部证据均有标记的自动记录；旧版格式仅列审核清单，缺失/混合来源不改状态，人工保护来自记录；`domain/retention.py`、`operations/retention.py` |
 | 宿主接入 | OpenClaw/Hermes 共享一份指南；真实 host hook、安装环境与纯 Python 单测分开验证 |
 | 数据维护 | 不将去重、retention、vacuum 混为一谈；明确备份、offline 声明与旧 reader 兼容性 |
-| 手动文档 | 手动 USER.md/MEMORY.md 优先；显式核对/写入后 provider 检查，原文证据与置信校验、事务软停用和替代候选；重复仅按实际 session 快照抑制，完整文档不入 Atom/索引；限量/失败状态可见；`service.py`、`operations/retention.py`、`pipeline/recall/` |
+| 手动文档 | 手动 USER.md/MEMORY.md 优先；save 仅落库和通知 scheduler，宿主 worker 调用公共 `MemoryService.review_new_memory(max_atoms=20)` 读取 provider 并审核；该方法同步执行，不能阻塞用户回合。原文证据与置信校验、事务软停用和替代候选不变；重复仅按实际 session 快照抑制，完整文档不入 Atom/索引；`service.py`、`operations/retention.py`、`pipeline/recall/` |
 | 发布内容 | sdist allowlist、wheel 与独立插件分别验证；不将源码 dashboard 宣称为 wheel 功能 |
 
 实现入口与命令统一见 [PROJECT_MAP](PROJECT_MAP.md)、[TEST_MATRIX](TEST_MATRIX.md)。
