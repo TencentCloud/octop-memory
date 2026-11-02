@@ -11,6 +11,7 @@ import pytest
 
 from octop_memory import Memory, MemoryService
 from octop_memory.application.dashboard_data import promote_candidate
+from octop_memory.operations.retention import manual_document_review_status
 from octop_memory.pipeline.recall import recall_for_prompt
 
 
@@ -121,17 +122,36 @@ def test_candidate_from_an_older_manual_revision_cannot_be_approved(memory: Memo
         promote_candidate(memory, {"candidate_id": candidate.id})
 
 
-def test_save_checks_current_manual_documents_and_returns_candidate_status(memory: Memory) -> None:
+def test_save_persists_without_waiting_for_manual_review(memory: Memory) -> None:
+    llm = ManualLLM()
+    scheduled: list[str] = []
     service = MemoryService(
-        memory, llm=ManualLLM(), manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+        memory, llm=llm, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
     )
+    service.set_manual_review_scheduler(lambda: scheduled.append("review"))
     node = service.save("The user prefers English replies.")
-    assert node.metadata["manual_document_conflict"] is True
-    assert node.metadata["manual_document_review"]["conflicts"] == 1
+    assert scheduled == ["review"]
+    assert llm.calls == 0
+    assert "manual_document_review" not in node.metadata
+    assert len(memory.list_atoms()) == 1
+    review = service.review_new_memory()
+    assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
 
 
-def test_automatic_promotion_also_checks_registered_owner_documents(memory: Memory) -> None:
+def test_save_survives_a_broken_review_scheduler(memory: Memory) -> None:
+    service = MemoryService(memory)
+
+    def boom() -> None:
+        raise RuntimeError("scheduler down")
+
+    service.set_manual_review_scheduler(boom)
+    node = service.save("The user prefers English replies.")
+    assert node.atom_id is not None
+    assert len(memory.list_atoms()) == 1
+
+
+def test_automatic_promotion_leaves_manual_review_to_the_host(memory: Memory) -> None:
     memory.store("The user prefers English replies.")
     original = memory.list_candidates()[0]
     memory.add_candidate(replace(original, id="pending-copy", status="pending", decided_by=None, decided_at=None))
@@ -139,8 +159,92 @@ def test_automatic_promotion_also_checks_registered_owner_documents(memory: Memo
         memory, llm=ManualLLM(), manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
     )
     result = service._runtime.promote({"regen_pages": False})
-    assert result["manual_documents"]["conflicts"] == 1
+    assert "manual_documents" not in result
+    assert memory.list_atoms()
+    review = service.review_new_memory()
+    assert review is not None and review["conflicts"] == 1
     assert memory.list_atoms() == []
+
+
+@pytest.mark.parametrize("max_atoms", [7, 20])
+def test_background_review_checks_one_batch(memory: Memory, max_atoms: int) -> None:
+    for number in range(25):
+        memory.store(f"Project {number} has a verified troubleshooting history.")
+    llm = ManualLLM()
+    service = MemoryService(
+        memory, llm=llm, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+    )
+    report = service.review_new_memory(max_atoms=max_atoms)
+    assert report is not None
+    assert llm.calls == 1
+    assert report["status"] == "partial"
+    assert report["remaining"] == 25 - max_atoms
+
+
+@pytest.mark.parametrize("documents", [None, {"USER.md": "", "MEMORY.md": ""}])
+def test_background_review_without_manual_documents_is_a_noop(memory: Memory, documents: Any) -> None:
+    llm = ManualLLM()
+    service = MemoryService(
+        memory, llm=llm, manual_documents_provider=(lambda: documents) if documents is not None else None
+    )
+    service.save("The user prefers English replies.")
+    assert service.review_new_memory() is None
+    assert llm.calls == 0
+    assert len(memory.list_atoms()) == 1
+
+
+def test_background_review_without_a_model_preserves_the_fact(memory: Memory) -> None:
+    service = MemoryService(memory, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."})
+    service.save("The user prefers English replies.")
+    report = service.review_new_memory()
+    assert report is not None and report["status"] == "unavailable"
+    assert len(memory.list_atoms()) == 1
+    assert not memory.list_candidates(status="conflict")
+
+
+def test_failed_comparison_is_deferred_until_later(memory: Memory) -> None:
+    class Boom(ManualLLM):
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError("model down")
+
+    memory.store("The user prefers English replies.")
+    llm = Boom()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "The user prefers Chinese replies."}
+    first = service.reconcile_manual_documents(documents)
+    assert first["status"] == "failed"
+    assert llm.calls == 1
+    assert len(memory.list_atoms()) == 1
+    second = service.reconcile_manual_documents(documents)
+    assert llm.calls == 1
+    assert second["status"] == "partial"
+    assert len(memory.list_atoms()) == 1
+
+
+def test_repeated_comparison_failures_are_skipped_without_retiring(
+    memory: Memory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Boom(ManualLLM):
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError("model down")
+
+    monkeypatch.setattr("octop_memory.operations.retention._COMPARE_DEFER_SECONDS", -1)
+    memory.store("The user prefers English replies.")
+    llm = Boom()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "The user prefers Chinese replies."}
+    result = None
+    for _ in range(3):
+        result = service.reconcile_manual_documents(documents)
+    assert result is not None and result["status"] == "uncertain"
+    assert llm.calls == 3
+    assert len(memory.list_atoms()) == 1
+    assert memory.list_candidates(status="conflict") == []
+    again = service.reconcile_manual_documents(documents)
+    assert llm.calls == 3
+    assert again["remaining"] == 0
 
 
 def test_concurrent_file_edit_cancels_the_audit(memory: Memory) -> None:
@@ -253,3 +357,72 @@ def test_duplicate_normalization_preserves_negation_case_and_numbers(memory: Mem
     result = MemoryService(memory).reconcile_manual_documents({"MEMORY.md": other})
     assert result["duplicates"] == 0 and result["status"] == "unavailable"
     assert len(memory.list_atoms()) == 1
+
+
+class VerdictlessLLM:
+    """Answers ``confidence="uncertain"``: a comparison that carries no verdict."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.confidence = "uncertain"
+
+    def call_llm(self, prompt: str, **kwargs: Any) -> str:
+        self.calls += 1
+        data = json.loads(prompt)
+        return json.dumps(
+            {
+                "matches": [
+                    {
+                        "atom_id": atom["id"],
+                        "relation": "unrelated",
+                        "document": "USER.md",
+                        "quote": "",
+                        "confidence": self.confidence,
+                        "same_subject": False,
+                        "same_scope": False,
+                    }
+                    for atom in data["atoms"]
+                ]
+            }
+        )
+
+
+def test_verdictless_comparison_advances_the_cursor_without_reporting_complete(memory: Memory) -> None:
+    """Advancing a cursor is not verifying a fact.
+
+    The cursor has to advance, otherwise the same atoms go back to the model on
+    every pass. It must not turn "compared, still unknown" into "verified" either:
+    the following pass has nothing left to compare, so the only place that state
+    can survive is the persisted report.
+    """
+    memory.store("The user keeps backups on the NAS.")
+    llm = VerdictlessLLM()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+
+    first = service.reconcile_manual_documents(documents)
+    assert (first["checked"], first["remaining"]) == (1, 0)
+    assert first["uncertain"] == 1
+    assert first["status"] == "uncertain"
+
+    calls = llm.calls
+    second = service.reconcile_manual_documents(documents)
+    assert llm.calls == calls, "an already compared atom must not be re-sent to the model"
+    assert second["remaining"] == 0
+    assert second["status"] == "uncertain", "nothing left to compare is not the same as verified"
+
+    persisted = manual_document_review_status(memory, documents)
+    assert persisted["status"] == "uncertain" and persisted["uncertain"] == 1
+
+
+def test_a_new_document_revision_can_clear_the_uncertain_state(memory: Memory) -> None:
+    memory.store("The user keeps backups on the NAS.")
+    llm = VerdictlessLLM()
+    service = MemoryService(memory, llm=llm)
+    assert service.reconcile_manual_documents({"USER.md": "Owner notes."})["status"] == "uncertain"
+
+    revised = {"USER.md": "Owner notes, revised."}
+    llm.confidence = "high"
+    result = service.reconcile_manual_documents(revised)
+    assert result["status"] == "complete" and result["uncertain"] == 0
+    assert manual_document_review_status(memory, revised)["status"] == "complete"

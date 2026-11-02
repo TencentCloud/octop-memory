@@ -55,3 +55,10 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Test real Harness background review
+        run: |
+          # Pin the host containing the asynchronous review scheduler (Harness #110).
+          uv pip install "octop-harness @ git+https://github.com/TencentCloud/octop-harness.git@84c19536dec83a5d36e3c17a18f2df8f71c0f65e"
+          uv run --no-sync python -c "from octop_harness.middleware.memory import MemoryMiddleware"
+          uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs
