@@ -25,6 +25,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from octop_memory.domain.retention import is_runtime_error
 from octop_memory.pipeline.extractor.parser import (
     ExtractorParseError,
     ParseResult,
@@ -138,6 +139,11 @@ class CandidateExtractor:
         the batch crosses sessions (heavy-cadence extraction in M4) or
         when you want to override.
         """
+        events = [
+            event
+            for event in events
+            if not is_runtime_error(event) and not event.payload.get("manual_document_evidence")
+        ]
         if not events:
             return ExtractionResult(candidates=[])
 

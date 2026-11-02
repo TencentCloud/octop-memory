@@ -635,7 +635,9 @@ class TestCapture:
         assert resp["result"]["accepted"] == 0
         assert resp["result"]["skipped_too_short"] == 2
 
-    def test_short_explicit_remember_message_is_captured(self, bridge: Bridge, memory: Memory) -> None:
+    @pytest.mark.parametrize("content", ["请记住偏好", "记下来", "remember this", "retain this"])
+    def test_short_message_has_no_intent_keyword_exception(self, memory: Memory, content: str) -> None:
+        bridge = Bridge(memory, config=MemoryRuntimeConfig(capture={"min_message_chars": 200}))
         resp = bridge.handle(
             {
                 "jsonrpc": "2.0",
@@ -646,18 +648,17 @@ class TestCapture:
                     "events": [
                         {
                             "event_type": "user_message",
-                            "content": "请记住我在研究长期记忆",
+                            "content": content,
                             "payload": {"role": "user"},
                         },
                     ],
                 },
             }
         )
-        assert resp["result"]["accepted"] == 1
-        assert resp["result"]["skipped_too_short"] == 0
+        assert resp["result"]["accepted"] == 0
+        assert resp["result"]["skipped_too_short"] == 1
         events = memory.list_raw(limit=5)
-        assert len(events) == 1
-        assert events[0].content == "请记住我在研究长期记忆"
+        assert events == []
 
     def test_default_event_type_and_id(self, bridge: Bridge, memory: Memory) -> None:
         # When TS shell forgets to set event_type / id, we still accept.

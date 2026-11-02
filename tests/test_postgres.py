@@ -25,7 +25,10 @@ try:
 except ImportError:
     PG_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not PG_AVAILABLE, reason="psycopg not installed")
+pytestmark = [
+    pytest.mark.skipif(not PG_AVAILABLE, reason="psycopg not installed"),
+    pytest.mark.usefixtures("postgres_dsn"),
+]
 
 DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
 
@@ -33,10 +36,7 @@ DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_t
 def _open_backend(ns: str):
     from octop_memory.storage.backends.postgres import PostgresMemoryBackend
 
-    try:
-        return PostgresMemoryBackend(namespace=ns, dsn=DSN)
-    except psycopg.OperationalError:
-        pytest.skip("PostgreSQL not available")
+    return PostgresMemoryBackend(namespace=ns, dsn=DSN)
 
 
 @pytest.fixture
@@ -50,7 +50,7 @@ def backend():
 
     # Cleanup: delete this namespace's rows from the shared tables
     try:
-        if be._conn.closed:
+        if be._closed:
             # TestClose closes it on purpose; reopen so this namespace's rows
             # still get cleaned out of the shared tables.
             be = _open_backend(ns)
@@ -125,7 +125,6 @@ class TestSaveAndGetNode:
         )
         with pytest.raises(psycopg.errors.UniqueViolation):
             backend.save_node(dup)
-        backend._conn.rollback()
 
         tree = backend.get_tree()
         assert len(tree) == 1
@@ -252,23 +251,23 @@ class TestGetTree:
 class TestClose:
     def test_close_closes_connection(self, backend) -> None:
         backend.close()
-        assert backend._conn.closed
+        assert backend._closed
 
 
 class TestTransactionLifecycle:
     def test_init_leaves_connection_idle(self, backend: Any) -> None:
-        assert backend._conn.info.transaction_status == TransactionStatus.IDLE
+        assert backend._conn is None
 
     def test_read_operation_finishes_its_transaction(self, backend: Any) -> None:
         assert backend.list_episodes() == []
-        assert backend._conn.info.transaction_status == TransactionStatus.IDLE
+        assert backend._conn is None
 
     def test_explicit_transaction_still_spans_multiple_operations(self, backend: Any) -> None:
         with backend.transaction():
             assert backend.list_episodes() == []
             assert backend.count_stats()["raw_events"] == 0
             assert backend._conn.info.transaction_status == TransactionStatus.INTRANS
-        assert backend._conn.info.transaction_status == TransactionStatus.IDLE
+        assert backend._conn is None
 
     def test_scoped_fts_indexes_are_noop_after_first_boot(self, backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         def unexpected_extension_install() -> bool:
@@ -356,7 +355,7 @@ class TestLegacySchemaMigration:
             assert got.content == "legacy hello"
 
             # Legacy schema is renamed out of the way, not dropped
-            with be._conn.cursor() as cur:
+            with be._cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
                     (ns,),
@@ -369,7 +368,6 @@ class TestLegacySchemaMigration:
                 )
                 assert cur.fetchone() is not None
                 cur.execute(f"DROP SCHEMA {backup} CASCADE")
-            be._conn.commit()
         finally:
             be.purge_namespace()
             be.close()
@@ -385,9 +383,10 @@ class TestAbortedConnectionRecovery:
 
     @staticmethod
     def _poison(backend: Any) -> None:
-        with contextlib.suppress(psycopg.Error), backend._conn.cursor() as cur:
-            cur.execute("SELECT * FROM a_table_that_does_not_exist")
-        assert backend._conn.info.transaction_status == TransactionStatus.INERROR
+        with backend._connection() as conn:
+            with contextlib.suppress(psycopg.Error), conn.cursor() as cur:
+                cur.execute("SELECT * FROM a_table_that_does_not_exist")
+            assert conn.info.transaction_status == TransactionStatus.INERROR
 
     def test_reads_recover(self, backend: Any) -> None:
         self._poison(backend)
@@ -438,7 +437,6 @@ class TestAbortedConnectionRecovery:
             with backend._cursor() as cur:
                 cur.execute("SELECT * FROM a_table_that_does_not_exist")
 
-        backend._conn.rollback()
         assert backend.get_raw("doomed") is None
 
 
@@ -465,7 +463,7 @@ class TestExportDoesNotPoisonTheConnection:
 
         export_namespace(memory, tmp_path / "dump.jsonl")
 
-        assert backend._conn.info.transaction_status != TransactionStatus.INERROR
+        assert backend._conn is None
         backend.save_raw(
             RawEvent(
                 id="after-export",
@@ -525,22 +523,13 @@ class TestDeadConnectionRecovery:
 
     @staticmethod
     def _kill(backend: Any) -> None:
-        """Terminate this backend's session from a second connection."""
-        admin = psycopg.connect(DSN, autocommit=True)
-        try:
-            admin.execute("SELECT pg_terminate_backend(%s)", (backend._conn.info.backend_pid,))
-        finally:
-            admin.close()
-        with contextlib.suppress(psycopg.Error):
-            backend._conn.execute("SELECT 1")  # notice the drop
-        assert backend._conn.closed
-
-    def test_rollback_alone_cannot_recover(self, backend: Any) -> None:
-        """Guards the premise: this is not the aborted-transaction case."""
-        self._kill(backend)
-        assert backend._conn.info.transaction_status != TransactionStatus.INERROR
-        backend._reset_if_aborted()  # a no-op here, by design
-        assert backend._conn.closed
+        """Drop a borrowed session; the pool must discard it on return."""
+        with backend._connection() as conn:
+            with psycopg.connect(DSN, autocommit=True) as admin:
+                admin.execute("SELECT pg_terminate_backend(%s)", (conn.info.backend_pid,))
+            with contextlib.suppress(psycopg.Error):
+                conn.execute("SELECT 1")
+            assert conn.closed
 
     def test_reads_recover(self, backend: Any) -> None:
         self._kill(backend)
@@ -567,7 +556,7 @@ class TestDeadConnectionRecovery:
         backend.close()
         with pytest.raises(psycopg.OperationalError):
             backend.get_node("anything")
-        assert backend._conn.closed
+        assert backend._closed
 
     def test_an_open_transaction_refuses_to_redial(self, backend: Any) -> None:
         """Reconnecting mid-block would commit a half-applied change set."""
@@ -575,27 +564,3 @@ class TestDeadConnectionRecovery:
             backend.save_node(_root_node("first-half"))
             self._kill(backend)
             backend.save_node(_root_node("second-half"))
-
-    def test_cooldown_spaces_out_attempts(self, backend: Any) -> None:
-        """A down server must not cost every call a connect timeout."""
-        attempts: list[int] = []
-        real_connect = backend._connect
-
-        def failing_connect() -> Any:
-            attempts.append(1)
-            raise psycopg.OperationalError("server is down")
-
-        backend._conn.close()  # server-side drop, not backend.close()
-        backend._connect = failing_connect
-        with pytest.raises(psycopg.OperationalError):
-            backend.get_node("x")
-        assert len(attempts) == 1
-
-        # Second call inside the cooldown window: no new redial attempt.
-        with pytest.raises(psycopg.OperationalError):
-            backend.get_node("x")
-        assert len(attempts) == 1
-
-        backend._last_reconnect_at -= backend._RECONNECT_COOLDOWN_S + 1
-        backend._connect = real_connect
-        assert backend.get_node("x") is None

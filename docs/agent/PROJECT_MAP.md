@@ -24,11 +24,23 @@ CLI → application / operations ───────────────�
 | `core.py` | `Memory` API、backend factory、可选 LangGraph saver |
 | `service.py`、`application/runtime.py` | typed host API 和共享 capture/search/get/extract/promote 编排 |
 | `application/config.py`、`host_files.py`、`path_projection.py` | policy、host Markdown 索引和 virtual path |
-| `storage/backends/__init__.py`、`sqlite.py`、`postgres.py`、`storage/driver_errors.py` | `MemoryBackend` contract、SQL、FTS、事务、namespace；降级捕获的异常元组 |
+| `storage/backends/__init__.py`、`sqlite.py`、`postgres.py`、`postgres_pool.py`、`storage/driver_errors.py` | `MemoryBackend` contract、SQL、FTS、事务、namespace；降级捕获的异常元组 |
 | `storage/vector/`、`ports/llm/` | 可选向量索引、embeddings 和 `LLMClient` |
 | `pipeline/` | extractor、promotion、page、episode、recall、lifecycle |
 | `adapters/` | JSON-RPC bridge、Click CLI、源码 dashboard |
 | `operations/migration/` | export/import、portable package、namespace migration、backfill |
+| `domain/retention.py`、`operations/retention.py` | 系统报错来源判定；存量预览和软停用；USER.md/MEMORY.md 原文核对、冲突软停用/替代候选/审计元数据 |
+
+手动文档治理由 `MemoryService` / Bridge → `application.MemoryRuntime` → `operations.retention`
+共享实现。宿主提供当前文档/可选 freshness callback；provider 供后台审核读取当前文档。
+`MemoryService.save()` 仅落库并通知 `set_manual_review_scheduler()` 注册的非阻塞回调；
+宿主 worker / 维护拍调用公共 `MemoryService.review_new_memory(max_atoms=20)`，转发 Runtime 的一批审核。
+该方法本身是同步的，必须在用户回合外运行；未注册 provider 或文档为空返回 None，否则返回审核报告。
+显式 `reconcile_manual_documents()` 默认最多 100 条，后台默认 20 条；失败推迟、不确定跳过，不强制停用。
+`manual_documents/v1` 保存比较版本、已核对 assertion hash、未决候选和审计快照；小型
+`manual_documents/recall/v1` 保存召回抑制清单。原文不会批量导入 Atom/FTS。
+召回通过实际 session `manual_context` 去重，并屏蔽冲突旧 Atom 的 raw fallback 和待重建页面。
+审核候选校验对账版本；宿主还应在采纳时提供当前 `manual_documents`，拦截未重新核对的文件变化。
 
 portable 的 Agent 默认发现目录为 `~/.octop/agents/*/memory.sqlite` 与 `~/.octop-harness/*/memory.sqlite`；
 其它位置由 `list_sources(extra_paths=...)` 显式加入，不自动搬移数据。
@@ -40,6 +52,18 @@ portable 的 Agent 默认发现目录为 `~/.octop/agents/*/memory.sqlite` 与 `
 根目录 `.editorconfig` 固定 4 空格、LF、UTF-8，Python 行宽 120，与 `ruff` 一致。
 pipeline/storage/domain 不依赖 adapters，storage 不依赖 pipeline，service 不依赖 bridge。
 `tests/test_architecture_boundaries.py` 固化这些约束；SQL 留在 storage 内。
+
+### 连接与并发
+
+SQLite 每个 backend 保留一条连接，完整 SQL 操作、结果读取和显式事务共用一把可重入锁；
+不再按线程缓存连接。单次失败写入在非显式事务中回滚，`close()` 等待操作结束后关闭且不重开。
+内部 vacuum、WAL truncate 与 export 的直接 SQL 也遵守此锁。不同 backend 的锁互不影响，
+LangGraph checkpoint 使用单独连接，不与业务 SQL 共用事务；SQLite 取舍见 ADR-039。
+PostgreSQL 的 `postgres_pool.py` 按进程、规范化 DSN 与驱动选项共享业务池（8）和 checkpoint/维护池（4）。
+`_cursor()` 借用短事务连接；显式事务持有同一连接及 backend 锁，失败不会重拨后续写。
+两类池均 `min_size=0`、`max_idle=600`，取连接时探测存活；排队上限 64、等待上限 30 秒。
+租约 `close()` 幂等且等待本实例操作，最后引用释放才销毁共享池；checkpoint DDL 按池串行初始化一次，失败释放租约并允许重试。
+导出通过 backend cursor，vacuum/check/compact 与 checkpoint 共用 autocommit 池；取舍见 ADR-040。
 
 ### 数据与写入
 
@@ -56,6 +80,8 @@ pipeline/storage/domain 不依赖 adapters，storage 不依赖 pipeline，servic
 Candidate 可自动晋升、合并、丢弃或进入 conflict/needs_review，不能等同于全量人工审核队列。
 Episode 从 RawEvent 独立提炼；页面由 dirty 标记和 regeneration 触发更新，不承诺每次写入即时刷新。
 自动提炼使用注入的 `LLMClient`；无模型时 capture 和 FTS 可用，提炼返回不可用原因。
+
+octop-harness 主路径使用 `on_failure="error"`，失败写入 checkpoint task error，不产生合成助手回复；团队自动失败通知使用 `configurable.octop_memory_capture_exclude=true` 排除整轮采集。自定义宿主仍合成错误时必须使用 `payload.octop_runtime_error=true`。capture、Candidate/Episode extractor、promotion 及 raw prompt recall 只共用结构化来源规则，无记忆意图/排障价值关键词。Agent 自行调用 memory_save；后台采集只保留既有长度等策略，不为特定措辞放行短句。`audit_runtime_errors` 默认预览，显式 apply 也只在全部证据带错误标记时停用自动 Atom、拒绝未决 Candidate。旧版严格报错格式仅在 operations 层生成审核提示，缺失/混合来源返回 review_*_ids，原状态不改；原始证据不改写，人工保存/批准/编辑按来源保护。
 
 `Memory.store()` 的 leaf 写入使用手工 RawEvent/Candidate/AtomCard 路径，无需 LLM。
 `root → branch → leaf` 是组织树，leaf 用 `atom_id` 投影事实正文，不复制第二份事实。

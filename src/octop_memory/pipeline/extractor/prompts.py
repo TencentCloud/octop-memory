@@ -10,7 +10,7 @@ because some LLM hosts only expose ``prompt`` and ignore ``system``).
 
 from __future__ import annotations
 
-EXTRACTOR_VERSION = "v2.3"
+EXTRACTOR_VERSION = "v2.4"
 """Version tag persisted on every Candidate (`extractor_version` field).
 
 Bump when:
@@ -19,6 +19,10 @@ Bump when:
 - The output JSON schema changes
 
 Do NOT bump for whitespace-only or comment changes.
+
+v2.4 adds durable eligibility rules before confidence/importance scoring,
+excluding transient runtime diagnostics while protecting troubleshooting
+knowledge and user-explicit incident retention.
 
 v2.3 changes (vs v2.2):
 - Added confidence three-tier scoring rubric with explicit trigger signals
@@ -271,10 +275,12 @@ subject.entity_type — what KIND of entity this candidate is ABOUT. Pick exactl
   - "Fact"     — a generic atomic fact entity (default when nothing else fits)
 
 confidence — how certain you are that this information is accurate and user-intended.
+  Apply scoring ONLY after the durable eligibility rules below. Never increase
+  importance just to preserve transient runtime diagnostics.
   Philosophy: ALWAYS extract if the info has any future value; use confidence to
   reflect SOURCE QUALITY, not whether to extract. "low" means "keep but uncertain",
-  NOT "discard". Only confidence=low AND importance=low together will cause a
-  candidate to be dropped downstream — so when in doubt, extract and give low
+  NOT "discard". For eligible durable knowledge, confidence=low AND importance=low
+  is the scoring combination dropped downstream — when in doubt, extract and give low
   confidence rather than skipping.
 
   - "high"   — Direct quote, no ambiguity. Use when:
@@ -306,8 +312,8 @@ confidence — how certain you are that this information is accurate and user-in
                 • User is relaying what someone else said: "他说" / "据说" /
                   "I heard" / "apparently"
 
-  ⚠ DISCARD WARNING: confidence=low AND importance=low is the ONLY combination
-  that causes a candidate to be dropped (Promotion Check 1). If the info has
+  ⚠ DISCARD WARNING: confidence=low AND importance=low is the scoring combination
+  that causes a candidate to be dropped (Promotion Check 1). If eligible info has
   any future value, raise importance to "medium" rather than skipping extraction.
 
 importance — how much this memory will affect future answers, decisions, or
@@ -333,7 +339,7 @@ importance — how much this memory will affect future answers, decisions, or
                 • Peripheral facts that rarely affect future answers
                 • One-off mentions with no clear long-term relevance
                 ⚠ Combine with confidence=low ONLY if the info is truly
-                  noise-level — this is the ONLY combination that gets dropped.
+                  noise-level — this is the scoring combination that gets dropped.
 
 subject.name — the STABLE, REUSABLE name of the entity. CRITICAL constraints:
   - MUST be a stable entity name: a person's name, project name, product name,
@@ -353,6 +359,17 @@ but live in DIFFERENT fields and are NOT interchangeable. "User" / "Person" /
 the lists above before filling them in.
 
 Extraction rules:
+- Check durable value BEFORE confidence or importance. A transient system state
+  is not long-term knowledge even when its occurrence is certain or disruptive.
+- Do NOT extract runtime-generated failures, expired authentication, rate limits,
+  connection errors, retries, or timeouts as stable facts, preferences or tasks.
+  Such diagnostics belong in execution logs, not in long-term memory.
+- Preserve normal troubleshooting knowledge: verified causes, successful fixes,
+  stable configuration and reusable lessons, with their scope and conditions.
+  Preserve user-explicit requests to remember an incident as a dated historical
+  event; never generalize that the failure is still ongoing.
+- Error terms such as "401", "timeout" or "token" alone are NOT a reason to
+  discard user statements, confirmed troubleshooting experience or manual saves.
 - subject.name MUST be a stable, reusable entity name (person name, project
   name, product name, or generic label such as "User"). It MUST NOT contain
   time words (years, months, dates), verbs, or event/scene descriptions.

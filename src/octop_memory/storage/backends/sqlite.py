@@ -7,11 +7,12 @@ import logging
 import re
 import sqlite3
 import threading
-from collections.abc import Generator, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Concatenate
 
 from octop_memory.domain.datetime import as_utc, parse_datetime_utc
 from octop_memory.storage.backends import _UNSET, _Unset
@@ -55,14 +56,39 @@ overlaps (prune commits, WAL checkpoint).
 """
 
 
+def locked_sqlite_operation[**P, R](
+    method: Callable[Concatenate[SqliteMemoryBackend, P], R],
+) -> Callable[Concatenate[SqliteMemoryBackend, P], R]:
+    """Serialize a full SQL operation, including its fetch and commit."""
+
+    @wraps(method)
+    def guarded(self: SqliteMemoryBackend, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._conn_lock:
+            if self._closed:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            try:
+                return method(self, *args, **kwargs)
+            except Exception:
+                # Failed standalone writes must not enlist the next caller
+                # in an abandoned implicit transaction. Explicit transactions
+                # retain ownership of their rollback boundary.
+                if not self._in_transaction and self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    return guarded
+
+
 class SqliteMemoryBackend:
     """Memory backend using SQLite + FTS5.
 
     Multi-agent isolation via table-name prefix (namespace).
     Default database path: ``~/.octop-memory/session.sqlite``.
 
-    Each thread holds its own connection so WAL can overlap reads with a
-    write. ``close()`` marks the backend closed and does not reopen.
+    One connection per backend, serialized for a full operation/transaction.
+    Worker pools do not multiply persistent handles by agent count. Each
+    backend has its own lock; checkpointing uses a separate connection.
+    ``close()`` waits for active operations and does not reopen.
     """
 
     def __init__(
@@ -74,104 +100,45 @@ class SqliteMemoryBackend:
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._closed = False
-        self._registry_lock = threading.Lock()
-        self._local = threading.local()
-        self._conns_by_ident: dict[int, sqlite3.Connection] = {}
-        # Owner connection: set WAL once, then init schema. Worker threads
-        # get their own connections via ``_conn`` so WAL can run reads
-        # alongside a write instead of serializing on one Python object.
-        self._bind_connection(self._new_connection(set_wal=True))
-        self._init_schema()
+        self._conn_lock = threading.RLock()
+        self._in_transaction = False
+        self._connection = self._new_connection()
+        try:
+            self._init_schema()
+        except Exception:
+            self.close()
+            raise
 
-    def _new_connection(self, *, set_wal: bool) -> sqlite3.Connection:
-        # check_same_thread=False only so close() can shut worker connections
-        # down from the owner thread. Execute stays on the creating thread.
+    def _new_connection(self) -> sqlite3.Connection:
+        # The backend lock covers execute/fetch/commit and explicit transactions.
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-        if set_wal:
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             # Must run before CREATE TABLE on a new file (ADR-027). On a
             # pre-existing NONE database this pragma is stored but does not
             # take effect until a full VACUUM (compact_vacuum).
             conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        register_fts_functions(conn)
-        return conn
-
-    def _thread_conn(self) -> sqlite3.Connection | None:
-        """This thread's bound connection, if it already opened one."""
-        return cast("sqlite3.Connection | None", getattr(self._local, "conn", None))
-
-    def _bind_connection(self, conn: sqlite3.Connection) -> sqlite3.Connection:
-        ident = threading.get_ident()
-        self._local.conn = conn
-        self._local.in_transaction = False
-        previous = self._conns_by_ident.get(ident)
-        if previous is not None and previous is not conn:
-            # A reused ident means the owning thread is gone (active threads
-            # never share an ident), so the old connection is orphaned. Close
-            # it here or every short-lived worker thread leaks one fd.
-            with suppress(sqlite3.Error):
-                previous.close()
-        self._conns_by_ident[ident] = conn
-        return conn
-
-    def _reap_dead_connections(self) -> None:
-        live = {t.ident for t in threading.enumerate() if t.ident is not None}
-        for ident in [i for i in self._conns_by_ident if i not in live]:
-            conn = self._conns_by_ident.pop(ident, None)
-            if conn is None:
-                continue
-            with suppress(sqlite3.Error):
-                conn.close()
+            conn.execute("PRAGMA foreign_keys=ON")
+            register_fts_functions(conn)
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     @property
     def _conn(self) -> sqlite3.Connection:
-        """Return this thread's SQLite connection, opening one if needed.
-
-        Capture / extract / recall each run on their own thread. Sharing one
-        Connection caused ``InterfaceError``; a process-wide lock would make
-        recall wait on extract. Per-thread connections let WAL overlap reads
-        with a write. Fire-and-forget daemon threads are reaped when they
-        disappear from ``threading.enumerate()``.
-        """
+        """Internal handle. SQL callers must hold ``_conn_lock`` for the full operation."""
         if self._closed:
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
-        existing = self._thread_conn()
-        if existing is not None:
-            return existing
-        with self._registry_lock:
-            if self._closed:
-                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
-            existing = self._thread_conn()
-            if existing is not None:
-                return existing
-            self._reap_dead_connections()
-            return self._bind_connection(self._new_connection(set_wal=False))
+        return self._connection
 
     def close(self) -> None:
-        """Close every thread's connection. Further use raises ProgrammingError.
-
-        Does not reopen the file for leftover background threads — a rebuilt
-        agent owns a new backend.
-        """
-        with self._registry_lock:
+        """Wait for active SQL/transactions, then close without reopening."""
+        with self._conn_lock:
             self._closed = True
-            for conn in self._conns_by_ident.values():
-                with suppress(sqlite3.Error):
-                    conn.close()
-            self._conns_by_ident.clear()
-        self._local.conn = None
-        self._local.in_transaction = False
-
-    @property
-    def _in_transaction(self) -> bool:
-        return bool(getattr(self._local, "in_transaction", False))
-
-    @_in_transaction.setter
-    def _in_transaction(self, value: bool) -> None:
-        self._local.in_transaction = bool(value)
+            self._connection.close()
 
     @contextmanager
     def transaction(self) -> Generator[None, None, None]:
@@ -180,23 +147,23 @@ class SqliteMemoryBackend:
         Re-entrant safe on the *current thread*: nested calls are no-ops
         (the outer transaction owns the commit/rollback boundary).
         """
-        if self._in_transaction:
-            # Already inside a transaction — let the outer one own the boundary.
-            yield
-            return
-        self._in_transaction = True
-        self._conn.execute("BEGIN")
-        committed = False
-        try:
-            yield
-            self._conn.execute("COMMIT")
-            committed = True
-        finally:
+        with self._conn_lock:
+            if self._in_transaction:
+                yield
+                return
+            self._conn.execute("BEGIN")
+            self._in_transaction = True
+            committed = False
             try:
-                if not committed:
-                    self._conn.execute("ROLLBACK")
+                yield
+                self._conn.execute("COMMIT")
+                committed = True
             finally:
-                self._in_transaction = False
+                try:
+                    if not committed:
+                        self._conn.execute("ROLLBACK")
+                finally:
+                    self._in_transaction = False
 
     def _commit(self) -> None:
         """Commit only when not inside an explicit transaction block.
@@ -716,6 +683,7 @@ class SqliteMemoryBackend:
     # Memory tree
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_node(self, node: MemoryNode) -> None:
         """Insert a new memory node.
 
@@ -749,6 +717,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_node(self, node_id: str) -> MemoryNode | None:
         """Fetch a single node by id, or ``None`` if not found."""
         ns = self._ns
@@ -761,6 +730,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_node(row) if row else None
 
+    @locked_sqlite_operation
     def get_node_by_atom_id(self, atom_id: str) -> MemoryNode | None:
         """Fetch the leaf node that references ``atom_id``, or ``None``."""
         ns = self._ns
@@ -773,6 +743,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_node(row) if row else None
 
+    @locked_sqlite_operation
     def get_children(self, parent_id: str | None) -> list[MemoryNode]:
         ns = self._ns
         if parent_id is None:
@@ -792,6 +763,7 @@ class SqliteMemoryBackend:
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    @locked_sqlite_operation
     def update_node(
         self,
         node_id: str,
@@ -846,6 +818,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def delete_node(self, node_id: str, *, cascade: bool = False) -> bool:
         """Delete a node by id.
 
@@ -892,6 +865,7 @@ class SqliteMemoryBackend:
         self._commit()
         return True
 
+    @locked_sqlite_operation
     def search_memories(self, query: str, limit: int = 5) -> list[MemoryNode]:
         ns = self._ns
         safe_query = fts_match_phrase(query)
@@ -908,6 +882,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    @locked_sqlite_operation
     def get_tree(self) -> list[MemoryNode]:
         ns = self._ns
         rows = self._conn.execute(
@@ -921,6 +896,7 @@ class SqliteMemoryBackend:
     # L0 Raw events (M1)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_raw(self, event: RawEvent) -> None:
         """Append a raw event. Strict insert; duplicate id → IntegrityError.
 
@@ -947,6 +923,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def save_raw_batch(self, events: list[RawEvent]) -> None:
         """Append many raw events in a single transaction (1 fsync)."""
         if not events:
@@ -975,11 +952,13 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_raw(self, event_id: str) -> RawEvent | None:
         ns = self._ns
         row = self._conn.execute(f"SELECT * FROM {ns}_raw_events WHERE id = ?", (event_id,)).fetchone()
         return self._row_to_raw(row) if row else None
 
+    @locked_sqlite_operation
     def list_raw(
         self,
         *,
@@ -1033,6 +1012,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_raw(r) for r in rows]
 
+    @locked_sqlite_operation
     def get_raw_events_by_ids(self, event_ids: list[str]) -> list[RawEvent]:
         """Batch-fetch raw events by a list of IDs, used to obtain the actual occurred_at timestamps."""
         if not event_ids:
@@ -1045,6 +1025,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_raw(r) for r in rows]
 
+    @locked_sqlite_operation
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
         """FTS5 full-text search over raw event content."""
         ns = self._ns
@@ -1060,6 +1041,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_raw(r) for r in rows]
 
+    @locked_sqlite_operation
     def delete_raw_before(self, before: datetime) -> int:
         """GC: delete events with ``timestamp < before``. Returns rows deleted."""
         ns = self._ns
@@ -1074,6 +1056,7 @@ class SqliteMemoryBackend:
     # M2 — Candidates
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def find_duplicate_candidate(self, assertion: str, raw_event_ids: list[str], subject_name: str) -> bool:
         """Whether an identical promoted candidate already exists.
 
@@ -1107,6 +1090,7 @@ class SqliteMemoryBackend:
                 return True
         return False
 
+    @locked_sqlite_operation
     def save_candidate(self, candidate: Candidate) -> None:
         """Insert a new candidate. Strict insert; duplicate id → IntegrityError."""
         ns = self._ns
@@ -1145,6 +1129,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         ns = self._ns
         row = self._conn.execute(
@@ -1153,6 +1138,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_candidate(row) if row else None
 
+    @locked_sqlite_operation
     def list_candidates(
         self,
         *,
@@ -1194,6 +1180,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_candidate(r) for r in rows]
 
+    @locked_sqlite_operation
     def update_candidate_status(
         self,
         candidate_id: str,
@@ -1229,6 +1216,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def search_candidates(
         self,
         query: str,
@@ -1252,6 +1240,7 @@ class SqliteMemoryBackend:
     # M2 — Atoms
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_atom(self, atom: AtomCard) -> None:
         """Insert a new atom. Strict insert; duplicate id → IntegrityError."""
         ns = self._ns
@@ -1281,6 +1270,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_atom(self, atom_id: str) -> AtomCard | None:
         ns = self._ns
         row = self._conn.execute(
@@ -1289,6 +1279,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_atom(row) if row else None
 
+    @locked_sqlite_operation
     def list_atoms(
         self,
         *,
@@ -1321,6 +1312,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_atom(r) for r in rows]
 
+    @locked_sqlite_operation
     def supersede_atom(
         self,
         old_atom_id: str,
@@ -1339,6 +1331,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def deprecate_atom(self, atom_id: str, *, deprecated_at: datetime) -> bool:
         ns = self._ns
         cur = self._conn.execute(
@@ -1348,6 +1341,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def find_atom_by_signature(self, sig: str) -> AtomCard | None:
         """Globally find the first non-deprecated atom whose assertion signature matches ``sig``.
 
@@ -1374,6 +1368,7 @@ class SqliteMemoryBackend:
                 return atom
         return None
 
+    @locked_sqlite_operation
     def migrate_atoms_to_entity(
         self,
         source_entity_id: str,
@@ -1452,6 +1447,7 @@ class SqliteMemoryBackend:
 
         return migrated
 
+    @locked_sqlite_operation
     def search_atoms(
         self,
         query: str,
@@ -1474,6 +1470,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_atom(r) for r in rows]
 
+    @locked_sqlite_operation
     def search_atoms_by_time_range(
         self,
         *,
@@ -1512,6 +1509,7 @@ class SqliteMemoryBackend:
     # M2 — Entities (minimal)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_entity(self, entity: Entity) -> None:
         """Insert a new entity. Strict insert; duplicate id → IntegrityError."""
         ns = self._ns
@@ -1532,6 +1530,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_entity(self, entity_id: str) -> Entity | None:
         ns = self._ns
         row = self._conn.execute(
@@ -1540,6 +1539,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_entity(row) if row else None
 
+    @locked_sqlite_operation
     def find_entity_by_name(
         self,
         canonical_name: str,
@@ -1563,6 +1563,7 @@ class SqliteMemoryBackend:
             ).fetchone()
         return self._row_to_entity(row) if row else None
 
+    @locked_sqlite_operation
     def list_entities(
         self,
         *,
@@ -1587,6 +1588,7 @@ class SqliteMemoryBackend:
             ).fetchall()
         return [self._row_to_entity(r) for r in rows]
 
+    @locked_sqlite_operation
     def bump_entity_atom_count(
         self,
         entity_id: str,
@@ -1613,6 +1615,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def update_entity_canonical_name(self, entity_id: str, canonical_name: str) -> bool:
         ns = self._ns
         cur = self._conn.execute(
@@ -1626,6 +1629,7 @@ class SqliteMemoryBackend:
     # M2 — Aliases
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_alias(self, alias: Alias) -> None:
         """Insert alias mapping. Duplicate (alias, entity_id) → no-op."""
         ns = self._ns
@@ -1643,6 +1647,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Resolve a (normalized) alias to its entity, or ``None`` if not found.
 
@@ -1660,6 +1665,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_entity(row) if row else None
 
+    @locked_sqlite_operation
     def list_aliases(
         self,
         *,
@@ -1688,6 +1694,7 @@ class SqliteMemoryBackend:
     # M3 - Entity Pages (long-form summary; D32-D37)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def upsert_entity_page(self, page: EntityPage) -> None:
         """Insert or replace the page row keyed by ``entity_id``.
 
@@ -1733,6 +1740,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_entity_page(self, entity_id: str) -> EntityPage | None:
         ns = self._ns
         row = self._conn.execute(
@@ -1741,6 +1749,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_entity_page(row) if row else None
 
+    @locked_sqlite_operation
     def count_stats(self) -> dict[str, int]:
         ns = self._ns
 
@@ -1754,6 +1763,7 @@ class SqliteMemoryBackend:
             "dirty_pages": _count(f"SELECT COUNT(*) FROM {ns}_entity_pages WHERE dirty = 1"),
         }
 
+    @locked_sqlite_operation
     def list_dirty_entity_pages(self, *, limit: int = 50) -> list[EntityPage]:
         ns = self._ns
         # Sort: never-regenerated rows first (last_regen_at NULL), then oldest
@@ -1770,6 +1780,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_entity_page(r) for r in rows]
 
+    @locked_sqlite_operation
     def mark_entity_page_dirty(self, entity_id: str, *, when: datetime) -> None:
         """Mark dirty (or insert a stub row + dirty if absent). Idempotent."""
         ns = self._ns
@@ -1800,6 +1811,7 @@ class SqliteMemoryBackend:
             )
         self._commit()
 
+    @locked_sqlite_operation
     def apply_entity_page_regen(
         self,
         entity_id: str,
@@ -1833,6 +1845,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def record_entity_page_regen_failure(
         self,
         entity_id: str,
@@ -1851,6 +1864,7 @@ class SqliteMemoryBackend:
         self._commit()
         return cur.rowcount > 0
 
+    @locked_sqlite_operation
     def apply_entity_page_user_edit(
         self,
         entity_id: str,
@@ -1880,6 +1894,7 @@ class SqliteMemoryBackend:
     # M4 — Thread Active-Entity Stack (D41a + D41b)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def upsert_active_entity(self, record: ActiveEntity) -> None:
         ns = self._ns
         self._conn.execute(
@@ -1899,6 +1914,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def list_active_entities(
         self,
         thread_id: str,
@@ -1916,6 +1932,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_active_entity(r) for r in rows]
 
+    @locked_sqlite_operation
     def evict_active_entities(
         self,
         thread_id: str,
@@ -1952,6 +1969,7 @@ class SqliteMemoryBackend:
     # M2 — Journal (append-only)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def append_journal(self, entry: JournalEntry) -> None:
         """Append a journal entry. Pipeline rows are expired by ``delete_journal``."""
         ns = self._ns
@@ -1976,6 +1994,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def list_journal(
         self,
         *,
@@ -2021,6 +2040,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_journal(r) for r in rows]
 
+    @locked_sqlite_operation
     def delete_journal(
         self,
         *,
@@ -2047,6 +2067,7 @@ class SqliteMemoryBackend:
         self._commit()
         return int(cur.rowcount)
 
+    @locked_sqlite_operation
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute(
             f"SELECT value FROM {self._ns}_meta WHERE key = ?",
@@ -2054,6 +2075,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    @locked_sqlite_operation
     def set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
             f"INSERT INTO {self._ns}_meta (key, value) VALUES (?, ?) "
@@ -2066,6 +2088,7 @@ class SqliteMemoryBackend:
     # M5 — Episodes (L2.5 diary layer)
     # ------------------------------------------------------------------
 
+    @locked_sqlite_operation
     def save_episode(self, episode: Episode) -> None:
         """Insert a new Episode. Strict insert; duplicate id → IntegrityError."""
         ns = self._ns
@@ -2094,6 +2117,7 @@ class SqliteMemoryBackend:
         )
         self._commit()
 
+    @locked_sqlite_operation
     def get_episode(self, episode_id: str) -> Episode | None:
         ns = self._ns
         row = self._conn.execute(
@@ -2102,6 +2126,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_episode(row) if row else None
 
+    @locked_sqlite_operation
     def list_episodes(
         self,
         *,
@@ -2137,6 +2162,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_episode(r) for r in rows]
 
+    @locked_sqlite_operation
     def search_episodes(self, query: str, *, limit: int = 10) -> list[Episode]:
         """FTS5 over summary + verbatim_quote + people + topics."""
         ns = self._ns
@@ -2151,6 +2177,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_episode(r) for r in rows]
 
+    @locked_sqlite_operation
     def list_episodes_in_range(
         self,
         *,
@@ -2173,6 +2200,7 @@ class SqliteMemoryBackend:
         ).fetchall()
         return [self._row_to_episode(r) for r in rows]
 
+    @locked_sqlite_operation
     def upsert_digest(self, digest: DigestRecord) -> None:
         """Insert or replace a digest row keyed by (period_kind, period_key).
 
@@ -2222,6 +2250,7 @@ class SqliteMemoryBackend:
             )
         self._commit()
 
+    @locked_sqlite_operation
     def get_digest(self, period_kind: DigestPeriod, period_key: str) -> DigestRecord | None:
         ns = self._ns
         row = self._conn.execute(
@@ -2230,6 +2259,7 @@ class SqliteMemoryBackend:
         ).fetchone()
         return self._row_to_digest(row) if row else None
 
+    @locked_sqlite_operation
     def list_digests(
         self,
         *,

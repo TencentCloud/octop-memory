@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 文档
 
 - **修正 Hermes 安装文档**：`docs/integrations.md` 与 provider README 收敛为一条可用路径——用 `hermes plugins install TencentCloud/octop-memory/plugins/hermes/octopmemory --ref <完整 40 位 SHA>` 从本仓子目录直接安装，无需独立插件仓库；并补充用 `hermes --print-runtime-command` 获取网关实际解释器。同时写明仓库未向 PyPI 发布独立的 `octop-memory-hermes` 插件包（按旧命令执行会 404），`installer.py` 仅为仓库内 E2E 工具（#10）。
+### 修复
+
+- **Hermes 适配器不再丢弃 `llm` / `extraction` 配置**：`_bridge_config()` 现在按桥解析器的同一语义把两个配置块转发进 `MemoryRuntimeConfig`，`$HERMES_HOME/octopmemory.json` 里的模型端点与抽取开关能真正抵达运行时；非对象值按缺省处理，坏配置不会挡住启动，`stats` 输出依旧不回显 `api_key`。此前 Hermes 宿主永远落到 `NoopLLMClient`，模型辅助抽取静默不可用（无 candidate/atom，也不报错）（#9）。
+- 补齐 `MemoryService.review_new_memory(max_atoms=20)` 公共入口，修复宿主保存后和定时维护静默跳过手动文档审核的问题；保存仍不等待模型。新增真实 octop-harness 中间件与 SQLite/PostgreSQL 的跨包测试，并纳入 CI 和发布检查（TencentCloud/Octop#2358）。
+
+## [1.0.2] - 2026-10-16
+
+### 新增
+
+- 手动 USER.md／MEMORY.md 与普通记忆核对：手动文档优先，明确冲突将旧 Atom 软停用、替代事实转候选并保留来源审计；重复仅在匹配的会话上下文抑制召回。`MemoryService` / Bridge 共用对账、状态接口；宿主可注册文档读取器在保存/晋升后检查。语义判断须引用原文，不确定、模型失败、过期文档和未完成批次显式报告。SQLite/PostgreSQL 同组验证，不增加 schema。
+
+### 修复
+
+- SQLite 每个 backend 复用一条连接，完整 SQL 操作与显式事务串行执行，避免多 agent 与常驻 worker 的连接数相乘；关闭等待正在进行的操作，独立失败写入回滚后再抛出异常（TencentCloud/Octop#2060）。
+- PostgreSQL 按进程与连接配置共享有界池：业务最多 8 条，checkpoint/维护最多 4 条；操作归还连接、显式事务持有同一连接、最后引用关闭才销毁池。checkpoint 初始化串行复用，失败立即释放租约；修复 69 个活跃 agent 超出服务端连接上限的问题（TencentCloud/Octop#2060）。
+- PostgreSQL 容量、排队超限、空闲回收、断连恢复、初始化失败及引用关闭加入真实服务回归；CI 与 release 测试均启动专用 PostgreSQL，显式配置测试 DSN 不可用时失败而非跳过。
+- 系统运行报错仅按结构化来源标记隔离，不再自动采集、提炼或兜底召回。移除记忆意图、排障价值关键词及短消息意图例外，Agent 自行调用 memory_save；手工保存、人工批准按来源保护。存量预览/应用仅停用全部证据均带错误标记的自动记录，旧版报错文本、缺失或混合来源仅列入审核清单并保持原状态，保留原始证据与审计，SQLite/PostgreSQL 行为一致。
 
 ## [1.0.1] - 2026-10-09
 

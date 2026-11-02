@@ -5,10 +5,9 @@ host already has. Two scenarios:
 
 1. **Self-duplicate within recall**: two atoms with very similar
    ``assertion`` text — keep the higher-scored one.
-2. **Plugin vs Host index** (M4.8 deferred to M1 W3): if the host
-   already has a USER.md fact saying the same thing, suppress the
-   plugin atom. M4 ships the rule path only; the host index hookup
-   is added when M1 W3 lands.
+2. **Manual document vs atom**: actual session USER.md/MEMORY.md
+   snapshots suppress exact duplicate facts. Semantic duplicates
+   require a validated audit with the same document revision.
 
 D44-A means we **default to rule-based** similarity:
 
@@ -21,11 +20,39 @@ script flips ``--llm-suppress`` to A/B test it.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
+from octop_memory.domain.retention import MANUAL_DOCUMENTS_RECALL_KEY, manual_documents_revision, normalize_manual_fact
 from octop_memory.pipeline.recall.rerank import RankedSnippet
+
+if TYPE_CHECKING:
+    from octop_memory.core import Memory
+    from octop_memory.types import AtomCard
+
+
+def manual_recall_policy(memory: Memory) -> dict[str, Any]:
+    """Small audit manifest; file contents never need rereading for recall."""
+    return dict(json.loads(memory.get_meta(MANUAL_DOCUMENTS_RECALL_KEY) or "{}"))
+
+
+def duplicates_manual_context(atom: AtomCard, policy: dict[str, Any], context: dict[str, str] | None) -> bool:
+    """Suppress duplicates only against the actual session's document snapshot."""
+    if context is None:
+        return False
+    if (
+        policy.get("revision") == manual_documents_revision(context)
+        and policy.get("duplicates", {}).get(atom.id) == atom.assertion
+    ):
+        return True
+    normalized = normalize_manual_fact(atom.assertion)
+    return bool(normalized) and any(
+        normalized == normalize_manual_fact(line) for body in context.values() for line in body.splitlines()
+    )
+
 
 DEFAULT_JACCARD_THRESHOLD = 0.85
 """Two snippets with Jaccard ≥ this are deemed redundant. Tuned high

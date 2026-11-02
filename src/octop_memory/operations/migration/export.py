@@ -150,13 +150,14 @@ def _iter_active_entities(memory: Memory) -> Iterator[Any]:
     backend = memory._backend
     rows: list[Any]
     if isinstance(backend, SqliteMemoryBackend):
-        rows = backend._conn.execute(
-            f"""SELECT thread_id, entity_id, last_seen_at, source
-                FROM {backend._ns}_thread_active_entities
-                ORDER BY thread_id, last_seen_at DESC"""
-        ).fetchall()
+        with backend._conn_lock:
+            rows = backend._conn.execute(
+                f"""SELECT thread_id, entity_id, last_seen_at, source
+                    FROM {backend._ns}_thread_active_entities
+                    ORDER BY thread_id, last_seen_at DESC"""
+            ).fetchall()
     elif _is_postgres_backend(backend):
-        with backend._conn.cursor() as cur:
+        with backend._cursor() as cur:
             cur.execute(
                 """SELECT thread_id, entity_id, last_seen_at, source
                    FROM thread_active_entities

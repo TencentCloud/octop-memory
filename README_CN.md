@@ -105,6 +105,8 @@ memory = Memory(
 
 实际凭据从部署配置注入。SQLite 使用 namespace 表名前缀；PostgreSQL 在共享 `octop_memory` schema 中使用 namespace-first key/index 隔离。
 
+同一进程、相同连接配置的 PostgreSQL 实例共享业务池（最多 8 条连接）及 checkpoint/维护池（最多 4 条），不随 agent 数量增加。每池最多等待 30 秒、最多排队 64 个请求；池满超时或队列已满会明确报错。空闲池可收缩到 0，关闭一个实例不会影响其它实例。多进程、不同连接配置及宿主自身数据库连接需要另计容量。
+
 ## CLI
 
 先安装 `[cli]`。全局参数放在子命令前，示例显式选择 database 和 namespace。
@@ -193,6 +195,10 @@ Candidate 是候选，不代表每条都要人工审批。promotion 会按价值
 `Memory.store()` 的手工写入无需模型，直接建立 RawEvent/Candidate/AtomCard 和 leaf 引用。
 
 prompt 召回默认路由 `atom`、`raw`；解析到 entity 时加入 `page_headline`，配置 vector index 后加入 `vector`。默认 raw fallback 策略在命中已提炼记忆时排除 raw；传入当前 session/thread 时排除本会话原始事件。
+
+系统生成的运行报错不自动进入长期记忆，也不通过历史 raw 兜底召回。octop-harness / Octop 将模型异常保留为 checkpoint 失败任务，由宿主单独显示错误；团队自动失败通知排除采集。仍生成合成报错的宿主必须使用 `payload.octop_runtime_error=true` 标记；在线链路只按结构化来源排除，不判断“记住”“已验证”等文字。Agent 自行决定调用 `memory_save`，手工保存与人工批准由来源记录保护。后台采集保留原长度策略，不再有记忆意图关键词例外；主动保存不受此长度限制。原始诊断证据仍可按 ID 检查。`operations.retention.audit_runtime_errors(memory)` 默认仅预览，显式 `apply=True` 也仅软停用全部证据均有错误标记的自动 Atom。旧版固定报错格式只生成 `review_atom_ids` / `review_candidate_ids` 审核清单；证据缺失或混合来源也保留待审，不自动改变这些记录的状态。
+
+手动文档治理使用 `MemoryService.reconcile_manual_documents({"USER.md": text, "MEMORY.md": text})`，Bridge 对应 `reconcile_manual_documents` / `manual_document_review_status`。手动文档优先：明确冲突的旧 Atom 软停用，文档中的替代事实转为待审核 Candidate，保留旧来源和 Journal；采纳才更新为确定事实。重复 Atom 保留，`recall(..., manual_context=实际会话快照)` 避免重复注入。宿主可传 `manual_documents_provider` 给后台核对读取当前文件，不刷新聊天快照。`save`、提炼和晋升不再同步触发手动文档对账；宿主在后台 worker 调用公开的 `MemoryService.review_new_memory(max_atoms=20)`，默认每批最多核对 20 条；该方法本身同步执行，不能在用户回合等待。显式核对仍是每次最多 100 条新事实、文档总长最多 100,000 字符。模型失败的一批会推迟，连续 3 次失败记为 uncertain 并跳过，不废弃。partial 可继续，模型不可用、不确定或证据无效会明确报告，不擅自停用。完整文档只存对账元数据，不导入 Atom 或索引。规则见 ADR-042。
 
 贡献入口见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构与数据流见[项目地图](docs/agent/PROJECT_MAP.md)。AI 协作规则见 [AGENTS.md](AGENTS.md)，任务澄清与交接沿用 [HANDOFF.md](docs/agent/HANDOFF.md)。
 

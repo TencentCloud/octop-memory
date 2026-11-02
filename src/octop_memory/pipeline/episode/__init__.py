@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from octop_memory.domain.datetime import as_utc
+from octop_memory.domain.retention import is_runtime_error
 from octop_memory.pipeline.episode.prompts import (
     EPISODE_EXTRACTOR_VERSION,
     render_episode_prompt,
@@ -116,6 +117,11 @@ class EpisodeExtractor:
         session_id: str | None = None,
     ) -> EpisodeExtractionResult:
         """Run extraction on a batch of raw events."""
+        events = [
+            event
+            for event in events
+            if not is_runtime_error(event) and not event.payload.get("manual_document_evidence")
+        ]
         if not events:
             return EpisodeExtractionResult(episodes=[])
 

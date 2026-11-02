@@ -295,52 +295,70 @@ class TestAutoVacuumIncrementalOnCreate:
         assert mode == 0  # NONE — pragma on open does not rebuild the file
 
 
-class TestConnectionRegistryLifecycle:
-    """Thread-ident reuse must not orphan connections (Octop#1339)."""
+class TestSharedConnectionLifecycle:
+    """Live pool workers must not retain a SQLite connection each (Octop#2060)."""
 
-    def test_bind_closes_orphaned_connection_on_ident_reuse(self, backend: SqliteMemoryBackend) -> None:
-        """A second bind under a reused ident closes the orphaned connection."""
-        from unittest.mock import MagicMock
+    def test_live_workers_reuse_a_bounded_number_of_connections(self, tmp_path: Path, monkeypatch) -> None:
+        from concurrent.futures import ThreadPoolExecutor
 
-        backend._local.conn = None
-        first, second = MagicMock(), MagicMock()
-        bound_first = backend._bind_connection(first)
-        bound_second = backend._bind_connection(second)
-        assert bound_first is first
-        assert bound_second is second
-        first.close.assert_called_once()
-        second.close.assert_not_called()
-        assert backend._conns_by_ident[threading.get_ident()] is second
+        connect = sqlite3.connect
+        connections = []
 
-    def test_bind_same_connection_is_idempotent(self, backend: SqliteMemoryBackend) -> None:
-        from unittest.mock import MagicMock
+        def open_connection(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            connections.append(conn)
+            return conn
 
-        backend._local.conn = None
-        conn = MagicMock()
-        backend._bind_connection(conn)
-        backend._bind_connection(conn)
-        conn.close.assert_not_called()
+        monkeypatch.setattr(sqlite3, "connect", open_connection)
+        backend = SqliteMemoryBackend(namespace="bounded", db_path=tmp_path / "bounded.sqlite")
+        barrier = threading.Barrier(12)
 
-    def test_distinct_live_threads_keep_their_connections(self, backend: SqliteMemoryBackend, tmp_path: Path) -> None:
-        """Two concurrent live threads each keep a working connection."""
-        barrier = threading.Barrier(2)
-        errors: list[Exception] = []
+        def worker():
+            barrier.wait(timeout=5)
+            for _ in range(20):
+                assert backend.list_raw(limit=1) == []
 
-        def worker() -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                futures = [pool.submit(worker) for _ in range(12)]
+                for future in futures:
+                    future.result(timeout=10)
+                assert len(connections) <= 2
+        finally:
+            backend.close()
+        for conn in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+
+    def test_close_waits_for_an_active_transaction(self, backend: SqliteMemoryBackend) -> None:
+        entered, release, closing, closed = (threading.Event() for _ in range(4))
+
+        def transaction():
+            with backend.transaction():
+                entered.set()
+                assert release.wait(timeout=5)
+                backend.set_meta("committed", "yes")
+
+        def close():
+            closing.set()
+            backend.close()
+            closed.set()
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(transaction)
+            assert entered.wait(timeout=5)
+            shutdown = pool.submit(close)
+            assert closing.wait(timeout=5)
             try:
-                barrier.wait()
-                backend._conn.execute("select 1").fetchone()
-                barrier.wait()
-            except Exception as exc:
-                errors.append(exc)
-
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert errors == []
-        assert len(backend._conns_by_ident) >= 3  # main + two workers
+                assert not closed.wait(timeout=0.05)
+            finally:
+                release.set()
+            pending.result(timeout=5)
+            shutdown.result(timeout=5)
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            backend.get_meta("committed")
 
 
 posix_only = pytest.mark.skipif(
@@ -371,7 +389,7 @@ class TestShortLivedThreadsDoNotLeakFds:
         baseline = db_fds()
 
         def work() -> None:
-            backend._conn.execute("select 1").fetchone()
+            backend.list_raw(limit=1)
 
         for _ in range(300):
             t = threading.Thread(target=work, daemon=True)
@@ -379,4 +397,4 @@ class TestShortLivedThreadsDoNotLeakFds:
             t.join()
 
         assert db_fds() <= baseline + 4
-        assert len(backend._conns_by_ident) <= 3
+        backend.close()

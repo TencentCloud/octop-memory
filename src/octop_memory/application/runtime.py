@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,7 @@ from octop_memory.application.path_projection import (
     render_raw_md,
     slice_lines,
 )
+from octop_memory.domain.retention import is_runtime_error
 from octop_memory.pipeline.episode import EpisodeExtractor
 from octop_memory.pipeline.extractor import CandidateExtractor
 from octop_memory.pipeline.page.regenerator import regenerate_dirty
@@ -60,12 +62,6 @@ session has already fed through the extractor makes repeat calls cheap
 (``no_new_events``) instead of burning an LLM call per turn."""
 
 
-EXPLICIT_MEMORY_INTENT_RE = re.compile(
-    r"(请记住|帮我记住|记住|记一下|记下来|记到记忆|加入记忆|保存到记忆|remember this|remember that|please remember|"
-    r"save this to memory|add this to memory)",
-    re.IGNORECASE,
-)
-
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
@@ -87,6 +83,7 @@ class MemoryRuntime:
         host_files: HostFilesIndex | None = None,
         config: MemoryRuntimeConfig | dict[str, Any] | None = None,
         llm: LLMClient | None = None,
+        manual_documents_provider: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         """Construct a runtime.
 
@@ -108,6 +105,7 @@ class MemoryRuntime:
         self._config = coerce_runtime_config(config)
         self._llm = llm if llm is not None else _build_llm_client(self._config.llm)
         self._llm_configured = not isinstance(self._llm, NoopLLMClient)
+        self._manual_documents_provider = manual_documents_provider
         # session_id → ids of raw events already fed to the extractor.
         # See _MAX_TRACKED_SESSIONS for why this exists.
         self._extracted_ids: OrderedDict[str, set[str]] = OrderedDict()
@@ -128,6 +126,61 @@ class MemoryRuntime:
     # ------------------------------------------------------------------
     # Operations
     # ------------------------------------------------------------------
+
+    def reconcile_manual_documents(
+        self, params: dict[str, Any], *, is_current: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """Shared in-process/RPC manual-document governance operation."""
+        from octop_memory.operations.retention import reconcile_manual_documents
+
+        documents = params.get("documents")
+        if not isinstance(documents, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in documents.items()
+        ):
+            raise ValueError("documents must map filenames to text")
+        raw_limit = params.get("maxAtoms", 100)
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit < 1:
+            raise ValueError("maxAtoms must be a positive integer")
+        return reconcile_manual_documents(
+            self._memory,
+            documents,
+            llm=self._llm if self._llm_configured else None,
+            is_current=is_current,
+            max_atoms=raw_limit,
+        )
+
+    def manual_document_review_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Read audit status without changing memory or calling a model."""
+        from octop_memory.operations.retention import manual_document_review_status
+
+        documents = params.get("documents")
+        if documents is not None and (
+            not isinstance(documents, dict) or any(not isinstance(v, str) for v in documents.values())
+        ):
+            raise ValueError("documents must map filenames to text")
+        return manual_document_review_status(self._memory, documents)
+
+    def review_new_memory(self, *, max_atoms: int = 20) -> dict[str, Any] | None:
+        """Check one background batch against current owner files.
+
+        Callers on a chat turn must not wait for this. The host drains a
+        bounded batch after the save returns. An explicit
+        ``reconcile_manual_documents`` call still uses its own limit.
+        """
+        provider = self._manual_documents_provider
+        if provider is None:
+            return None
+        try:
+            documents = provider()
+            if not any(body.strip() for body in documents.values()):
+                return None
+            return self.reconcile_manual_documents(
+                {"documents": documents, "maxAtoms": max_atoms},
+                is_current=lambda: provider() == documents,
+            )
+        except REPORTABLE_ERRORS:
+            logger.warning("Manual-document review after memory write is unavailable", exc_info=True)
+            return {"status": "unavailable"}
 
     def stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return status data for `openclaw octopmemory status`."""
@@ -352,6 +405,7 @@ class MemoryRuntime:
         skipped_short = 0
         skipped_role = 0
         skipped_tool_result = 0
+        skipped_runtime_error = 0
 
         events_to_write: list[RawEvent] = []
         for raw in raw_events:
@@ -385,31 +439,30 @@ class MemoryRuntime:
             ):
                 skipped_marker += 1
                 continue
-            if _effective_content_chars(content.strip()) < int(
-                capture_cfg["min_message_chars"]
-            ) and not _has_explicit_memory_intent(content):
+            if _effective_content_chars(content.strip()) < int(capture_cfg["min_message_chars"]):
                 skipped_short += 1
                 continue
 
             timestamp = _parse_iso(raw.get("timestamp_iso")) or datetime.now(UTC)
-            content_to_store = _prepare_content(content, privacy_cfg)
-            payload_to_store = _prepare_payload(payload, role=role, capture_cfg=capture_cfg, privacy_cfg=privacy_cfg)
-            if privacy_cfg.get("store_raw_content") is False:
-                payload_to_store["content_redacted"] = True
-
-            events_to_write.append(
-                RawEvent(
-                    id=raw.get("id") or _gen_event_id(),
-                    host=host,
-                    session_id=session_id,
-                    thread_id=thread_id,
-                    user=user,
-                    timestamp=timestamp,
-                    event_type=event_type,  # type: ignore[arg-type]
-                    content=content_to_store,
-                    payload=payload_to_store,
-                )
+            event = RawEvent(
+                id=raw.get("id") or _gen_event_id(),
+                host=host,
+                session_id=session_id,
+                thread_id=thread_id,
+                user=user,
+                timestamp=timestamp,
+                event_type=event_type,  # type: ignore[arg-type]
+                content=content,
+                payload=payload,
             )
+            if is_runtime_error(event):
+                skipped_runtime_error += 1
+                continue
+            event.content = _prepare_content(content, privacy_cfg)
+            event.payload = _prepare_payload(payload, role=role, capture_cfg=capture_cfg, privacy_cfg=privacy_cfg)
+            if privacy_cfg.get("store_raw_content") is False:
+                event.payload["content_redacted"] = True
+            events_to_write.append(event)
             accepted += 1
 
         # Single batch write = single fsync regardless of event count.
@@ -422,6 +475,7 @@ class MemoryRuntime:
             "skipped_too_short": skipped_short,
             "skipped_role": skipped_role,
             "skipped_tool_result": skipped_tool_result,
+            "skipped_runtime_error": skipped_runtime_error,
         }
 
     def extract(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -892,10 +946,6 @@ def _event_role(event_type: str, payload: dict[str, Any]) -> str:
     if event_type.startswith("tool"):
         return "tool"
     return "user"
-
-
-def _has_explicit_memory_intent(content: str) -> bool:
-    return EXPLICIT_MEMORY_INTENT_RE.search(content) is not None
 
 
 # CJK Unified Ideographs (same narrow range as pipeline/recall/budget.py).

@@ -329,7 +329,7 @@ class TestUnsupportedBackend:
 # ---------------------------------------------------------------------------
 
 try:
-    import psycopg
+    import psycopg  # noqa: F401 — availability probe
 
     PG_AVAILABLE = True
 except ImportError:
@@ -343,14 +343,12 @@ PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memor
 def _pg_memory(ns: str) -> Memory:
     from octop_memory.storage.backends.postgres import PostgresMemoryBackend
 
-    try:
-        backend = PostgresMemoryBackend(namespace=ns, dsn=PG_DSN)
-    except psycopg.OperationalError:
-        pytest.skip("PostgreSQL not available")
+    backend = PostgresMemoryBackend(namespace=ns, dsn=PG_DSN)
     return Memory(namespace=ns, backend=backend)
 
 
 @pytestmark_pg
+@pytest.mark.usefixtures("postgres_dsn")
 class TestPostgresNudgeVacuum:
     def test_journal_is_vacuumed_checkpoint_tables_skip_or_vacuum(self) -> None:
         ns = f"test_vacuum_{uuid.uuid4().hex[:12]}"
@@ -388,6 +386,7 @@ class TestPostgresNudgeVacuum:
 
 
 @pytestmark_pg
+@pytest.mark.usefixtures("postgres_dsn")
 class TestPostgresCompactVacuum:
     def test_full_vacuum_runs_on_journal(self) -> None:
         ns = f"test_compact_{uuid.uuid4().hex[:12]}"
@@ -404,6 +403,7 @@ class TestPostgresCompactVacuum:
 
 
 @pytestmark_pg
+@pytest.mark.usefixtures("postgres_dsn")
 class TestPostgresCheckStorage:
     def test_reports_per_table_dead_tuples_without_mutating(self) -> None:
         ns = f"test_check_{uuid.uuid4().hex[:12]}"

@@ -31,17 +31,14 @@ def memory(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Memory]:
             mem.backend.close()
         return
 
-    psycopg = pytest.importorskip("psycopg", reason="psycopg not installed")
+    request.getfixturevalue("postgres_dsn")
     namespace = f"atom_write_{uuid.uuid4().hex[:12]}"
-    try:
-        mem = Memory(namespace=namespace, backend="postgres", backend_config={"dsn": PG_DSN})
-    except psycopg.OperationalError:
-        pytest.skip("PostgreSQL not available")
+    mem = Memory(namespace=namespace, backend="postgres", backend_config={"dsn": PG_DSN})
     try:
         yield mem
     finally:
         backend = mem.backend
-        if not backend._conn.closed:  # type: ignore[attr-defined]
+        if not backend._closed:  # type: ignore[attr-defined]
             backend.purge_namespace()  # type: ignore[attr-defined]
         backend.close()
 

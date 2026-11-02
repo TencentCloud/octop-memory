@@ -20,6 +20,8 @@ ordered: order in the tuple determines priority.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,7 +29,9 @@ from datetime import datetime
 from typing import Literal
 
 from octop_memory.core import Memory
+from octop_memory.domain.retention import MANUAL_DOCUMENTS_RECALL_KEY, is_runtime_error
 from octop_memory.pipeline.recall.rerank import RerankCandidate
+from octop_memory.pipeline.recall.suppress import manual_recall_policy
 from octop_memory.storage.driver_errors import DRIVER_ERRORS
 from octop_memory.types import AtomCard, RawEvent
 
@@ -162,7 +166,7 @@ def recall_multi_source(
     consumed = 0
     # Track raw event ids already represented by an accepted atom so we
     # don't double-count when raw fallback runs next.
-    raw_ids_in_atoms: set[str] = set()
+    raw_ids_in_atoms: set[str] = set(manual_recall_policy(memory).get("demoted_raw_ids", []))
 
     # Tokenize the query once so per-source FTS can do OR-match instead
     # of phrase-match (FTS5 phrase mode misses any natural-language
@@ -200,6 +204,8 @@ def recall_multi_source(
                 continue
             events = _multi_token_raw(memory, or_tokens, limit=wanted * 2)
             for e in events:
+                if is_runtime_error(e) or e.payload.get("manual_document_evidence"):
+                    continue
                 if len(snippets) >= limit:
                     break
                 if e.id in raw_ids_in_atoms:
@@ -326,6 +332,7 @@ def recall_for_prompt(
     cache: object | None = None,
     now: datetime | None = None,
     raw_policy: str = "fallback",
+    manual_context: dict[str, str] | None = None,
 ) -> RecallResult:
     """Full recall pipeline.
 
@@ -369,6 +376,7 @@ def recall_for_prompt(
             cache=cache,
             now=now,
             raw_policy=raw_policy,
+            manual_context=manual_context,
         )
     except DRIVER_ERRORS:
         _log.warning("recall_for_prompt failed; degrading to empty recall", exc_info=True)
@@ -390,6 +398,7 @@ def _recall_for_prompt_impl(
     cache: object | None,
     now: datetime | None,
     raw_policy: str,
+    manual_context: dict[str, str] | None,
 ) -> RecallResult:
     from datetime import UTC
 
@@ -412,8 +421,14 @@ def _recall_for_prompt_impl(
 
     # 1. Cache lookup --------------------------------------------------
     typed_cache: RecallCache | None = cache if isinstance(cache, RecallCache) else None
-    if typed_cache is not None and thread_id is not None:
-        hit = typed_cache.get(thread_id=thread_id, query=query)
+    manual_policy = memory.get_meta(MANUAL_DOCUMENTS_RECALL_KEY)
+    cache_thread = thread_id
+    if thread_id is not None and (manual_policy or manual_context):
+        cache_revision = (manual_policy or "") + json.dumps(manual_context, sort_keys=True)
+        suffix = hashlib.sha256(cache_revision.encode()).hexdigest()
+        cache_thread = f"{thread_id}:manual:{suffix}"
+    if typed_cache is not None and cache_thread is not None:
+        hit = typed_cache.get(thread_id=cache_thread, query=query)
         if hit is not None:
             return hit
 
@@ -446,6 +461,7 @@ def _recall_for_prompt_impl(
         per_source_limit=max(limit * 4, 10),
         sw=sw,
         entity_anchor_ids=decision.resolved_entity_ids,
+        manual_context=manual_context,
     )
     candidates = _filter_prompt_raw(
         candidates,
@@ -508,8 +524,8 @@ def _recall_for_prompt_impl(
         return RecallResult(snippets=[], rendered="")
 
     result = RecallResult(snippets=accepted, rendered=_render(accepted, query))
-    if typed_cache is not None and thread_id is not None:
-        typed_cache.set(thread_id=thread_id, query=query, value=result)
+    if typed_cache is not None and cache_thread is not None:
+        typed_cache.set(thread_id=cache_thread, query=query, value=result)
     return result
 
 

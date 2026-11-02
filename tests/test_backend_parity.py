@@ -16,9 +16,12 @@ Postgres tests skip when psycopg is missing or no server answers.
 
 from __future__ import annotations
 
+import json
 import os
+import threading
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -42,6 +45,388 @@ from octop_memory.types import (
 )
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
+
+
+class TestHarnessManualReview:
+    """Exercise the real host/service contract, including its background worker.
+
+    Harness is optional locally. CI and release install a pinned host and run
+    this class explicitly; missing host imports fail that dedicated gate.
+    """
+
+    class Model:
+        def __init__(self) -> None:
+            self.batches: list[list[str]] = []
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.release.set()
+
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            atoms = json.loads(prompt)["atoms"]
+            self.batches.append([atom["id"] for atom in atoms])
+            self.started.set()
+            if not self.release.wait(timeout=10):
+                raise TimeoutError("test did not release the model")
+            return json.dumps(
+                {
+                    "matches": [
+                        {
+                            "atom_id": atom["id"],
+                            "relation": "conflict"
+                            if atom["assertion"] == "The user prefers English replies."
+                            else "unrelated",
+                            "document": "USER.md",
+                            "quote": "The user prefers Chinese replies.",
+                            "confidence": "high",
+                            "same_subject": True,
+                            "same_scope": True,
+                        }
+                        for atom in atoms
+                    ]
+                }
+            )
+
+    @pytest.fixture
+    def stack(self, backend: Any) -> Iterator[Any]:
+        from octop_memory import Memory, MemoryService
+
+        harness = pytest.importorskip("octop_harness.middleware.memory")
+        memory = Memory(namespace="harness_review", backend=backend)
+        model = self.Model()
+        service = MemoryService(
+            memory, llm=model, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+        )
+        middleware = harness.MemoryMiddleware(service=service, jsonl_enabled=False)
+        service.set_manual_review_scheduler(middleware.schedule_manual_review)
+        try:
+            yield memory, service, middleware, model
+        finally:
+            model.release.set()
+            with middleware.pause_background(timeout=10):
+                middleware.shutdown()
+
+    @pytest.mark.parametrize("trigger", ["save", "maintenance"])
+    def test_real_host_reviews_and_quarantines_conflicts(self, stack: Any, trigger: str) -> None:
+        memory, service, middleware, model = stack
+        if trigger == "save":
+            node = service.save("The user prefers English replies.")
+        else:
+            node = memory.store("The user prefers English replies.")
+            middleware._run_maintenance_tick(service)
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        atom = memory.get_atom(node.atom_id)
+        assert atom.deprecated_at is not None
+        assert memory.get_raw(atom.quote_event_id) is not None
+        candidates = memory.list_candidates(status="conflict")
+        assert len(candidates) == 1
+        assert candidates[0].payload["demoted_atom_id"] == atom.id
+        assert candidates[0].assertion == "The user prefers Chinese replies."
+
+    def test_save_returns_while_the_real_worker_is_waiting_for_the_model(self, stack: Any) -> None:
+        memory, service, middleware, model = stack
+        model.release.clear()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            saved = executor.submit(service.save, "The user prefers English replies.")
+            try:
+                node = saved.result(timeout=3)
+                assert model.started.wait(timeout=3), "background review was never started"
+                assert not model.release.is_set()
+                assert memory.get_atom(node.atom_id).deprecated_at is None
+                assert not memory.list_candidates(status="conflict")
+            finally:
+                model.release.set()
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        assert memory.get_atom(node.atom_id).deprecated_at is not None
+        assert len(memory.list_candidates(status="conflict")) == 1
+
+    def test_host_drains_one_bounded_batch_without_rechecking_completed_atoms(self, stack: Any) -> None:
+        memory, _service, middleware, model = stack
+        for number in range(25):
+            memory.store(f"Project {number} uses PostgreSQL.")
+        for expected_sizes in ([20], [20, 5], [20, 5]):
+            middleware.schedule_manual_review()
+            with middleware.pause_background(timeout=10):
+                pass
+            assert [len(batch) for batch in model.batches] == expected_sizes
+        assert len(set(model.batches[0]) | set(model.batches[1])) == 25
+        assert len(memory.list_atoms()) == 25
+
+
+class TestManualDocumentGovernanceParity:
+    class Model:
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            data = json.loads(prompt)
+            return json.dumps(
+                {
+                    "matches": [
+                        {
+                            "atom_id": atom["id"],
+                            "relation": "conflict",
+                            "document": "USER.md",
+                            "quote": "The user prefers Chinese replies.",
+                            "confidence": "high",
+                            "same_subject": True,
+                            "same_scope": True,
+                        }
+                        for atom in data["atoms"]
+                    ]
+                }
+            )
+
+    def test_conflict_candidate_deprecation_evidence_and_recall(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.application.dashboard_data import promote_candidate
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        memory = Memory(namespace="manual_parity", backend=backend)
+        memory.store("The user prefers English replies.")
+        old = memory.list_atoms()[0]
+        service = MemoryService(memory, llm=self.Model())
+        docs = {"USER.md": "The user prefers Chinese replies."}
+        first = service.reconcile_manual_documents(docs)
+        assert first["conflicts"] == 1
+        assert memory.get_atom(old.id).deprecated_at is not None
+        assert memory.get_raw(old.quote_event_id) is not None
+        assert not recall_for_prompt(memory, "English", raw_policy="always").snippets
+        assert service.reconcile_manual_documents(docs)["conflicts"] == 1
+        candidate = memory.list_candidates(status="conflict")[0]
+        assert candidate.payload["demoted_atom_id"] == old.id
+        promote_candidate(memory, {"candidate_id": candidate.id})
+        assert [a.assertion for a in memory.list_atoms()] == [docs["USER.md"]]
+
+    @pytest.mark.parametrize("filename", ["USER.md", "MEMORY.md"])
+    def test_duplicate_uses_session_snapshot_without_deleting_atom(self, backend: Any, filename: str) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="manual_parity", backend=backend)
+        memory.store("Aurora uses PostgreSQL.")
+        service = MemoryService(memory)
+        docs = {filename: "Aurora uses PostgreSQL."}
+        assert service.reconcile_manual_documents(docs)["duplicates"] == 1
+        assert not service.recall("PostgreSQL", manual_context=docs).snippets
+        assert service.recall("PostgreSQL").snippets
+        assert len(memory.list_atoms()) == 1
+
+    def test_quarantine_rolls_back_on_failure(self, backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.domain.retention import MANUAL_DOCUMENTS_META_KEY
+
+        memory = Memory(namespace="manual_parity", backend=backend)
+        memory.store("The user prefers English replies.")
+        raw_ids = {event.id for event in memory.list_raw()}
+
+        def fail(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("candidate write failed")
+
+        monkeypatch.setattr(memory, "add_candidate", fail)
+        with pytest.raises(RuntimeError, match="candidate write failed"):
+            MemoryService(memory, llm=self.Model()).reconcile_manual_documents(
+                {"USER.md": "The user prefers Chinese replies."}
+            )
+        assert len(memory.list_atoms()) == 1
+        assert memory.list_candidates(status="conflict") == []
+        assert {event.id for event in memory.list_raw()} == raw_ids
+        assert memory.get_meta(MANUAL_DOCUMENTS_META_KEY) is None
+
+
+class TestRuntimeErrorRetentionParity:
+    FAILURE = "Model call failed after 3 attempts with AuthenticationError: 401 token_expired"
+
+    @pytest.mark.parametrize("origin", ["unmarked", "missing", "mixed"])
+    def test_unknown_origin_is_review_only_and_never_retired(self, backend: Any, origin: str) -> None:
+        from octop_memory import Memory
+        from octop_memory.operations.retention import audit_runtime_errors
+
+        memory = Memory(namespace="retention", backend=backend)
+        marker = {"octop_runtime_error": True} if origin == "mixed" else {}
+        backend.save_raw(_make_raw(event_type="assistant_message", payload=marker, content=self.FAILURE))
+        refs = ["raw-1"]
+        if origin == "missing":
+            refs.append("missing-source")
+        elif origin == "mixed":
+            backend.save_raw(_make_raw(id="user-context", content="检查一下这个请求"))
+            refs.append("user-context")
+        backend.save_entity(_make_entity(atom_count=1))
+        backend.save_candidate(_make_candidate(status="promoted", raw_event_ids=refs))
+        memory.add_atom(_make_atom(raw_event_ids=refs))
+        backend.save_candidate(_make_candidate(id="pending", raw_event_ids=refs))
+        for apply in (False, True):
+            report = audit_runtime_errors(memory, apply=apply)
+            assert report.atom_ids == [] and report.candidate_ids == []
+            assert report.review_atom_ids == ["atom-1"]
+            assert report.review_candidate_ids == ["pending"]
+            assert memory.get_atom("atom-1").deprecated_at is None
+            assert memory.get_candidate("pending").status == "pending"
+            assert not memory.list_journal(action="deprecate")
+
+    def test_capture_and_marked_raw_recall(self, backend: Any) -> None:
+        from octop_memory import Memory
+        from octop_memory.application.runtime import MemoryRuntime
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        memory = Memory(namespace="retention", backend=backend)
+        runtime = MemoryRuntime(memory, config={"capture": {"min_message_chars": 0}})
+        result = runtime.capture(
+            {
+                "events": [
+                    {"event_type": "user_message", "content": "401 故障要验证修复成功。"},
+                    {
+                        "event_type": "assistant_message",
+                        "content": self.FAILURE,
+                        "payload": {"octop_runtime_error": True},
+                    },
+                ]
+            }
+        )
+        assert result["accepted"] == 1
+        assert result["skipped_runtime_error"] == 1
+        backend.save_raw(
+            _make_raw(
+                event_type="assistant_message",
+                content=self.FAILURE,
+                payload={"role": "assistant", "octop_runtime_error": True},
+            )
+        )
+        assert not recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+        assert memory.get_raw("raw-1") is not None
+
+    @pytest.mark.parametrize("protection", ["none", "user_source", "manual", "approved", "lesson", "edited", "missing"])
+    def test_audit_preview_soft_retirement_and_protections(self, backend: Any, protection: str) -> None:
+        from octop_memory import Memory
+        from octop_memory.operations.retention import audit_runtime_errors
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        memory = Memory(namespace="retention", backend=backend)
+        backend.save_raw(
+            _make_raw(
+                event_type="assistant_message",
+                content=self.FAILURE,
+                payload={"role": "assistant", "octop_runtime_error": True},
+            )
+        )
+        refs = ["raw-1"]
+        quote_id = "raw-1"
+        overrides: dict[str, Any] = {}
+        assertion = "Authentication token expired (401, token_expired)"
+        if protection == "user_source":
+            backend.save_raw(_make_raw(id="request", content="这次认证故障是历史事件。"))
+            refs.append("request")
+        elif protection == "manual":
+            overrides["extractor_version"] = "manual/v1"
+        elif protection == "approved":
+            overrides["decided_by"] = "user"
+        elif protection == "lesson":
+            assertion = "Refresh credentials and confirm a successful request."
+            backend.save_raw(_make_raw(id="lesson", event_type="assistant_message", payload={}, content=assertion))
+            refs.append("lesson")
+            quote_id = "lesson"
+        elif protection == "missing":
+            refs.append("unknown")
+        backend.save_entity(_make_entity(atom_count=1))
+        backend.upsert_entity_page(_make_page(dirty=False, headline="token_expired"))
+        backend.save_candidate(
+            _make_candidate(
+                status="promoted",
+                assertion=assertion,
+                verbatim_quote=self.FAILURE,
+                raw_event_ids=refs,
+                quote_event_id=quote_id,
+                **overrides,
+            )
+        )
+        memory.add_atom(
+            _make_atom(
+                assertion=assertion,
+                verbatim_quote=self.FAILURE,
+                raw_event_ids=refs,
+                quote_event_id=quote_id,
+            )
+        )
+        atom_id = "atom-1"
+        if protection == "edited":
+            updated = memory.replace_atom("atom-1", assertion="Verified: refresh the token and check success.")
+            assert updated is not None
+            atom_id = updated.id
+
+        before = audit_runtime_errors(memory)
+        expected = ["atom-1"] if protection == "none" else []
+        assert before.atom_ids == expected
+        assert before.atoms_deprecated == 0
+        assert memory.get_atom(atom_id).deprecated_at is None
+        result = audit_runtime_errors(memory, apply=True)
+        assert result.atoms_deprecated == len(expected)
+        assert (memory.get_atom(atom_id).deprecated_at is not None) == bool(expected)
+        assert memory.get_raw("raw-1").content == self.FAILURE
+        assert audit_runtime_errors(memory, apply=True).atoms_deprecated == 0
+        if expected:
+            assert memory.get_entity_page("ent-1").dirty
+            assert not recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+            assert memory.list_journal(action="deprecate")[0].actor == "rule"
+
+    def test_pending_error_rejected_but_manual_save_stays(self, backend: Any) -> None:
+        from octop_memory import Memory
+        from octop_memory.operations.retention import audit_runtime_errors
+
+        memory = Memory(namespace="retention", backend=backend)
+        backend.save_raw(
+            _make_raw(
+                event_type="assistant_message",
+                content=self.FAILURE,
+                payload={"role": "assistant", "octop_runtime_error": True},
+            )
+        )
+        backend.save_candidate(_make_candidate())
+        manual = memory.store("记住：401 排障后需要验证请求成功。")
+        report = audit_runtime_errors(memory, apply=True)
+        assert report.candidates_rejected == 1
+        assert memory.get_candidate("cand-1").status == "rejected"
+        assert memory.get_atom(manual.atom_id).deprecated_at is None
+
+    def test_promotion_cannot_bypass_runtime_error_gate(self, backend: Any) -> None:
+        from octop_memory import Memory
+
+        memory = Memory(namespace="retention", backend=backend)
+        backend.save_raw(
+            _make_raw(
+                event_type="assistant_message",
+                content=self.FAILURE,
+                payload={"role": "assistant", "octop_runtime_error": True},
+            )
+        )
+        backend.save_candidate(_make_candidate())
+        assert memory.promote_candidates().dropped == 1
+        assert not memory.list_atoms()
+
+    def test_audit_rolls_back_if_a_decision_cannot_be_journaled(self, backend: Any, monkeypatch: Any) -> None:
+        from octop_memory import Memory
+        from octop_memory.operations.retention import audit_runtime_errors
+
+        memory = Memory(namespace="retention", backend=backend)
+        backend.save_raw(
+            _make_raw(
+                event_type="assistant_message",
+                content=self.FAILURE,
+                payload={"role": "assistant", "octop_runtime_error": True},
+            )
+        )
+        backend.save_entity(_make_entity(atom_count=1))
+        backend.save_candidate(_make_candidate(status="promoted"))
+        memory.add_atom(_make_atom())
+        backend.save_candidate(_make_candidate(id="pending"))
+
+        def fail(_: Any) -> None:
+            raise RuntimeError("injected journal failure")
+
+        monkeypatch.setattr(memory, "append_journal", fail)
+        with pytest.raises(RuntimeError, match="injected journal failure"):
+            audit_runtime_errors(memory, apply=True)
+        assert memory.get_atom("atom-1").deprecated_at is None
+        assert memory.get_candidate("pending").status == "pending"
+        assert not memory.list_journal(action="deprecate")
 
 
 # ---------------------------------------------------------------------------
@@ -155,18 +540,15 @@ def backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
         be.close()
         return
 
-    psycopg = pytest.importorskip("psycopg", reason="psycopg not installed")
+    request.getfixturevalue("postgres_dsn")
     from octop_memory.storage.backends.postgres import PostgresMemoryBackend
 
     ns = f"parity_{uuid.uuid4().hex[:12]}"
-    try:
-        be = PostgresMemoryBackend(namespace=ns, dsn=PG_DSN)
-    except psycopg.OperationalError:
-        pytest.skip("PostgreSQL not available")
+    be = PostgresMemoryBackend(namespace=ns, dsn=PG_DSN)
     try:
         yield be
     finally:
-        if not be._conn.closed:
+        if not be._closed:
             be.purge_namespace()
         be.close()
 
@@ -185,7 +567,8 @@ def _expect_duplicate(backend: Any) -> type[BaseException]:
 def _recover(backend: Any) -> None:
     """Postgres aborts the whole transaction on error; SQLite does not."""
     if not isinstance(backend, SqliteMemoryBackend):
-        backend._conn.rollback()
+        # Operation/transaction contexts now return a clean connection.
+        assert backend._conn is None
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +590,60 @@ def _make_raw(**overrides: Any) -> RawEvent:
     }
     base.update(overrides)
     return RawEvent(**base)
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_threaded_writes_keep_independent_transaction_boundaries(backend: Any, rollback: bool) -> None:
+    """A second thread must not commit or roll back the first thread's writes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    entered, release, other_started, other_done = (threading.Event() for _ in range(4))
+
+    class Rollback(Exception):
+        pass
+
+    def owner() -> None:
+        try:
+            with backend.transaction():
+                with backend.transaction():  # Nested writes stay in the outer transaction.
+                    backend.save_raw(_make_raw(id="owned"))
+                entered.set()
+                assert release.wait(timeout=5)
+                if rollback:
+                    raise Rollback
+        except Rollback:
+            pass
+
+    def other() -> None:
+        other_started.set()
+        backend.save_raw(_make_raw(id="independent"))
+        other_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(owner)
+        assert entered.wait(timeout=5)
+        second = pool.submit(other)
+        assert other_started.wait(timeout=5)
+        try:
+            assert not other_done.wait(timeout=0.05)
+        finally:
+            release.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert (backend.get_raw("owned") is None) is rollback
+    assert backend.get_raw("independent") is not None
+
+
+def test_failed_standalone_write_does_not_pin_an_aborted_transaction(backend: Any) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    backend.save_raw(_make_raw(id="existing"))
+    with pytest.raises(_expect_duplicate(backend)):
+        backend.save_raw(_make_raw(id="existing"))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(backend.save_raw, _make_raw(id="after_failure"))
+        pending.result(timeout=5)
+    assert backend.get_raw("after_failure") is not None
 
 
 def _make_candidate(**overrides: Any) -> Candidate:
