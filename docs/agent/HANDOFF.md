@@ -24,6 +24,14 @@
 - **验证**：原实现 12 项交错用例失败；后续兼容/并发迁移先 3 failed / 2 passed，专项审查新增五项先全部失败。当前 `PageRegenerationConcurrency / PageRevisionBootstrap / LegacyPageBackend / ConcurrentPageRevisionMigration` 共 28 passed，真实 PG 无 skip。Ubuntu / Python 3.12.3 / 专用 PostgreSQL 16.15 执行 `make all RUN='<venv-python> -m'`，format/lint/strict mypy 通过，1533 passed / 3 skipped。跳过为 dashboard extra 和两个 Hermes checkout E2E；Windows 相关定向回归与文档/架构检查均通过。
 - **兼容 / 迁移**：普通调用保留旧 backend 签名；显式条件不支持时保留错误，不降级重放。SQLite BEGIN IMMEDIATE 保护检查/加列，PG 初始化锁内先查列、仅缺列时 ALTER；schema 标记 2，旧页正文和 summary_version 保留。第三方 backend 和所有写入进程仍须维护新契约，见 KNOWN_RISKS。
 - **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。以当前合并结果的完整门禁及 Python 3.12/3.13 CI 为合并依据，不以旧基线验证替代。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
+### Windows 宿主文件 glob 与 portable 测试隔离
+
+- **状态 / 问题**：`/tmp/*.md` 在 Windows 有 root 而无 drive，`is_absolute()` 为 false，进入 `Path.glob` 后抛错；`C:topics/*.md` 同样不是安全相对 glob。portable 测试 fixture 假定 `str(Path)` 使用 `/`，Windows 上未隔离默认用户目录。
+- **方案 / 范围**：`application/host_files.py` 用 `Path.anchor` 拒绝带锚点模式；以 PureWindowsPath 在任意平台覆盖 rooted、drive-relative、absolute、UNC。fixture 按 `Path.parts` 展开 `~`，只修改测试隔离，不改变迁移扫描逻辑或数据。
+- **⚠️ 召回/写入路径变更**：仅影响 host Markdown 文件 allowlist：不安全模式在 glob 前跳过，安全相对模式照常索引；source、排序、记忆写入与双 backend contract 不变。
+- **验证**：修改前相关测试 6 failed / 19 passed；修改后 25 passed。`make all` format/lint/strict mypy 通过，1348 passed / 165 skipped；skip 包含不可用的真实 PostgreSQL、Hermes checkout、dashboard extra 与平台特定环境，不表示这些场景验收通过。
+- **接续**：PROJECT_MAP、TEST_MATRIX 和 CHANGELOG 已同步；待维护者审阅，无数据迁移。
+
 ### 后台手动文档审核公共入口（Octop #2358）
 
 - **状态 / 链接**：实现与本地验证完成，待审阅；[Octop #2358](https://github.com/TencentCloud/Octop/issues/2358)，接续 memory #31 / harness #110。
