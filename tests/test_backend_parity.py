@@ -16,6 +16,7 @@ Postgres tests skip when psycopg is missing or no server answers.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -154,6 +155,116 @@ class TestHarnessManualReview:
             assert [len(batch) for batch in model.batches] == expected_sizes
         assert len(set(model.batches[0]) | set(model.batches[1])) == 25
         assert len(memory.list_atoms()) == 25
+
+
+class TestManualDocumentAuditUpgradeParity:
+    """Old audit hashes do not prove that their comparisons reached a verdict."""
+
+    class Model:
+        def __init__(self, *, confidence: str = "uncertain") -> None:
+            self.confidence = confidence
+            self.calls = 0
+
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            self.calls += 1
+            return json.dumps(
+                {
+                    "matches": [
+                        {"atom_id": atom["id"], "relation": "unrelated", "confidence": self.confidence}
+                        for atom in json.loads(prompt)["atoms"]
+                    ]
+                }
+            )
+
+    @staticmethod
+    def legacy_record(memory: Any, documents: dict[str, str], status: str) -> str:
+        from octop_memory.domain.retention import MANUAL_DOCUMENTS_META_KEY, manual_documents_revision
+
+        checked = {atom.id: hashlib.sha256(atom.assertion.encode()).hexdigest() for atom in memory.list_atoms()}
+        record = json.dumps(
+            {
+                "revision": manual_documents_revision(documents),
+                "documents": documents,
+                "checked": checked,
+                "last_report": {"status": status, "checked": len(checked), "remaining": 0},
+            }
+        )
+        memory.set_meta(MANUAL_DOCUMENTS_META_KEY, record)
+        return record
+
+    @pytest.mark.parametrize("status", ["uncertain", "complete"])
+    def test_legacy_progress_is_read_as_pending_without_modifying_metadata(self, backend: Any, status: str) -> None:
+        from octop_memory import Memory
+        from octop_memory.domain.retention import MANUAL_DOCUMENTS_META_KEY
+        from octop_memory.operations.retention import manual_document_review_status
+
+        memory = Memory(namespace="audit_upgrade", backend=backend)
+        memory.store("Project Delta keeps daily backups.")
+        documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+        before = self.legacy_record(memory, documents, status)
+
+        report = manual_document_review_status(memory, documents)
+
+        assert report["status"] == "partial"
+        assert (report["checked"], report["remaining"]) == (0, 1)
+        assert memory.get_meta(MANUAL_DOCUMENTS_META_KEY) == before
+
+    @pytest.mark.parametrize("status", ["uncertain", "complete"])
+    def test_legacy_progress_is_reaudited_once_in_bounded_batches(self, backend: Any, status: str) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.operations.retention import manual_document_review_status
+
+        memory = Memory(namespace="audit_upgrade", backend=backend)
+        for number in range(3):
+            memory.store(f"Project {number} keeps daily backups.")
+        documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+        self.legacy_record(memory, documents, status)
+        model = self.Model()
+        service = MemoryService(memory, llm=model)
+
+        first = service.reconcile_manual_documents(documents, max_atoms=2)
+        assert (first["scanned"], first["checked"], first["remaining"], first["uncertain"]) == (2, 2, 1, 2)
+        assert first["status"] == "uncertain" and model.calls == 1
+
+        second = service.reconcile_manual_documents(documents, max_atoms=2)
+        assert (second["scanned"], second["checked"], second["remaining"], second["uncertain"]) == (1, 3, 0, 3)
+        assert second["status"] == "uncertain" and model.calls == 2
+
+        third = MemoryService(memory, llm=model).reconcile_manual_documents(documents, max_atoms=2)
+        assert third["scanned"] == 0 and third["status"] == "uncertain"
+        assert model.calls == 2
+        assert manual_document_review_status(memory, documents)["uncertain"] == 3
+
+    def test_reaudited_confirmed_state_does_not_repeat_the_model_call(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="audit_upgrade", backend=backend)
+        memory.store("Project Delta keeps daily backups.")
+        documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+        self.legacy_record(memory, documents, "complete")
+        model = self.Model(confidence="high")
+        service = MemoryService(memory, llm=model)
+
+        first = service.reconcile_manual_documents(documents)
+        assert first["status"] == "complete" and first["uncertain"] == 0
+        assert model.calls == 1
+        second = service.reconcile_manual_documents(documents)
+        assert second["status"] == "complete" and second["scanned"] == 0
+        assert model.calls == 1
+
+    def test_empty_legacy_store_does_not_require_a_model(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.operations.retention import manual_document_review_status
+
+        memory = Memory(namespace="audit_upgrade", backend=backend)
+        memory.store("Project Delta keeps daily backups.")
+        documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+        self.legacy_record(memory, documents, "uncertain")
+        assert memory.deprecate_atom(memory.list_atoms()[0].id)
+
+        assert manual_document_review_status(memory, documents)["status"] == "complete"
+        report = MemoryService(memory).reconcile_manual_documents(documents)
+        assert report["status"] == "complete" and report["remaining"] == 0
 
 
 class TestManualDocumentGovernanceParity:

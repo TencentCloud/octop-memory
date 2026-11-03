@@ -16,6 +16,14 @@
 
 ## 当前任务
 
+### 手动文档审计旧进度升级（PR #33）
+
+- **状态 / 链接**：修复、双后端验证及完整门禁通过，待 PR CI / 维护者复审；[PR #33](https://github.com/TencentCloud/octop-memory/pull/33)。
+- **问题与验收**：旧 develop 可写出 checked 已推进、status=uncertain 但没有 uncertain 字典的记录；新代码把字段缺失当空未决集合，读状态或再次对账误报 complete。旧 uncertain/complete 记录需保守重审，读取保持只读，按既有批次续查，新格式确认完成后不重复调用模型。
+- **⚠️ 召回/写入路径变更**：`operations/retention.py` 的审计读写仅在元数据含 uncertain 字典时信任 checked；缺字段时将活跃事实列为待审，首次有界对账写入新格式。事实、证据和已有冲突候选沿用原处理，数据表 schema 与公共 API 不变。
+- **验证**：`pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`，真实 SQLite/PostgreSQL 16，修复前 10 failed / 2 passed，修复后 12 passed；覆盖只读、旧两类状态、2+1 分批、重建 Service、空未决集合及无活跃事实。Python 3.12 下设置专用 TEST_POSTGRES_DSN 执行 `make all`，format/lint/strict mypy 通过，1565 passed / 12 skipped，PG 未 skip；其中 8 项 Harness 在真实 1.0.6 源码环境另行验证为 8 passed，其余 skip 为 dashboard extra、两个 Hermes checkout E2E 和 Linux /proc。
+- **接续**：PROJECT_MAP、TEST_MATRIX、DECISIONS、KNOWN_RISKS 与 CHANGELOG 已同步；README_AUDIT 的现有宿主契约保持一致。旧格式首次有额外比较成本，新格式按既有进度续查；仍需 PR CI / 维护者复审。
+
 ### EntityPage 再生成的旧快照覆盖
 
 - **状态 / 场景**：[PR #24](https://github.com/TencentCloud/octop-memory/pull/24) 的原始实现与专项回归通过；维护者同步当前 `develop`，保留两侧文档，合并前完整门禁与 CI 在 PR 中记录。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。

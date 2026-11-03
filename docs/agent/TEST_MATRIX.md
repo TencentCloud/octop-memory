@@ -12,6 +12,7 @@
 | 提炼 | `uv run pytest tests/test_extractor.py tests/test_promotion.py -q` |
 | 运行报错隔离 / 存量治理 | `uv run pytest tests/test_runtime_error_retention.py tests/test_bridge_server.py tests/test_backend_parity.py -q -rs`；真实 PG 验证仅结构化标记过滤、未知来源只列审核清单、任意措辞手动保存、无短句意图例外、raw fallback、晋升、人工保护、幂等和事务回滚 |
 | 手动文档治理 | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`；真实专用 PG 的 `-k ManualDocument` 与 SQLite 同组验证冲突/替代候选、原证据保留、raw fallback、快照去重、幂等与回滚；单测覆盖伪造/不确定证据、过期采纳、缓存失效、分批续查、save/自动晋升钩子 |
+| 旧手动审计元数据升级 | `uv run pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`；真实 PG/SQLite 同组验证缺少 uncertain 字段的旧 uncertain/complete 状态只读待审、进度清零后有界续查、重建 Service 后不重复比较、确认后的空未决集合和已无活跃事实的旧库 |
 | Harness 后台审核契约 | 安装 CI 固定提交的真实 octop-harness 后，`uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs`；SQLite/真实 PG 同组验证保存回调、维护拍、冲突软停用及证据、阻塞模型不阻塞 save、20 条批次与续查。真实 Service / Middleware / 后台线程，只替换模型响应 |
 | 宿主失败来源边界 | 在 octop-harness 运行 `pytest tests/test_model_retry_middleware.py tests/test_memory_middleware.py tests/test_teams/test_inbox.py`：真实图 checkpoint error / 恢复、零错误 raw 写入、团队自动通知排除；WebUI / IM / 团队失败展示在 Octop 测试 |
 | 写入 / backend | `uv run pytest tests/test_memory_atom_write.py tests/test_backend_parity.py -q -rs` |

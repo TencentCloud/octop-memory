@@ -114,7 +114,10 @@ def reconcile_manual_documents(
     previous = json.loads(observed) if observed else {}
     revision = manual_documents_revision(documents)
     same_revision = previous.get("revision") == revision
-    checked = dict(previous.get("checked", {})) if same_revision else {}
+    # Older records advanced checked without preserving uncertain verdicts.
+    # Re-audit their progress once; an explicitly empty uncertain map is valid
+    # new-format state and must not restart already completed comparisons.
+    checked = dict(previous.get("checked", {})) if same_revision and "uncertain" in previous else {}
     duplicates = dict(previous.get("duplicates", {})) if same_revision else {}
     candidate_ids = list(previous.get("candidate_ids", [])) if same_revision else []
     blocked_raw = set(previous.get("demoted_raw_ids", []))
@@ -367,12 +370,16 @@ def manual_document_review_status(memory: Memory, documents: dict[str, str] | No
     if documents is not None and record.get("revision") != manual_documents_revision(documents):
         return {"status": "stale"}
     report = dict(record.get("last_report", {"status": "not_checked"}))
+    # Reading status stays read-only. Legacy progress is pending until a bounded
+    # reconcile pass persists the new format, even if its old report said complete.
+    checked = record.get("checked", {}) if "uncertain" in record else {}
+    report["checked"] = len(checked)
     # Count only live atoms: a disabled, deleted or reworded fact is no longer part
     # of the audit, so it must not contribute to ``remaining`` either.
     live = {
         atom.id: hashlib.sha256(atom.assertion.encode()).hexdigest() for atom in memory.list_atoms(limit=_SCAN_LIMIT)
     }
-    unchecked = sum(record.get("checked", {}).get(atom_id) != digest for atom_id, digest in live.items())
+    unchecked = sum(checked.get(atom_id) != digest for atom_id, digest in live.items())
     report["remaining"] = unchecked
     if unchecked and report.get("status") == "complete":
         report["status"] = "partial"
@@ -382,7 +389,7 @@ def manual_document_review_status(memory: Memory, documents: dict[str, str] | No
     unverified = sum(
         live.get(atom_id) == digest
         for atom_id, digest in record.get("uncertain", {}).items()
-        if record.get("checked", {}).get(atom_id) == digest
+        if checked.get(atom_id) == digest
     )
     report["uncertain"] = unverified
     if unverified:
