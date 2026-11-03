@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 - 候选提炼按单批事件数（默认 100）与字符预算（默认 20,000）分批调用模型，不再把整个 session 的事件塞进一次请求；此前长会话积压会让 prompt 超出上下文、以「长度截断 / 超时」失败（#25）。
-- 「已提炼」游标写入 `{ns}_meta`（`extracted_ids/v1/<session>`），重启后从 meta 恢复，不再整段重跑；持久化失败只告警、不影响提炼（#25）。
+- 「已提炼」游标写入 `{ns}_meta`（`extracted_ids/v1/<session>`），重启后从 meta 恢复，不再整段重跑（#25）。增量提取路径以 `strict=True` 持久化游标：游标写失败会让整个事务回滚、候选写入一并撤销，事件留在未提炼状态等待重试，而非被默默跳过；仅非严格路径的持久化失败才只告警。
 ### 文档
 
 - **修正 Hermes 安装文档**：`docs/integrations.md` 与 provider README 收敛为一条可用路径——用 `hermes plugins install TencentCloud/octop-memory/plugins/hermes/octopmemory --ref <完整 40 位 SHA>` 从本仓子目录直接安装，无需独立插件仓库；并补充用 `hermes --print-runtime-command` 获取网关实际解释器。同时写明仓库未向 PyPI 发布独立的 `octop-memory-hermes` 插件包（按旧命令执行会 404），`installer.py` 仅为仓库内 E2E 工具（#10）。

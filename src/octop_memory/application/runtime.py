@@ -764,8 +764,7 @@ class MemoryRuntime:
             return set()
         return {item for item in data if isinstance(item, str)}
 
-    def _persist_seen_ids(self, session_id: str, seen: set[str], *,
-                          strict: bool = False) -> None:
+    def _persist_seen_ids(self, session_id: str, seen: set[str], *, strict: bool = False) -> None:
         """Persist the extracted-id set so a restart resumes incrementally.
 
         ``strict`` is used on the incremental extraction path: there the write
