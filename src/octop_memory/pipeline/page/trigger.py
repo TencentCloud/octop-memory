@@ -33,8 +33,8 @@ def mark_entity_dirty_after_promote(
 
     Called from :class:`PromotionWorker` immediately after a new atom
     has been persisted and the entity's atom_count has been bumped.
-    Idempotent — safe to call repeatedly without changing semantics
-    beyond updating ``updated_at``.
+    Repeated calls keep the page dirty and advance its mutation revision,
+    invalidating any generation that read the page before this call.
 
     Never raises on missing pages: ``mark_entity_page_dirty`` will
     insert a stub row if needed.
