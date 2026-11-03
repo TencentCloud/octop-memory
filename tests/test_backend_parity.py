@@ -21,6 +21,7 @@ import os
 import threading
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,115 @@ from octop_memory.types import (
 )
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
+
+
+class TestHarnessManualReview:
+    """Exercise the real host/service contract, including its background worker.
+
+    Harness is optional locally. CI and release install a pinned host and run
+    this class explicitly; missing host imports fail that dedicated gate.
+    """
+
+    class Model:
+        def __init__(self) -> None:
+            self.batches: list[list[str]] = []
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.release.set()
+
+        def call_llm(self, prompt: str, **kwargs: Any) -> str:
+            atoms = json.loads(prompt)["atoms"]
+            self.batches.append([atom["id"] for atom in atoms])
+            self.started.set()
+            if not self.release.wait(timeout=10):
+                raise TimeoutError("test did not release the model")
+            return json.dumps(
+                {
+                    "matches": [
+                        {
+                            "atom_id": atom["id"],
+                            "relation": "conflict"
+                            if atom["assertion"] == "The user prefers English replies."
+                            else "unrelated",
+                            "document": "USER.md",
+                            "quote": "The user prefers Chinese replies.",
+                            "confidence": "high",
+                            "same_subject": True,
+                            "same_scope": True,
+                        }
+                        for atom in atoms
+                    ]
+                }
+            )
+
+    @pytest.fixture
+    def stack(self, backend: Any) -> Iterator[Any]:
+        from octop_memory import Memory, MemoryService
+
+        harness = pytest.importorskip("octop_harness.middleware.memory")
+        memory = Memory(namespace="harness_review", backend=backend)
+        model = self.Model()
+        service = MemoryService(
+            memory, llm=model, manual_documents_provider=lambda: {"USER.md": "The user prefers Chinese replies."}
+        )
+        middleware = harness.MemoryMiddleware(service=service, jsonl_enabled=False)
+        service.set_manual_review_scheduler(middleware.schedule_manual_review)
+        try:
+            yield memory, service, middleware, model
+        finally:
+            model.release.set()
+            with middleware.pause_background(timeout=10):
+                middleware.shutdown()
+
+    @pytest.mark.parametrize("trigger", ["save", "maintenance"])
+    def test_real_host_reviews_and_quarantines_conflicts(self, stack: Any, trigger: str) -> None:
+        memory, service, middleware, model = stack
+        if trigger == "save":
+            node = service.save("The user prefers English replies.")
+        else:
+            node = memory.store("The user prefers English replies.")
+            middleware._run_maintenance_tick(service)
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        atom = memory.get_atom(node.atom_id)
+        assert atom.deprecated_at is not None
+        assert memory.get_raw(atom.quote_event_id) is not None
+        candidates = memory.list_candidates(status="conflict")
+        assert len(candidates) == 1
+        assert candidates[0].payload["demoted_atom_id"] == atom.id
+        assert candidates[0].assertion == "The user prefers Chinese replies."
+
+    def test_save_returns_while_the_real_worker_is_waiting_for_the_model(self, stack: Any) -> None:
+        memory, service, middleware, model = stack
+        model.release.clear()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            saved = executor.submit(service.save, "The user prefers English replies.")
+            try:
+                node = saved.result(timeout=3)
+                assert model.started.wait(timeout=3), "background review was never started"
+                assert not model.release.is_set()
+                assert memory.get_atom(node.atom_id).deprecated_at is None
+                assert not memory.list_candidates(status="conflict")
+            finally:
+                model.release.set()
+        with middleware.pause_background(timeout=10):
+            pass
+        assert len(model.batches) == 1
+        assert memory.get_atom(node.atom_id).deprecated_at is not None
+        assert len(memory.list_candidates(status="conflict")) == 1
+
+    def test_host_drains_one_bounded_batch_without_rechecking_completed_atoms(self, stack: Any) -> None:
+        memory, _service, middleware, model = stack
+        for number in range(25):
+            memory.store(f"Project {number} uses PostgreSQL.")
+        for expected_sizes in ([20], [20, 5], [20, 5]):
+            middleware.schedule_manual_review()
+            with middleware.pause_background(timeout=10):
+                pass
+            assert [len(batch) for batch in model.batches] == expected_sizes
+        assert len(set(model.batches[0]) | set(model.batches[1])) == 25
+        assert len(memory.list_atoms()) == 25
 
 
 class TestManualDocumentGovernanceParity:
@@ -1047,6 +1157,207 @@ class TestAliasParity:
 # ---------------------------------------------------------------------------
 # L3 entity pages
 # ---------------------------------------------------------------------------
+
+
+class TestPageRegenerationConcurrencyParity:
+    def test_same_timestamp_invalidation_still_rejects_old_revision(self, backend: Any) -> None:
+        page = _make_page(summary_markdown="keep", summary_version=3)
+        backend.upsert_entity_page(page)
+        before = backend.get_entity_page(page.entity_id)
+        backend.mark_entity_page_dirty(page.entity_id, when=page.updated_at)
+        backend.mark_entity_page_dirty(page.entity_id, when=page.updated_at)
+        current = backend.get_entity_page(page.entity_id)
+        assert current.mutation_version == before.mutation_version + 2
+        assert current.summary_version == before.summary_version
+        assert current.updated_at == before.updated_at
+        assert not backend.apply_entity_page_regen(
+            page.entity_id,
+            summary_markdown="stale",
+            headline="stale",
+            topics=[],
+            when=_now(),
+            expected_mutation_version=before.mutation_version,
+        )
+        assert not backend.record_entity_page_regen_failure(
+            page.entity_id, when=_now(), expected_mutation_version=before.mutation_version
+        )
+        assert backend.get_entity_page(page.entity_id) == current
+
+    def test_only_one_connection_can_commit_the_same_revision(self, backend: Any) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        backend.upsert_entity_page(_make_page())
+        before = backend.get_entity_page("ent-1")
+        if isinstance(backend, SqliteMemoryBackend):
+            peer = SqliteMemoryBackend(namespace=backend._ns, db_path=backend._db_path)
+        else:
+            from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+            peer = PostgresMemoryBackend(namespace=backend._ns, dsn=PG_DSN)
+        barrier = threading.Barrier(2)
+
+        def commit(connection: Any, body: str) -> bool:
+            barrier.wait(timeout=10)
+            return connection.apply_entity_page_regen(
+                "ent-1",
+                summary_markdown=body,
+                headline=body,
+                topics=[],
+                when=_now(),
+                expected_mutation_version=before.mutation_version,
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(commit, backend, "first")
+                second = pool.submit(commit, peer, "second")
+                results = [first.result(timeout=15), second.result(timeout=15)]
+            assert sorted(results) == [False, True]
+            page = backend.get_entity_page("ent-1")
+            assert page.summary_markdown == ("first" if results[0] else "second")
+            assert page.summary_version == before.summary_version + 1
+            assert page.mutation_version == before.mutation_version + 1
+        finally:
+            peer.close()
+
+    def test_existing_pages_migrate_without_losing_content(self, backend: Any) -> None:
+        backend.upsert_entity_page(_make_page(summary_markdown="keep notes", summary_version=3))
+        # Dedicated test stores only: recreate the pre-fix table shape,
+        # then exercise the same migration used when opening an old store.
+        if isinstance(backend, SqliteMemoryBackend):
+            backend._conn.execute(f"ALTER TABLE {backend._ns}_entity_pages DROP COLUMN mutation_version")
+            backend._conn.commit()
+            backend._migrate_schema()
+            backend._migrate_schema()
+        else:
+            with backend._cursor() as cur:
+                cur.execute("ALTER TABLE entity_pages DROP COLUMN mutation_version")
+            with backend._connection():
+                backend._init_schema()
+                backend._init_schema()
+        page = backend.get_entity_page("ent-1")
+        assert page.summary_markdown == "keep notes"
+        assert page.summary_version == 3
+        assert page.mutation_version == 0
+        assert backend.apply_entity_page_regen(
+            "ent-1",
+            summary_markdown="new",
+            headline="new",
+            topics=[],
+            when=_now(),
+            expected_mutation_version=0,
+        )
+
+    @pytest.mark.parametrize("change", ["user_edit", "atom", "regeneration", "upsert"])
+    def test_stale_output_cannot_replace_a_changed_page(self, backend: Any, change: str) -> None:
+        from octop_memory import Memory
+        from octop_memory.pipeline.page import regenerate_page
+        from octop_memory.ports.llm.mock import MockLLMClient
+
+        memory = Memory(namespace="page_race", backend=backend)
+        _, entity, _ = memory.create_atom("Atlas uses SQLite", entity_name="Atlas", entity_type="Project")
+        memory.apply_entity_page_user_edit(entity.id, summary_markdown="old body\n\n## My Notes\nOLD NOTE")
+        response = json.dumps({"headline": "stale headline", "summary_markdown": "stale body", "topics": []})
+        expected: list[EntityPage] = []
+        success_journals: list[int] = []
+
+        class InterleavingModel:
+            def call_llm(self, prompt: str, **kwargs: Any) -> str:
+                if change == "user_edit":
+                    memory.apply_entity_page_user_edit(entity.id, summary_markdown="new body\n\n## My Notes\nNEW NOTE")
+                elif change == "atom":
+                    memory.create_atom("Atlas deploys on Monday", entity_id=entity.id)
+                elif change == "regeneration":
+                    newer = json.dumps({"headline": "newer", "summary_markdown": "newer body", "topics": []})
+                    assert regenerate_page(memory, entity.id, llm=MockLLMClient(default_response=newer)).success
+                else:
+                    page = memory.get_entity_page(entity.id)
+                    assert page is not None
+                    page.summary_markdown = "upserted body\n\n## My Notes\nNEW NOTE"
+                    memory.upsert_entity_page(page)
+                page = memory.get_entity_page(entity.id)
+                assert page is not None
+                expected.append(page)
+                success_journals.append(len(memory.list_journal(action="page_regen")))
+                return response
+
+        result = regenerate_page(memory, entity.id, llm=InterleavingModel())
+
+        assert result.success is False
+        assert result.reason == "stale_snapshot"
+        assert memory.get_entity_page(entity.id) == expected[0]
+        assert len(memory.list_journal(action="page_regen")) == success_journals[0]
+        assert memory.list_journal(action="page_regen_failed")[0].note == "stale_snapshot"
+        # Retry uses the latest notes and facts, instead of losing the newer write.
+        retry = regenerate_page(memory, entity.id, llm=MockLLMClient(default_response=response))
+        assert retry.success
+        if change in {"user_edit", "upsert"}:
+            assert "NEW NOTE" in retry.summary_markdown
+
+    @pytest.mark.parametrize("failure_response", ["invalid json", None])
+    def test_earlier_failure_does_not_invalidate_good_output(self, backend: Any, failure_response: str | None) -> None:
+        from octop_memory import Memory
+        from octop_memory.pipeline.page import regenerate_page
+        from octop_memory.ports.llm.mock import MockLLMClient
+
+        memory = Memory(namespace="page_race", backend=backend)
+        _, entity, _ = memory.create_atom("Atlas uses SQLite", entity_name="Atlas", entity_type="Project")
+        memory.apply_entity_page_user_edit(entity.id, summary_markdown="old body\n\n## My Notes\nKEEP ME")
+        before = memory.get_entity_page(entity.id)
+        failed_pages: list[EntityPage] = []
+        good = json.dumps({"headline": "valid", "summary_markdown": "Atlas uses SQLite", "topics": []})
+
+        class SlowerGoodModel:
+            def call_llm(self, prompt: str, **kwargs: Any) -> str:
+                failed = regenerate_page(
+                    memory,
+                    entity.id,
+                    llm=MockLLMClient(default_response=failure_response, raise_on_call=failure_response is None),
+                )
+                assert not failed.success
+                page = memory.get_entity_page(entity.id)
+                assert page is not None
+                failed_pages.append(page)
+                return good
+
+        result = regenerate_page(memory, entity.id, llm=SlowerGoodModel())
+
+        assert result.success
+        assert failed_pages[0].regen_attempt_count == 1
+        assert failed_pages[0].mutation_version == before.mutation_version
+        page = memory.get_entity_page(entity.id)
+        assert page is not None
+        assert not page.dirty and page.regen_attempt_count == 0
+        assert "KEEP ME" in page.summary_markdown and "Atlas uses SQLite" in page.summary_markdown
+        assert page.summary_version == before.summary_version + 1
+        assert page.mutation_version == before.mutation_version + 1
+
+    @pytest.mark.parametrize("response", ["invalid json", None])
+    def test_late_failure_does_not_dirty_a_newer_success(self, backend: Any, response: str | None) -> None:
+        from octop_memory import Memory
+        from octop_memory.pipeline.page import regenerate_page
+        from octop_memory.ports.llm._protocol import LLMClientError
+        from octop_memory.ports.llm.mock import MockLLMClient
+
+        memory = Memory(namespace="page_race", backend=backend)
+        _, entity, _ = memory.create_atom("Atlas uses SQLite", entity_name="Atlas", entity_type="Project")
+        good = json.dumps({"headline": "newer", "summary_markdown": "newer body", "topics": []})
+        expected: list[EntityPage] = []
+
+        class LateFailureModel:
+            def call_llm(self, prompt: str, **kwargs: Any) -> str:
+                assert regenerate_page(memory, entity.id, llm=MockLLMClient(default_response=good)).success
+                page = memory.get_entity_page(entity.id)
+                assert page is not None
+                expected.append(page)
+                if response is None:
+                    raise LLMClientError("late model failure")
+                return response
+
+        result = regenerate_page(memory, entity.id, llm=LateFailureModel())
+        assert not result.success
+        assert memory.get_entity_page(entity.id) == expected[0]
+        assert not expected[0].dirty
 
 
 class TestEntityPageParity:
