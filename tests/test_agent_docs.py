@@ -14,7 +14,7 @@ PUBLIC_FILES = [
     ROOT / "CONTRIBUTING.md",
     ROOT / "README.md",
     ROOT / "README_CN.md",
-    ROOT / "docs" / "integrations.md",
+    *sorted((ROOT / "docs").glob("*.md")),
     *sorted((ROOT / "docs" / "agent").glob("*.md")),
     ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.md",
     ROOT / ".github" / "ISSUE_TEMPLATE" / "feature_request.md",
@@ -26,7 +26,7 @@ PUBLIC_FILES = [
 
 
 def test_documentation_keeps_harness_and_one_integration_guide() -> None:
-    assert {path.name for path in (ROOT / "docs").glob("*.md")} == {"integrations.md"}
+    assert {path.name for path in (ROOT / "docs").glob("*.md")} == {"README.md", "integrations.md"}
     assert {path.name for path in (ROOT / "docs" / "agent").glob("*.md")} == {
         "HANDOFF.md",
         "PROJECT_MAP.md",

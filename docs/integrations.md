@@ -2,43 +2,9 @@
 
 本页维护外部 Agent 的接入方式、宿主适配和验证约定；当前已有 OpenClaw、Hermes 实现。
 核心 API 与开发流程见
-[README](../README_CN.md) 和 [CONTRIBUTING](../CONTRIBUTING.md)。
+[README](../README_CN.md) 和 [CONTRIBUTING](../CONTRIBUTING.md)，全部文档见 [文档导航](README.md)。
 
-## 更名与已有安装迁移
-
-项目统一使用 `octop-memory`。Python import 为 `octop_memory`，主命令为 `octop-memory`，
-bridge 为 `octopmemory-bridge`，OpenClaw/Hermes 插件 ID 为 `octopmemory`。
-这是入口名称的破坏性变更，不提供旧命令、import 或环境变量别名；版本号未因改名而调整。
-
-如果从旧项目升级，先停止宿主和所有数据库写入者，备份配置及数据库，再修改安装和启动配置：
-
-| 配置项 | 当前名称 |
-|---|---|
-| 发行包 / Python import | `octop-memory` / `octop_memory` |
-| bridge / Hermes 插件 | `octopmemory-bridge` / 本仓 `plugins/hermes/octopmemory` |
-| OpenClaw 包 / 插件 ID | `@octop-memory/openclaw` / `octopmemory` |
-| 环境变量前缀 | `OCTOP_MEMORY_*` / `OCTOPMEMORY_*` |
-| 本地数据目录 | `~/.octop-memory/` / `~/.octopmemory/` |
-| 宿主插件数据目录 | `~/.openclaw/octopmemory/` / `$HERMES_HOME/octopmemory/` |
-| 部署目录参数 | `OCTOP_MEMORY_DIR` / `--octop-memory-dir` |
-| Hermes 配置文件 | `$HERMES_HOME/octopmemory.json` |
-| Python Agent 宿主 | `octop-harness` |
-
-- 安装新发行包后更新 Python import、bridge 路径、OpenClaw entries/slot/allow/install 配置和
-  Hermes provider。迁移旧插件配置到新 ID，重新运行 setup/doctor；旧包需要自行卸载，避免宿主重复加载。
-- SQLite 数据库结构、namespace、`hm_*` 内部表、`harness-checkpoint-v1` 编码和 `.hmpkg`
-  文件格式保持不变。可以通过显式 `db_path` 继续读取原数据库，也可以停机后备份并迁移整个数据目录；
-  不要只复制仍在写入的 `.sqlite` 文件而遗漏 WAL。Chroma 的目录也需迁移或显式指定。
-- PostgreSQL 新共享 schema 为 `octop_memory`。使用旧数据库时保持原 DSN，在备份、停机并确认
-  新 schema 尚不存在后，由数据库所有者核实旧 schema 的实际名称，再执行
-  `ALTER SCHEMA "<旧 schema 的实际名称>" RENAME TO octop_memory;`（先替换占位符）。
-  已存在两个 schema 时不要覆盖，需要单独核对并合并数据。默认 DSN 数据库名也改为 `octop_memory`；
-  数据库本身不要求改名，可通过 `OCTOP_MEMORY_DSN` 显式配置原数据库。
-- portable 的 Agent 默认扫描路径为 `~/.octop/agents/*/memory.sqlite` 和
-  `~/.octop-harness/*/memory.sqlite`。旧目录不再自动扫描；可迁移到新位置，或在 Python
-  `list_sources(extra_paths=[("agent", "/path/to/previous/*/memory.sqlite")])` 中显式补充扫描路径。
-- 本次源码更名不会自动搬移数据库，也不会执行远端仓库改名或 PyPI/npm 发布。
-  新默认路径/schema 不会自动发现旧位置，已有安装应先完成迁移再启动。
+按场景阅读：[Python 宿主](#python-宿主) · [JSON-RPC bridge](#json-rpc-bridge) · [OpenClaw](#openclaw) · [Hermes](#hermes) · [排错](#共同验证与排错) · [旧安装迁移](#更名与已有安装迁移)。
 
 ## 接入方式与边界
 
@@ -50,6 +16,56 @@ Python 宿主优先使用 `MemoryService`；跨语言或隔离进程通过 stdio
 记忆处理规则复用 `MemoryService` / `MemoryRuntime`，不要在插件中复制抽取、promotion 或排序逻辑。
 在临时库上测试宿主契约，再以真实宿主验证安装、读写与生命周期；Python 单测不能代替宿主 E2E。
 
+## Python 宿主
+
+从 `octop_memory` 导入 `Memory` / `MemoryService`；可运行示例见
+[`examples/basic_usage.py`](../examples/basic_usage.py)，示例只写临时数据库。
+宿主负责提供 namespace/session/thread、选择何时调用和管理后台任务，库不启动自动记忆循环。
+
+| 阶段 | 调用与契约 |
+|---|---|
+| 初始化 | `Memory(namespace=..., backend_config={"db_path": ...})`，再构造 `MemoryService(memory, llm=..., config=..., host=...)` |
+| 显式保存 | `service.save(content, topic=...)` 建立确定事实并返回 tree leaf，无需 LLM |
+| 回合结束 | `capture_turn(user=..., assistant=..., session_id=..., thread_id=...)` 按 policy 写 L0；是否放后台由宿主决定 |
+| 提炼 | `extract(session_id, incremental=True, promote=True, regen_pages=True)`；同步调用，应在回复路径外执行；检查 `failure_reason` 与各阶段结果 |
+| prompt 注入 | `recall(query, session_id=..., thread_id=..., manual_context=...)`，使用返回的 `rendered` 或 `snippets` |
+| 工具读取 | `search(query, max_results=..., corpus=...)` 返回 `hits`；把实际返回的 path 交给 `get(path, start=..., lines=...)` |
+| 关闭 | 宿主先停止/等待自己创建的后台任务，再释放自己持有的 backend、checkpoint 和文件索引资源 |
+
+`Memory.search()` 检索归档会话消息，`Memory.recall()` 返回事实的 leaf 投影，不能与 Service 的
+多源工具搜索或 prompt 召回混为一谈。Service 的 `recall()` 直接使用 prompt pipeline；Runtime 的
+`recall` 配置主要服务工具搜索，不会被该方法整体转发，也不会自动把 host 文件加入 prompt 召回。
+
+手动 USER.md/MEMORY.md 治理是可选接线：构造 Service 时提供 `manual_documents_provider`，
+通过 `set_manual_review_scheduler()` 注册立即返回的排队回调；宿主 worker 调用同步的
+`review_new_memory(max_atoms=20)`。不要在 scheduler 内直接等待审核。显式核对使用
+`reconcile_manual_documents()`；`manual_context` 则是实际聊天快照，两者不可互相替代。
+公共后台入口从 1.0.3 可用，详细状态与版本校验见 [手动文档治理](agent/PROJECT_MAP.md#手动文档治理)。
+
+## JSON-RPC bridge
+
+基础安装即提供 `octopmemory-bridge`，无需 CLI extra；先运行 `octopmemory-bridge --probe`
+确认 SQLite/FTS5 环境。跨进程调用示例：
+
+```bash
+octopmemory-bridge --namespace demo --db-path /path/to/demo.sqlite
+```
+
+stdin/stdout 每行一个 JSON 对象，日志写 stderr。例如依次发送：
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"handshake","params":{"client_version":"my-agent"}}
+{"jsonrpc":"2.0","id":2,"method":"memory_search","params":{"query":"Python","maxResults":5,"corpus":"all"}}
+```
+
+响应包含同一 id 和 `result` 或 `error`。协议/参数错误使用 JSON-RPC error；
+模型提炼不可用可能在正常 result 的 `failure_reason` 中报告，不能只看是否有 error。
+常用方法为 `capture`、`extract`、`promote`、`memory_search`、`memory_get`、`stats`、`reindex`、
+`reconcile_manual_documents` 与 `manual_document_review_status`；字段以
+[dispatch / handlers](../src/octop_memory/adapters/bridge/handlers.py) 和
+[Runtime](../src/octop_memory/application/runtime.py) 为准，不承诺与 Service 方法名一一对应。
+提炼分批与进度持久化复用 [Runtime 契约](agent/PROJECT_MAP.md#提炼与增量进度)。
+
 ## 当前适配
 
 | | OpenClaw | Hermes |
@@ -58,6 +74,7 @@ Python 宿主优先使用 `MemoryService`；跨语言或隔离进程通过 stdio
 | 接入 | TypeScript → stdio `octopmemory-bridge` | Python provider → 进程内 `Bridge` |
 | Python 环境 | 独立 uv/pipx 环境，bridge 路径必须可用 | 必须装进 Hermes 实际使用的解释器 |
 | 存储 | 默认 SQLite，可配置 PostgreSQL | 当前 provider 构造 SQLite |
+| 自动提炼触发 | `agent_end` capture 后，在开关启用且配置 `llm.endpoint` 时调用 | 当前 `sync_turn()` 只 capture，不自动调用 extract |
 | 默认 namespace | `openclaw__default` | `hermes__default` |
 | 配置 | `openclaw.json` 中 `plugins.entries.octopmemory.config` | `$HERMES_HOME/octopmemory.json` |
 
@@ -132,7 +149,7 @@ setup 默认数据位于 `~/.openclaw/octopmemory/<namespace>/memory.sqlite`；�
 | `capture` | `skip_memory_echo` 过滤已注入片段；`host_files_watcher` 控制 Markdown 索引 |
 | `privacy` | `redact_secrets`、`redact_patterns`、`store_raw_content`、`store_tool_payloads` |
 | `llm` | `endpoint`、`model`、`model_heavy`、`api_key_env`、timeout/retries；优先环境变量，避免明文 key 经 argv 转发 |
-| `extraction` | `promote`、`regen_pages`、`max_candidates`、`page_regen_limit` |
+| `extraction` | `promote`、`regen_pages`、`max_candidates`、`page_regen_limit`；Python Runtime/Hermes 另支持 `max_tokens`，字段以各宿主 schema 为准 |
 | `compaction` | 控制宿主上下文 flush 阈值与后续索引；不等于数据库 VACUUM |
 | `bridge` | `command` / `python`、`log_level`、`spawn_timeout_ms` |
 
@@ -182,6 +199,8 @@ hermes memory status
 `hermes memory setup` 调用 provider 的 `get_config_schema()` / `save_config()`；点号 key 会转换为嵌套配置，
 并深合并已有文件。配置支持 profile、namespace、db_path、recall/capture/privacy、llm/extraction 与 host files，
 实际字段见 [provider 源码](../plugins/hermes/octopmemory/__init__.py)。不要将 OpenClaw 的 TS profile 默认值照搬到 Hermes。
+当前 Hermes/Python Runtime 的 `profile` 只是保留的配置标签，不会展开 OpenClaw 的 profile 策略；
+需要隐私或低延迟策略时，显式设置 `recall`、`capture`、`privacy` 等字段，并检查 status 中的有效配置。
 
 ```json
 {
@@ -194,10 +213,16 @@ hermes memory status
 }
 ```
 
-`llm` / `extraction` 块与桥的 `--config-json` 同名同义（字段语义见上文配置表）：写入 `llm` 后，宿主进程内的
-运行时不再回退到 `NoopLLMClient`，模型辅助抽取（candidate、promotion、entity page 再生成）使用配置的模型；
-未配置时抽取以明确的失败原因降级、只落 raw 事件。`extraction` 控制 `promote`、`regen_pages`、
-`max_candidates`、`page_regen_limit`。
+`llm` / `extraction` 块按 bridge 的 `--config-json` 语义转发给运行时。有效的 `endpoint` 或
+`base_url` 及 `model` 可启用模型客户端；未配置或配置被拒绝时回退到 `NoopLLMClient`，
+显式提炼返回 `failure_reason`，不影响 raw 捕获。`extraction` 控制 `promote`、`regen_pages`、
+`max_candidates`、`max_tokens` 与 `page_regen_limit`。
+
+当前 provider 的 `sync_turn()` 只在后台调用 capture，`on_memory_write()` / `on_pre_compress()`
+也只写 raw；这些 hook 不自动调用 `extract`。仅填入模型配置不会自行生成 Candidate/Atom。
+需要提炼时由额外宿主调度调用共享 Runtime/Bridge 的 `extract`；
+provider 没有另设自动提炼开关。Hermes 的 `prefetch()` 直接调用 prompt recall，
+工具的 `recall.raw_policy` 等配置不因此自动成为 prefetch 参数。
 连接凭据优先用环境变量：不设 `api_key` 时读取 `api_key_env` 指定的变量（默认 `OCTOPMEMORY_LLM_API_KEY`），
 避免把明文 key 写入共享的配置文件。
 
@@ -221,11 +246,14 @@ hermes octopmemory search "Python" -n 5 --corpus all
 | Hermes import 失败 | `hermes --print-runtime-command` 返回的实际解释器是否能 import，而非终端默认 Python |
 | 插件未加载 | memory slot/provider、安装目录、重启和宿主 status |
 | 没有 raw | conversation access、capture 开关、roles、短消息阈值、privacy、实际 db/namespace |
-| 没有 atom | 是否有 LLM、是否触发 extraction、Candidate 的 review 状态 |
+| 没有 atom | 有效 LLM、实际是否触发 extract、`failure_reason` 和 Candidate 状态；Hermes `sync_turn()` 本身不触发提炼 |
 | 工具能搜但 prompt 没注入 | OpenClaw recall.mode、host 是否调用 prefetch；不要用 doctor 成功推断自动注入 |
 | host 文件没命中 | `host_files_root`、watcher、allowlist；默认不扫描整个工作目录 |
 
-默认文件范围为 `MEMORY.md`、`USER.md` 与显式专题 Markdown；不要把 session、日志或数据库加进 allowlist。
+启用 host 文件索引后，默认扫描根目录 `MEMORY.md`、`USER.md`、`DREAMS.md`，
+符合日期命名规则的 `memory/*.md`（含带 slug 的日记），以及 `topics/*.md` / `projects/*.md`。
+自定义 allowlist 需安全相对 Markdown glob，不扫描整个 workspace。文件命中使用 SQLite 索引快照，
+即使 memory backend 为 PG，该文件索引仍是独立 SQLite；索引命中不代表已完成手动文档语义审核。
 迁移使用核心 CLI 的 `portable list-sources / pack / adopt / doctor`；导出的 `.hmpkg` 含记忆数据，不提交到仓库。
 
 ## 修改适配器
@@ -235,7 +263,8 @@ hermes octopmemory search "Python" -n 5 --corpus all
 搜索结果含 `hits[]`，路径读取返回 `path/excerpt`；corpus 和字段以实际工具 schema 为准。
 
 Hermes 的 `initialize` 必须接受 `hermes_home`；provider 方法和 manifest 事件 hook 是两类接口，不能混放。
-`sync_turn` 负责后台 capture，`prefetch` 同步召回，`queue_prefetch` 当前是 no-op；shutdown 要等待后台任务。
+`sync_turn` 负责后台 capture，`prefetch` 同步召回，`queue_prefetch` 当前是 no-op；
+当前 `shutdown()` 对每个线程最多等待 5 秒并停止文件索引，不保证慢任务已全部结束，也不主动关闭 Memory backend。
 [plugin.yaml](../plugins/hermes/octopmemory/plugin.yaml) 和 [contract tests](../tests/test_hermes_contract.py)
 共同维护接口。fallback stub 只能支撑本仓单测，真实 Hermes 兼容性仍需 E2E。
 
@@ -250,3 +279,38 @@ bash scripts/e2e_openclaw_test.sh
 ```
 
 E2E 可能安装或启动宿主，使用隔离环境并阅读脚本；缺少真实 host 导致的 skip 不算兼容性通过。
+
+## 更名与已有安装迁移
+
+项目统一使用 `octop-memory`。Python import 为 `octop_memory`，主命令为 `octop-memory`，
+bridge 为 `octopmemory-bridge`，OpenClaw/Hermes 插件 ID 为 `octopmemory`。
+这是入口名称的破坏性变更，不提供旧命令、import 或环境变量别名；磁盘协议兼容范围见下文。
+
+如果从旧项目升级，先停止宿主和所有数据库写入者，备份配置及数据库，再修改安装和启动配置：
+
+| 配置项 | 当前名称 |
+|---|---|
+| 发行包 / Python import | `octop-memory` / `octop_memory` |
+| bridge / Hermes 插件 | `octopmemory-bridge` / 本仓 `plugins/hermes/octopmemory` |
+| OpenClaw 包 / 插件 ID | `@octop-memory/openclaw` / `octopmemory` |
+| 环境变量前缀 | `OCTOP_MEMORY_*` / `OCTOPMEMORY_*` |
+| 本地数据目录 | `~/.octop-memory/` / `~/.octopmemory/` |
+| 宿主插件数据目录 | `~/.openclaw/octopmemory/` / `$HERMES_HOME/octopmemory/` |
+| 部署目录参数 | `OCTOP_MEMORY_DIR` / `--octop-memory-dir` |
+| Hermes 配置文件 | `$HERMES_HOME/octopmemory.json` |
+| Python Agent 宿主 | `octop-harness` |
+
+- 安装新发行包后更新 Python import、bridge 路径、OpenClaw entries/slot/allow/install 配置和
+  Hermes provider。迁移旧插件配置到新 ID，重新运行 setup/doctor；旧包需要自行卸载，避免宿主重复加载。
+- SQLite 数据库结构、namespace、`hm_*` 内部表、`harness-checkpoint-v1` 编码和 `.hmpkg`
+  文件格式保持不变。可以通过显式 `db_path` 继续读取原数据库，也可以停机后备份并迁移整个数据目录；
+  不要只复制仍在写入的 `.sqlite` 文件而遗漏 WAL。Chroma 的目录也需迁移或显式指定。
+- PostgreSQL 新共享 schema 为 `octop_memory`。使用旧数据库时保持原 DSN，在备份、停机并确认
+  新 schema 尚不存在后，由数据库所有者核实旧 schema 的实际名称，再执行
+  `ALTER SCHEMA "<旧 schema 的实际名称>" RENAME TO octop_memory;`（先替换占位符）。
+  已存在两个 schema 时不要覆盖，需要单独核对并合并数据。默认 DSN 数据库名也改为 `octop_memory`；
+  数据库本身不要求改名，可通过 `OCTOP_MEMORY_DSN` 显式配置原数据库。
+- portable 的 Agent 默认扫描路径为 `~/.octop/agents/*/memory.sqlite` 和
+  `~/.octop-harness/*/memory.sqlite`。旧目录不再自动扫描；可迁移到新位置，或在 Python
+  `list_sources(extra_paths=[("agent", "/path/to/previous/*/memory.sqlite")])` 中显式补充扫描路径。
+- 新默认路径/schema 不会自动发现旧位置；安装新包不会自动搬移数据库，已有安装应先完成迁移再启动。

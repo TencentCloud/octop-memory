@@ -2,6 +2,22 @@
 
 按改动范围选择最小验证；提交门禁为 `make all`。代码任务的实际结果写入 [HANDOFF.md](HANDOFF.md)，不维护带日期的测试数基线。
 
+## 基础检查
+
+从仓库根目录执行。要求 Python 3.12+，先用 `make install` 安装 dev group。
+
+```bash
+# 纯文档维护：目录契约、公开文本、本地链接与 import 边界。
+uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q
+# 代码改动及提交前完整门禁；format 会修改文件。
+make all
+```
+
+新文档需纳入 `test_agent_docs.py` 的 PUBLIC_FILES/目录约定；需要进入 sdist 的文档同步
+`pyproject.toml` allowlist。目录/链接检查不验证正文行为或标题锚点，仍需对照源码核对。
+
+## 按范围选择验证
+
 | 改动范围 | 最小命令 |
 |---|---|
 | 包名 / 宿主命名 | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`；`uv build`；在 `plugins/openclaw/octopmemory/` 执行 `npm test`、`npm run typecheck`、`npm run build` |
@@ -9,9 +25,12 @@
 | 宿主文件 glob / Windows 路径 | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`；PureWindowsPath 用例在任意平台检查 rooted / drive-relative / UNC 拒绝，portable fixture 按 Path.parts 隔离用户目录 |
 | Memory / runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |
 | 召回 | `uv run pytest tests/test_recall_pipeline.py tests/test_recall_multi_source.py tests/test_recall_risk_fixes.py -q` |
-| 提炼 | `uv run pytest tests/test_extractor.py tests/test_promotion.py -q` |
+| 提炼 / 分批 / parser | `uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_bridge_extract.py -q`；检查默认批次预算、超大单条保留和批间失败停止 |
+| 持久游标 / 原子提交 / 重试 | `uv run pytest tests/test_extract_cursor_persistence.py tests/test_extract_cursor_failure_retry.py -q -rs`；后一文件含 SQLite/真实 PG 同组断言：首条/第二条候选写失败、游标写失败均回滚，同进程重试、关闭重开重试与正常提交不重复 |
+| Promotion | `uv run pytest tests/test_promotion.py tests/test_promotion_fallback.py tests/test_promotion_llm_hook.py tests/test_promotion_tree_alignment.py -q` |
+| Hermes 配置 / provider 契约 | `uv run pytest tests/test_hermes_adapter.py tests/test_hermes_contract.py tests/test_hermes_install.py -q`；配置转发、capture、prefetch 与 shutdown 单测不代表自动提炼已接线，真实宿主另验 |
 | 运行报错隔离 / 存量治理 | `uv run pytest tests/test_runtime_error_retention.py tests/test_bridge_server.py tests/test_backend_parity.py -q -rs`；真实 PG 验证仅结构化标记过滤、未知来源只列审核清单、任意措辞手动保存、无短句意图例外、raw fallback、晋升、人工保护、幂等和事务回滚 |
-| 手动文档治理 | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`；真实专用 PG 的 `-k ManualDocument` 与 SQLite 同组验证冲突/替代候选、原证据保留、raw fallback、快照去重、幂等与回滚；单测覆盖伪造/不确定证据、过期采纳、缓存失效、分批续查、save/自动晋升钩子 |
+| 手动文档治理 | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`；真实专用 PG 的 `-k ManualDocument` 与 SQLite 同组验证冲突/替代候选、原证据保留、raw fallback、快照去重、幂等与回滚；单测覆盖伪造/不确定证据、过期采纳、缓存失效、分批续查及保存/提炼/晋升不阻塞于审核 |
 | 旧手动审计元数据升级 | `uv run pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`；真实 PG/SQLite 同组验证缺少 uncertain 字段的旧 uncertain/complete 状态只读待审、进度清零后有界续查、重建 Service 后不重复比较、确认后的空未决集合和已无活跃事实的旧库 |
 | Harness 后台审核契约 | 安装 CI 固定提交的真实 octop-harness 后，`uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs`；SQLite/真实 PG 同组验证保存回调、维护拍、冲突软停用及证据、阻塞模型不阻塞 save、20 条批次与续查。真实 Service / Middleware / 后台线程，只替换模型响应 |
 | 宿主失败来源边界 | 在 octop-harness 运行 `pytest tests/test_model_retry_middleware.py tests/test_memory_middleware.py tests/test_teams/test_inbox.py`：真实图 checkpoint error / 恢复、零错误 raw 写入、团队自动通知排除；WebUI / IM / 团队失败展示在 Octop 测试 |
@@ -25,6 +44,8 @@
 | Recall 评测 | `uv run python -m evals.recall.run` |
 | 示例 / 评测静态检查 | `uv run ruff check examples evals` 与 `uv run ruff format --check examples evals` |
 
+## PostgreSQL 与真实宿主
+
 SQLite/PostgreSQL 均为生产 backend。public 读写、持久化编排、contract、schema、transaction、FTS、
 lifecycle 修改必须同步维护两种实现，并以同一组断言运行真实 PostgreSQL：
 
@@ -32,7 +53,8 @@ lifecycle 修改必须同步维护两种实现，并以同一组断言运行真�
 # 使用专用测试数据库；以下凭据仅为占位。
 TEST_POSTGRES_DSN='postgresql://user:pass@localhost/octop_memory_test' \
   uv run pytest tests/test_backend_parity.py tests/test_postgres.py \
-    tests/test_memory_atom_write.py tests/test_checkpointer.py -q -rs
+    tests/test_memory_atom_write.py tests/test_checkpointer.py \
+    tests/test_extract_cursor_failure_retry.py -q -rs
 ```
 
 PG skip 不算通过。CI/release 启动专用 PostgreSQL 16，`TEST_POSTGRES_DSN` 已设置但连接失败时直接失败；
@@ -40,7 +62,7 @@ PG skip 不算通过。CI/release 启动专用 PostgreSQL 16，`TEST_POSTGRES_DS
 
 CI/release 在基础测试后安装固定提交的 octop-harness，先检查真实中间件可导入，再执行跨包契约用例。
 宿主不是 memory 的生产依赖；本地未安装时该组可 skip，但不能声明通过跨包验收。
-安装命令和固定提交见 `.github/workflows/ci.yml` 的 `Test real Harness background review`；
+安装命令和固定提交见 [CI workflow](../../.github/workflows/ci.yml) 的 `Test real Harness background review`；
 安装后用 `--no-sync` 保留宿主测试依赖，并检查用例未 skip。
 
 `test_postgres_pool.py` 验证 69 个实例混合读写和 checkpoint 的总连接数 ≤12，覆盖池满超时/排队上限、
@@ -61,6 +83,8 @@ portable dry-run 使用临时目标库并比较前后数据；召回降级/page 
 
 文档检查覆盖本地链接、公开内容和目录约定；不能证明全文不存在敏感信息。
 宿主安装、optional dependencies、真实 PostgreSQL 与 recall 质量需分别验证，不能由基础单测替代。
+OpenClaw/Hermes 插件命令和真实宿主 E2E 脚本见 [修改适配器](../integrations.md#修改适配器)；
+未安装宿主或未运行脚本时，不写成 E2E 通过。向量用例当前是 fake/mock，不是 Chroma/Qdrant 服务验收。
 合成评测的历史 `P@5` 标签实际分母为返回的前五条数量，不固定为 5；MRR 使用整个返回列表。
 该小样本偏向实体查询，日期与 ID 每次生成；默认比较 raw_fts 和 full_pipeline，退出码只表示配置的 delta gate。
 它没有接入 `make all` / CI，不能据此声明生产召回质量。只改注释时不调整评测口径或 seed 数据。

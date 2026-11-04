@@ -18,6 +18,10 @@ L0 append-only，Candidate/AtomCard 保留 raw refs 和原文引用，支持追�
 
 `CandidateExtractor.extract()` 返回结果，由 caller 决定入库；LLM/parse failure 返回 `failure_reason`。
 便于测试、检查与重试；代价是 caller 必须处理失败，不能把空结果一律当作成功。
+当前 extractor 分批调用，任一批失败即停止；Runtime 仅在整轮候选提炼成功后，
+把候选和 `extracted_ids/v1/<session>` 游标在同一事务内提交，再推进内存进度。
+不逐批保留部分成功结果；候选/游标落库失败均回滚。预算和后续阶段边界见
+[提炼与增量进度](PROJECT_MAP.md#提炼与增量进度)。
 
 ## ADR-004：规则优先的 Promotion（Accepted）
 
@@ -174,7 +178,6 @@ vacuum、WAL truncate 和 export 的内部 SQL 同样受保护，避免维护与
 不同 backend 以及单独的 checkpoint 连接仍可并行。保留 SQLite/WAL、表、事务原子性与召回契约，
 无需数据迁移。后续若要增加同 backend SQL 并行，必须使用有界连接租约并重新验证事务与关闭行为。
 
-
 ## ADR-040：PostgreSQL 按连接配置共享有界池（Accepted）
 
 每 agent 一条业务连接加独立 checkpoint 池仍会叠加容量：69 个活跃实例至少需要 138 条会话，
@@ -203,8 +206,10 @@ LangGraph 按类型要求 ConnectionPool；内部租约适配器继承该类型�
 ## ADR-042：手动文档为准，冲突转候选，去重绑定会话快照（Accepted）
 
 USER.md/MEMORY.md 由宿主用户维护，聊天原有统一加载器只在 session 首次加载全文。
-memory 接收当前文件作治理，不负责文件读写或刷新提示词；宿主保存后显式核对，并可在普通保存/
-自动晋升后通过 provider 检查。⚠️ 召回/写入路径变更：只有同主体/字段/时间范围的高置信互斥事实、
+memory 接收当前文件作治理，不负责文件读写或刷新提示词；宿主保存文档后可显式核对。
+普通 `MemoryService.save()` 只通知非阻塞 scheduler，不同步运行模型；
+宿主后台 worker / 维护拍调用 `review_new_memory(max_atoms=20)`，通过 provider 读取当前文档。
+提炼/晋升本身不启动同步对账。⚠️ 召回/写入路径变更：只有同主体/字段/时间范围的高置信互斥事实、
 且模型引用真实完整原文，才在同一 backend 事务内软停用旧 Atom、建立替代事实 Candidate 和 Journal。
 原始证据不删，未审核替代事实不晋升；旧 raw 不再自动兜底，dirty 页面等待重建。
 历史事件、正常排障经验、不同情境及两个手动文档互相矛盾时不强行改判。
@@ -219,7 +224,7 @@ memory 接收当前文件作治理，不负责文件读写或刷新提示词；�
 retention/promotion/recall 模块及 backend contract，不建新 schema、全文索引或独立加载器。
 SQLite/真实 PG 同组测试验证事务、幂等、证据保留及 prompt 过滤。
 
-## ADR-043：页面生成使用独立变更修订进行条件写回（Proposed）
+## ADR-043：页面生成使用独立变更修订进行条件写回（Accepted）
 
 `summary_version` 只随成功生成与人工编辑变化，不能检测已 dirty 页面上的新事实；时间戳也可能相同。
 新增 storage 管理的 `mutation_version`，正文写入和 dirty 标记时原子递增，不改变 summary_version 的既有含义。

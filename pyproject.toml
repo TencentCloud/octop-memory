@@ -105,6 +105,7 @@ include = [
     "/AGENTS.md",
     "/CONTRIBUTING.md",
     "/SECURITY.md",
+    "/docs/README.md",
     "/docs/integrations.md",
     "/docs/agent/*.md",
     "/assets/images/banner.jpeg",
