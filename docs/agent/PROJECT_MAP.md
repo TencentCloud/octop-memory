@@ -32,14 +32,22 @@ CLI → application / operations ───────────────�
 | `domain/retention.py`、`operations/retention.py` | 系统报错来源判定；存量预览和软停用；USER.md/MEMORY.md 原文核对、冲突软停用/替代候选/审计元数据 |
 
 手动文档治理由 `MemoryService` / Bridge → `application.MemoryRuntime` → `operations.retention`
-共享实现。宿主提供当前文档/可选 freshness callback；save/自动 promotion 可注册 provider。
+共享实现。宿主提供当前文档/可选 freshness callback；provider 供后台审核读取当前文档。
+`MemoryService.save()` 仅落库并通知 `set_manual_review_scheduler()` 注册的非阻塞回调；
+宿主 worker / 维护拍调用公共 `MemoryService.review_new_memory(max_atoms=20)`，转发 Runtime 的一批审核。
+该方法本身是同步的，必须在用户回合外运行；未注册 provider 或文档为空返回 None，否则返回审核报告。
+显式 `reconcile_manual_documents()` 默认最多 100 条，后台默认 20 条；失败推迟、不确定跳过，不强制停用。
 `manual_documents/v1` 保存比较版本、已核对 assertion hash、未决候选和审计快照；小型
 `manual_documents/recall/v1` 保存召回抑制清单。原文不会批量导入 Atom/FTS。
+审计记录用 `uncertain` 字典持久化仍无结论的活跃 assertion hash，已比较不等于已验证。
+旧记录缺少该字段时，读状态不信任其 checked 进度、不修改元数据；下一次对账按现有上限重审活跃事实，
+并写入新格式后续查。显式空字典表示有效的新格式已决状态，不触发重复重审。
 召回通过实际 session `manual_context` 去重，并屏蔽冲突旧 Atom 的 raw fallback 和待重建页面。
 审核候选校验对账版本；宿主还应在采纳时提供当前 `manual_documents`，拦截未重新核对的文件变化。
 
 portable 的 Agent 默认发现目录为 `~/.octop/agents/*/memory.sqlite` 与 `~/.octop-harness/*/memory.sqlite`；
 其它位置由 `list_sources(extra_paths=...)` 显式加入，不自动搬移数据。
+宿主文件 allowlist 仅接受相对 Markdown glob；以 `Path.anchor` 拒绝绝对路径、Windows 根相对路径和驱动器相对路径，避免扫描抛错。
 
 外部 Agent 适配位于根目录 `plugins/<host>/`，当前包括 OpenClaw、Hermes；验证位于 `tests/`、`evals/`，示例位于 `examples/`。
 `examples/basic_usage.py` 合并基础读写、树和 prompt recall，仅通过公共 API 写入临时库；
@@ -83,6 +91,14 @@ octop-harness 主路径使用 `on_failure="error"`，失败写入 checkpoint tas
 `root → branch → leaf` 是组织树，leaf 用 `atom_id` 投影事实正文，不复制第二份事实。
 人工 correction 创建 successor、active-only supersede 旧 atom 并写 `user_edit` journal；
 不伪造新对话证据。page regeneration 保护 `## My Notes`，绝对事件时间统一为 aware UTC。
+页面另有 storage 管理的 `mutation_version`：正文 upsert、dirty 失效、人工编辑及生成成功时推进；
+`summary_version` 仍只表示正文生成/编辑版本。regenerator 在读取 Atom 前取得页面修订号，
+成功与失败写回均使用 backend 条件 UPDATE；旧快照返回 `stale_snapshot` 或保留原失败原因，
+记录失败 journal，但不改变较新页面的正文、dirty 或失败次数。当前修订的失败只更新重试状态，
+不推进 mutation_version，避免使同输入的有效并发结果失效。模型调用期间不持有数据库事务。
+无页面时先创建 dirty stub，条件写入失败后不再无条件 upsert。事实变化沿用既有 dirty 调用链。
+SQLite/PG 的 schema 2 自动补默认零修订列；SQLite 先 BEGIN IMMEDIATE 再检查并添加列，PG 在初始化 advisory lock 内检查列，仅缺列时执行 ALTER，避免已迁移库的初始化独占锁。
+Memory 的普通页 apply 调用保留旧 backend 签名，显式版本条件才转发新参数；自动再生成要求 backend 支持该能力，错误不降级成无条件写入。
 
 ### 读取与隔离
 

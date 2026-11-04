@@ -44,7 +44,7 @@ SHARED_SCHEMA = "octop_memory"
 
 # Version of the shared-table layout, stamped into ``meta``. Bump when the
 # DDL below changes shape and add a corresponding migration.
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # Arbitrary constant identifying "octop-memory DDL" for pg_advisory_xact_lock,
 # so concurrent Memory instances (multiple agents / processes booting at once)
@@ -387,6 +387,7 @@ class PostgresMemoryBackend:
                     dirty BOOLEAN NOT NULL DEFAULT TRUE,
                     regen_attempt_count INTEGER NOT NULL DEFAULT 0,
                     summary_version INTEGER NOT NULL DEFAULT 0,
+                    mutation_version BIGINT NOT NULL DEFAULT 0,
                     last_regen_at TIMESTAMPTZ,
                     last_user_edit_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL,
@@ -395,6 +396,19 @@ class PostgresMemoryBackend:
                     UNIQUE (namespace, entity_id)
                 )
             """)
+            # Even a no-op ALTER requests ACCESS EXCLUSIVE. Under the
+            # initialization advisory lock, only migrate an absent column
+            # so an ordinary reader cannot block already-migrated stores.
+            cur.execute(
+                """SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = %s AND table_name = 'entity_pages'
+                     AND column_name = 'mutation_version'""",
+                (SHARED_SCHEMA,),
+            )
+            if cur.fetchone() is None:
+                cur.execute(
+                    "ALTER TABLE entity_pages ADD COLUMN IF NOT EXISTS mutation_version BIGINT NOT NULL DEFAULT 0"
+                )
             cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_dirty ON entity_pages(namespace, dirty)")
             cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_updated ON entity_pages(namespace, updated_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_last_regen ON entity_pages(namespace, last_regen_at)")
@@ -1682,6 +1696,7 @@ class PostgresMemoryBackend:
                         dirty = EXCLUDED.dirty,
                         regen_attempt_count = EXCLUDED.regen_attempt_count,
                         summary_version = EXCLUDED.summary_version,
+                        mutation_version = entity_pages.mutation_version + 1,
                         last_regen_at = EXCLUDED.last_regen_at,
                         last_user_edit_at = EXCLUDED.last_user_edit_at,
                         updated_at = EXCLUDED.updated_at
@@ -1747,14 +1762,7 @@ class PostgresMemoryBackend:
     def mark_entity_page_dirty(self, entity_id: str, *, when: datetime) -> None:
         with self._cursor() as cur:
             cur.execute(
-                """UPDATE entity_pages
-                    SET dirty = TRUE, updated_at = %s
-                    WHERE namespace = %s AND entity_id = %s""",
-                (when, self._ns, entity_id),
-            )
-            if _rowcount(cur.rowcount) == 0:
-                cur.execute(
-                    """INSERT INTO entity_pages
+                """INSERT INTO entity_pages
                         (namespace, id, entity_id, summary_markdown, headline, topics,
                          dirty, regen_attempt_count, summary_version,
                          last_regen_at, last_user_edit_at,
@@ -1762,17 +1770,11 @@ class PostgresMemoryBackend:
                         VALUES (%s, %s, %s, '', '', %s, TRUE, 0, 0, NULL, NULL, %s, %s)
                         ON CONFLICT (namespace, entity_id) DO UPDATE SET
                             dirty = TRUE,
+                            mutation_version = entity_pages.mutation_version + 1,
                             updated_at = EXCLUDED.updated_at
                     """,
-                    (
-                        self._ns,
-                        f"page_{entity_id}",
-                        entity_id,
-                        Jsonb([]),
-                        when,
-                        when,
-                    ),
-                )
+                (self._ns, f"page_{entity_id}", entity_id, Jsonb([]), when, when),
+            )
 
     def apply_entity_page_regen(
         self,
@@ -1782,6 +1784,7 @@ class PostgresMemoryBackend:
         headline: str,
         topics: list[str],
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         with self._cursor() as cur:
             cur.execute(
@@ -1792,9 +1795,11 @@ class PostgresMemoryBackend:
                         dirty = FALSE,
                         regen_attempt_count = 0,
                         summary_version = summary_version + 1,
+                        mutation_version = mutation_version + 1,
                         last_regen_at = %s,
                         updated_at = %s
-                    WHERE namespace = %s AND entity_id = %s""",
+                    WHERE namespace = %s AND entity_id = %s
+                      AND (%s::bigint IS NULL OR mutation_version = %s)""",
                 (
                     summary_markdown,
                     headline,
@@ -1803,6 +1808,8 @@ class PostgresMemoryBackend:
                     when,
                     self._ns,
                     entity_id,
+                    expected_mutation_version,
+                    expected_mutation_version,
                 ),
             )
             count = _rowcount(cur.rowcount)
@@ -1813,6 +1820,7 @@ class PostgresMemoryBackend:
         entity_id: str,
         *,
         when: datetime,
+        expected_mutation_version: int | None = None,
     ) -> bool:
         with self._cursor() as cur:
             cur.execute(
@@ -1820,8 +1828,9 @@ class PostgresMemoryBackend:
                     SET regen_attempt_count = regen_attempt_count + 1,
                         dirty = TRUE,
                         updated_at = %s
-                    WHERE namespace = %s AND entity_id = %s""",
-                (when, self._ns, entity_id),
+                    WHERE namespace = %s AND entity_id = %s
+                      AND (%s::bigint IS NULL OR mutation_version = %s)""",
+                (when, self._ns, entity_id, expected_mutation_version, expected_mutation_version),
             )
             count = _rowcount(cur.rowcount)
         return count > 0
@@ -1838,6 +1847,7 @@ class PostgresMemoryBackend:
                 """UPDATE entity_pages
                     SET summary_markdown = %s,
                         summary_version = summary_version + 1,
+                        mutation_version = mutation_version + 1,
                         last_user_edit_at = %s,
                         updated_at = %s
                     WHERE namespace = %s AND entity_id = %s""",
@@ -2350,6 +2360,7 @@ class PostgresMemoryBackend:
             dirty=bool(row["dirty"]),
             regen_attempt_count=int(row.get("regen_attempt_count") or 0),
             summary_version=int(row.get("summary_version") or 0),
+            mutation_version=int(row["mutation_version"]),
             last_regen_at=row.get("last_regen_at"),
             last_user_edit_at=row.get("last_user_edit_at"),
             created_at=row["created_at"],

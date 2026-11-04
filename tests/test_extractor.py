@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
+
+import pytest
 
 from octop_memory.pipeline.extractor import (
     CandidateExtractor,
@@ -341,3 +344,119 @@ class TestExtractorConfig:
         extractor.extract(events)
 
         assert "at most 7 candidates" in mock.calls[0].prompt
+
+
+# ---------------------------------------------------------------------------
+# Batching (issue #25): a session backlog must not go into one LLM call
+# ---------------------------------------------------------------------------
+
+
+class TestBatching:
+    def test_splits_by_event_count(self) -> None:
+        events = [_make_event(f"raw-{i}", "x") for i in range(5)]
+        mock = MockLLMClient(default_response='{"candidates": []}')
+        extractor = CandidateExtractor(llm=mock, max_events_per_batch=2, max_chars_per_batch=10_000_000)
+
+        result = extractor.extract(events)
+
+        assert len(mock.calls) == 3  # 2 + 2 + 1
+        assert result.llm_calls == 3
+        assert result.failure_reason is None
+
+    def test_splits_by_char_budget(self) -> None:
+        # 3 events of 100 chars each (~300 with overhead); a 700-char budget
+        # fits two per batch, so the third starts a new batch.
+        events = [_make_event(f"raw-{i}", "x" * 100) for i in range(3)]
+        mock = MockLLMClient(default_response='{"candidates": []}')
+        extractor = CandidateExtractor(llm=mock, max_events_per_batch=100, max_chars_per_batch=700)
+
+        result = extractor.extract(events)
+
+        assert len(mock.calls) == 2
+        assert result.llm_calls == 2
+
+    def test_single_batch_is_unchanged(self) -> None:
+        events = [_make_event("raw-1", "decided to use Augment first, NOT replace")]
+        mock = MockLLMClient(default_response=_candidate_payload())
+        extractor = CandidateExtractor(llm=mock)
+
+        result = extractor.extract(events)
+
+        assert len(mock.calls) == 1
+        assert len(result.candidates) == 1
+        assert result.failure_reason is None
+
+    def test_candidates_accumulate_across_batches(self) -> None:
+        events = [_make_event(f"raw-{i}", "a") for i in range(4)]
+        stub = _PerBatchStub()
+        extractor = CandidateExtractor(llm=stub, max_events_per_batch=2, max_chars_per_batch=10_000_000)
+
+        result = extractor.extract(events)
+
+        assert len(stub.calls) == 2
+        assert len(result.candidates) == 2
+        assert result.failure_reason is None
+        assert result.llm_calls == 2
+
+    def test_batch_failure_fails_fast_and_reports(self) -> None:
+        events = [_make_event(f"raw-{i}", "x") for i in range(4)]
+
+        class _FailSecond:
+            calls = 0
+
+            def call_llm(self, prompt: str, **_: object) -> str:
+                self.calls += 1
+                if self.calls == 2:
+                    raise OSError("boom")
+                return '{"candidates": []}'
+
+        stub = _FailSecond()
+        extractor = CandidateExtractor(llm=stub, max_events_per_batch=1, max_chars_per_batch=10_000_000)
+
+        result = extractor.extract(events)
+
+        # Stops after the failing batch instead of burning the rest.
+        assert stub.calls == 2
+        assert result.failure_reason is not None
+        assert "boom" in result.failure_reason
+
+    def test_rejects_non_positive_batch_limits(self) -> None:
+        with pytest.raises(ValueError, match="max_events_per_batch"):
+            CandidateExtractor(llm=MockLLMClient(), max_events_per_batch=0)
+        with pytest.raises(ValueError, match="max_chars_per_batch"):
+            CandidateExtractor(llm=MockLLMClient(), max_chars_per_batch=0)
+
+
+class _PerBatchStub:
+    """Returns one candidate quoting the first event id in the prompt."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def call_llm(self, prompt: str, **_: object) -> str:
+        self.calls.append(prompt)
+        match = re.search(r'"event_id": "(raw-\d+)"', prompt)
+        assert match is not None, "event id missing from prompt"
+        event_id = match.group(1)
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "",
+                        "candidate_type": "Fact",
+                        "status": "pending",
+                        "title": "t",
+                        "assertion": "a",
+                        "verbatim_quote": "a",
+                        "quote_event_id": event_id,
+                        "subject": {"name": "n", "entity_type": "Fact", "entity_id_hint": ""},
+                        "target_entities": [],
+                        "source_refs": [event_id],
+                        "confidence": "high",
+                        "importance": "high",
+                        "recommended_action": "promote",
+                        "promotion_reason": "explicit",
+                    }
+                ]
+            }
+        )
