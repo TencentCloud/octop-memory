@@ -16,6 +16,13 @@
 
 ## 当前任务
 
+### 提炼分批 + 游标持久化（#25）
+
+- **状态 / 链接**：实现与定向验证完成，待审阅；[octop-memory#25](https://github.com/TencentCloud/octop-memory/issues/25)。
+- **问题与场景**：`CandidateExtractor.extract` 把整个 session 的事件序列化进单次 LLM 调用（`_serialize_events_for_prompt` 无条数/字符上限），长会话积压（实测 prompt 约 8.9 万 token）直接触发「长度截断/超时」，记忆库停止增长；且「已提炼」游标只存内存，重启后整段重跑。
+- **范围与验收**：只在 `pipeline/extractor` 与 `application/runtime` 内改动，不改 schema / 公共 API。提炼按默认单批 ≤100 条且 ≤20,000 字符分批（`DEFAULT_MAX_EVENTS_PER_BATCH` / `DEFAULT_MAX_CHARS_PER_BATCH`，构造函数可覆盖），沿用 `retention.py` 的既有做法；单条超预算的事件仍自成一批，不丢事件。批间候选、warnings、cap_warning、llm_calls 合并；任一批失败即停并整体报 `failure_reason`（事件不标记、下次重试）。游标改为写入 `{ns}_meta` 的 `extracted_ids/v1/<session>`（复用 `get_meta`/`set_meta`），LRU 仍在但重启后从 meta 恢复，不再全量重跑；增量路径以 `strict=True` 持久化，游标写失败使整个事务回滚、候选写入一并撤销，事件留待重试，而非被默默跳过。
+- **验证**：`uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_runtime_error_retention.py tests/test_bridge_extract.py tests/test_extract_cursor_persistence.py -q` → **112 passed**（含重启后 `events_extracted==0`、重启后新增事件仍被提炼两项）；`uv run ruff check` / `ruff format --check` / `uv run mypy --strict src` 均通过（111 files）。
+- **接续**：逐批提交（失败时不回滚已成功批次）为后续项，本 PR 未改动。游标用 meta JSON 而非 `raw_events.extracted_at` 列，避免 SQLite/PostgreSQL 迁移；若维护者偏好列式游标可另行替换。
 ### EntityPage 再生成的旧快照覆盖
 
 - **状态 / 场景**：[PR #24](https://github.com/TencentCloud/octop-memory/pull/24) 的原始实现与专项回归通过；维护者同步当前 `develop`，保留两侧文档，合并前完整门禁与 CI 在 PR 中记录。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
