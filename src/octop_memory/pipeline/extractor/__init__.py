@@ -46,6 +46,15 @@ from octop_memory.types import Candidate, RawEvent
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CANDIDATES = 20
+# Extraction is bounded per LLM call: a whole session's backlog (thousands of
+# events) used to go into one prompt, which overflows the context and fails as
+# "length limit reached" (#25). Mirror ``operations/retention.py``: cap the
+# events per call and split further on a character budget.
+DEFAULT_MAX_EVENTS_PER_BATCH = 100
+DEFAULT_MAX_CHARS_PER_BATCH = 20_000
+# Rough per-event overhead (event_id, event_type, timestamp, session_id, JSON
+# syntax/indent) added to ``len(content)`` when estimating a batch's size.
+_EVENT_OVERHEAD_CHARS = 200
 
 
 @dataclass
@@ -94,6 +103,58 @@ def _serialize_events_for_prompt(events: list[RawEvent]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _chunk_events(
+    events: list[RawEvent],
+    *,
+    max_events: int,
+    max_chars: int,
+) -> list[list[RawEvent]]:
+    """Split events into batches bounded by count and estimated prompt size.
+
+    A single oversized batch is what overflowed the extractor's LLM context
+    (#25). Greedy chunking keeps each batch under both limits; a single event
+    larger than the budget still gets its own batch so it is never dropped.
+    """
+    batches: list[list[RawEvent]] = []
+    current: list[RawEvent] = []
+    current_chars = 0
+    for event in events:
+        cost = len(event.content) + _EVENT_OVERHEAD_CHARS
+        if current and (len(current) >= max_events or current_chars + cost > max_chars):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(event)
+        current_chars += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _merge_results(results: list[ExtractionResult]) -> ExtractionResult:
+    """Combine per-batch results into one, preserving partial candidates."""
+    candidates: list[Candidate] = []
+    warnings: list[str] = []
+    cap_warning: str | None = None
+    failure_reason: str | None = None
+    llm_calls = 0
+    for result in results:
+        candidates.extend(result.candidates)
+        warnings.extend(result.warnings)
+        llm_calls += result.llm_calls
+        if cap_warning is None:
+            cap_warning = result.cap_warning
+        if failure_reason is None:
+            failure_reason = result.failure_reason
+    return ExtractionResult(
+        candidates=candidates,
+        warnings=warnings,
+        cap_warning=cap_warning,
+        failure_reason=failure_reason,
+        llm_calls=llm_calls,
+    )
+
+
 class CandidateExtractor:
     """Stateless orchestrator that turns raw events into candidates.
 
@@ -111,6 +172,8 @@ class CandidateExtractor:
         max_retries: int = 1,
         temperature: float = 0.0,
         max_tokens: int | None = DEFAULT_EXTRACT_MAX_TOKENS,
+        max_events_per_batch: int = DEFAULT_MAX_EVENTS_PER_BATCH,
+        max_chars_per_batch: int = DEFAULT_MAX_CHARS_PER_BATCH,
     ) -> None:
         self._llm = llm
         self._max_candidates = max_candidates
@@ -121,6 +184,12 @@ class CandidateExtractor:
         # back to the built-in budget so the default cap cannot be erased by
         # an explicit ``None`` threaded down from a config layer.
         self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
+        if max_events_per_batch < 1:
+            raise ValueError("max_events_per_batch must be >= 1")
+        if max_chars_per_batch < 1:
+            raise ValueError("max_chars_per_batch must be >= 1")
+        self._max_events_per_batch = max_events_per_batch
+        self._max_chars_per_batch = max_chars_per_batch
 
     @property
     def extractor_version(self) -> str:
@@ -153,15 +222,28 @@ class CandidateExtractor:
             if len(sids) == 1:
                 session_id = sids.pop()
 
-        events_json = _serialize_events_for_prompt(events)
-        prompt = render_prompt(events_json, max_candidates=self._max_candidates)
-        raw_event_ids = {e.id for e in events}
-
-        return self._call_with_retry(
-            prompt=prompt,
-            session_id=session_id,
-            raw_event_ids=raw_event_ids,
+        batches = _chunk_events(
+            events,
+            max_events=self._max_events_per_batch,
+            max_chars=self._max_chars_per_batch,
         )
+        results: list[ExtractionResult] = []
+        for batch in batches:
+            events_json = _serialize_events_for_prompt(batch)
+            prompt = render_prompt(events_json, max_candidates=self._max_candidates)
+            raw_event_ids = {e.id for e in batch}
+            result = self._call_with_retry(
+                prompt=prompt,
+                session_id=session_id,
+                raw_event_ids=raw_event_ids,
+            )
+            results.append(result)
+            if result.failure_reason is not None:
+                # Fail fast: a failed batch leaves its events unmarked so the
+                # caller retries them. Processing the remaining batches now
+                # would only burn calls the retry discards anyway.
+                break
+        return _merge_results(results)
 
     def _call_with_retry(
         self,
@@ -231,6 +313,8 @@ class CandidateExtractor:
 
 __all__ = [
     "DEFAULT_MAX_CANDIDATES",
+    "DEFAULT_MAX_CHARS_PER_BATCH",
+    "DEFAULT_MAX_EVENTS_PER_BATCH",
     "CandidateExtractor",
     "ExtractionResult",
     "extract_session",
