@@ -39,6 +39,9 @@ CLI → application / operations ───────────────�
 显式 `reconcile_manual_documents()` 默认最多 100 条，后台默认 20 条；失败推迟、不确定跳过，不强制停用。
 `manual_documents/v1` 保存比较版本、已核对 assertion hash、未决候选和审计快照；小型
 `manual_documents/recall/v1` 保存召回抑制清单。原文不会批量导入 Atom/FTS。
+审计记录用 `uncertain` 字典持久化仍无结论的活跃 assertion hash，已比较不等于已验证。
+旧记录缺少该字段时，读状态不信任其 checked 进度、不修改元数据；下一次对账按现有上限重审活跃事实，
+并写入新格式后续查。显式空字典表示有效的新格式已决状态，不触发重复重审。
 召回通过实际 session `manual_context` 去重，并屏蔽冲突旧 Atom 的 raw fallback 和待重建页面。
 审核候选校验对账版本；宿主还应在采纳时提供当前 `manual_documents`，拦截未重新核对的文件变化。
 

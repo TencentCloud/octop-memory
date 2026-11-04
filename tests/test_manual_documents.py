@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,7 @@ import pytest
 
 from octop_memory import Memory, MemoryService
 from octop_memory.application.dashboard_data import promote_candidate
+from octop_memory.operations.retention import manual_document_review_status
 from octop_memory.pipeline.recall import recall_for_prompt
 
 
@@ -42,6 +45,24 @@ class ManualLLM:
 @pytest.fixture
 def memory(tmp_path: Path) -> Memory:
     return Memory(namespace="manual_docs", backend_config={"db_path": str(tmp_path / "memory.sqlite")})
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def both_backends(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Memory]:
+    """One ``Memory`` per backend: the review state lives in ``meta`` JSON, so both share the bug."""
+    if request.param == "sqlite":
+        yield Memory(namespace="manual_docs_parity", backend_config={"db_path": str(tmp_path / "parity.sqlite")})
+        return
+
+    dsn = request.getfixturevalue("postgres_dsn")
+    memory = Memory(
+        namespace=f"manual_docs_parity_{uuid.uuid4().hex[:12]}", backend="postgres", backend_config={"dsn": dsn}
+    )
+    try:
+        yield memory
+    finally:
+        memory.backend.purge_namespace()
+        memory.backend.close()
 
 
 def test_conflict_is_quarantined_and_replacement_is_a_review_candidate(memory: Memory) -> None:
@@ -356,3 +377,103 @@ def test_duplicate_normalization_preserves_negation_case_and_numbers(memory: Mem
     result = MemoryService(memory).reconcile_manual_documents({"MEMORY.md": other})
     assert result["duplicates"] == 0 and result["status"] == "unavailable"
     assert len(memory.list_atoms()) == 1
+
+
+class VerdictlessLLM:
+    """Answers ``confidence="uncertain"``: a comparison that carries no verdict."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.confidence = "uncertain"
+
+    def call_llm(self, prompt: str, **kwargs: Any) -> str:
+        self.calls += 1
+        data = json.loads(prompt)
+        return json.dumps(
+            {
+                "matches": [
+                    {
+                        "atom_id": atom["id"],
+                        "relation": "unrelated",
+                        "document": "USER.md",
+                        "quote": "",
+                        "confidence": self.confidence,
+                        "same_subject": False,
+                        "same_scope": False,
+                    }
+                    for atom in data["atoms"]
+                ]
+            }
+        )
+
+
+def test_verdictless_comparison_advances_the_cursor_without_reporting_complete(memory: Memory) -> None:
+    """Advancing a cursor is not verifying a fact.
+
+    The cursor has to advance, otherwise the same atoms go back to the model on
+    every pass. It must not turn "compared, still unknown" into "verified" either:
+    the following pass has nothing left to compare, so the only place that state
+    can survive is the persisted report.
+    """
+    memory.store("The user keeps backups on the NAS.")
+    llm = VerdictlessLLM()
+    service = MemoryService(memory, llm=llm)
+    documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+
+    first = service.reconcile_manual_documents(documents)
+    assert (first["checked"], first["remaining"]) == (1, 0)
+    assert first["uncertain"] == 1
+    assert first["status"] == "uncertain"
+
+    calls = llm.calls
+    second = service.reconcile_manual_documents(documents)
+    assert llm.calls == calls, "an already compared atom must not be re-sent to the model"
+    assert second["remaining"] == 0
+    assert second["status"] == "uncertain", "nothing left to compare is not the same as verified"
+
+    persisted = manual_document_review_status(memory, documents)
+    assert persisted["status"] == "uncertain" and persisted["uncertain"] == 1
+
+
+def test_a_new_document_revision_can_clear_the_uncertain_state(memory: Memory) -> None:
+    memory.store("The user keeps backups on the NAS.")
+    llm = VerdictlessLLM()
+    service = MemoryService(memory, llm=llm)
+    assert service.reconcile_manual_documents({"USER.md": "Owner notes."})["status"] == "uncertain"
+
+    revised = {"USER.md": "Owner notes, revised."}
+    llm.confidence = "high"
+    result = service.reconcile_manual_documents(revised)
+    assert result["status"] == "complete" and result["uncertain"] == 0
+    assert manual_document_review_status(memory, revised)["status"] == "complete"
+
+
+def test_a_disabled_atom_cannot_pin_the_uncertain_state(both_backends: Memory) -> None:
+    """A fact the user switched off is no longer pending review, on either backend.
+
+    The unresolved set is persisted per atom id, so comparing it only against the
+    historical ``checked`` map keeps a disabled, deleted or reworded fact in it
+    forever: every later pass reports ``uncertain`` while zero live facts are
+    pending, and only a document revision edit can clear it. Both the reconcile
+    path and the status reader have to be driven by the current live atoms.
+    """
+    memory = both_backends
+    memory.store("The user keeps backups on the NAS.")
+    atom = memory.list_atoms()[0]
+    service = MemoryService(memory, llm=VerdictlessLLM())
+    documents = {"USER.md": "Owner notes.", "MEMORY.md": ""}
+
+    first = service.reconcile_manual_documents(documents)
+    assert (first["checked"], first["remaining"], first["uncertain"]) == (1, 0, 1)
+    assert first["status"] == "uncertain"
+
+    assert memory.deprecate_atom(atom.id, actor="user", note="the user disabled this fact") is True
+    assert memory.list_atoms() == []
+
+    second = service.reconcile_manual_documents(documents)
+    assert second["uncertain"] == 0, "no live fact is pending, so nothing is unresolved"
+    assert second["status"] == "complete", "a disabled fact must not hold the audit at uncertain"
+
+    persisted = manual_document_review_status(memory, documents)
+    assert persisted["uncertain"] == 0
+    assert persisted["status"] == "complete"
