@@ -1,7 +1,8 @@
 # AGENTS.md
 
 本文件是所有 coding agent 共用的工作协议。用户入口见 [README_CN.md](README_CN.md)，
-贡献入口见 [CONTRIBUTING.md](CONTRIBUTING.md)，项目认知保留在 `docs/agent/`，宿主接入见
+文档导航见 [docs/README.md](docs/README.md)，贡献入口见 [CONTRIBUTING.md](CONTRIBUTING.md)，
+项目认知保留在 `docs/agent/`，宿主接入见
 [docs/integrations.md](docs/integrations.md)。沿用 Harness 的澄清、实现、验证、文档对齐闭环。
 
 ## 项目速览
@@ -44,16 +45,29 @@ banner、排版、措辞、链接、Python 版本、依赖/锁文件、构建/CI
    行为验证方式变更更新 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)；代码相关缺口更新 KNOWN_RISKS；
    术语变更更新 [GLOSSARY](docs/agent/GLOSSARY.md)，对外行为变更核对 [README_AUDIT](docs/agent/README_AUDIT.md)。
 
-每份文档只承载自己的事实，不重复复制。HANDOFF 保留当前任务/未决项，历史通过 Issue / PR / Git 查阅；
-DECISIONS 保留稳定 ADR 编号及替代关系，不追加日期流水账。只改 HANDOFF 而遗漏受影响的地图或测试矩阵不算完成。
+每份文档只承载自己的事实，不重复复制。HANDOFF 保留当前任务/未决项；已合入任务移出当前任务，
+必要时只留历史入口和接续边界，稳定知识归入地图、决策、测试或风险。代码已合入不代表当前环境已重新验收。
+DECISIONS 保留稳定 ADR 编号及替代关系，状态需核对当前实现，不追加日期流水账。
+核对代码并修正文档漂移时，直接更新对应认知文件，无需将文档整理另记为代码任务。
+只改 HANDOFF 而遗漏受影响的地图或测试矩阵不算完成。
 
 ## 架构约束
 
-- `Memory` 为公共存储 API；`MemoryService` / `Bridge` 复用 `application.MemoryRuntime`。
+- `Memory` 为公共存储 API；`MemoryService` / `Bridge` 的共享宿主操作复用 `application.MemoryRuntime`。
+  `MemoryService.recall()` 直接调用 prompt pipeline；工具搜索和 prompt 召回的配置、来源需分别核对。
 - pipeline、storage、domain 不依赖 adapters；storage 不依赖 pipeline；service 不依赖 bridge。
 - 新宿主通过 application 接入；现有源码 dashboard 的直接 SQLite 访问不是新模块的模板。
 - `AtomCard` 是事实真源，tree leaf 只引用 atom；Chroma/Qdrant 是可选 index，不是关系 backend。
+- Runtime 增量提炼的候选与持久游标必须同事务提交，提交后再推进内存进度；不先标记成功再落候选，
+  不将游标提交等同于后续 promotion/page/Episode 全部完成。低层 extractor 入口的失败语义另行核对。
+- 页面生成写回必须原子校验 `mutation_version`；条件失败不降级为无条件写入，所有页面写入者维护修订契约。
+- `MemoryService.save()` 只落库并通知非阻塞 scheduler；同步的 `review_new_memory()` 由宿主后台执行。
+  手动文档的当前文件用于治理，实际聊天快照用于召回去重，不互相替代。
+- 宿主配置转发、hook 调度和实际执行分别验证；模型配置可用不等于已触发提炼，profile 策略不跨宿主推定一致。
 - 不擅自改变 public API、数据格式、配置默认值或增加生产依赖。
+
+上述流程与入口的详细契约见 [PROJECT_MAP](docs/agent/PROJECT_MAP.md)，宿主现状和限制见
+[集成指南](docs/integrations.md) 与 [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md)。
 
 ## 双 backend gate
 
@@ -86,6 +100,8 @@ make all              # format + lint + strict mypy + pytest
 ```
 
 代码改动先运行最小相关测试，再执行完整门禁；纯文档维护只需相关文档检查，提交前仍执行完整门禁。
+文档检查使用 `tests/test_agent_docs.py` 与 `tests/test_architecture_boundaries.py`；新增/移动文件或修改标题时，
+同步导航、本地链接与标题锚点，并核对公开文档检查范围、目录约定和 sdist allowlist。
 失败时找到首个根因、做范围内最小修复并重跑；
 环境或既有问题阻止验证时，明确报告失败/skip 和复现命令，不声称通过。
 交付前确认实现符合验收、相关文档与代码一致；属于 Harness 记录范围的任务将实际验证和未解决项写入 HANDOFF；
