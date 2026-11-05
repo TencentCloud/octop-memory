@@ -93,7 +93,11 @@ class MemoryService:
         limit: int = DEFAULT_RECALL_LIMIT,
         manual_context: dict[str, str] | None = None,
     ) -> RecallResult:
-        """Recall relevant memories as prompt-injectable text.
+        """Recall canonical atoms as prompt-injectable text.
+
+        Automatic recall never falls back to raw conversations or page
+        summaries. Use :meth:`search` for explicit multi-source retrieval;
+        its ``recall.raw_policy`` does not widen automatic injection.
 
         Returns a :class:`RecallResult`; use ``.rendered`` for a ready-to-inject
         markdown block or ``.snippets`` to format your own. No model required.

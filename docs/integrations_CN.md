@@ -36,7 +36,9 @@ Python 宿主优先使用 `MemoryService`；跨语言或隔离进程通过 stdio
 
 `Memory.search()` 检索归档会话消息，`Memory.recall()` 返回事实的 leaf 投影，不能与 Service 的
 多源工具搜索或 prompt 召回混为一谈。Service 的 `recall()` 直接使用 prompt pipeline；Runtime 的
-`recall` 配置主要服务工具搜索，不会被该方法整体转发，也不会自动把 host 文件加入 prompt 召回。
+`recall` 配置服务主动工具搜索；自动注入只使用 Atom，可选向量检索也只返回 Atom，没有匹配时返回空，raw 和 host 文件策略不会扩大自动注入来源。
+OpenClaw hybrid 预取向 bridge 传入 `atomOnly: true`，并将宿主提供的预取结果限制为 Atom 路径。
+直接调用底层多源 pipeline 时需显式传入 `atom_only=False`。
 
 手动 USER.md/MEMORY.md 治理是可选接线：构造 Service 时提供 `manual_documents_provider`，
 通过 `set_manual_review_scheduler()` 注册立即返回的排队回调；宿主 worker 调用同步的
@@ -223,8 +225,7 @@ hermes memory status
 当前 provider 的 `sync_turn()` 只在后台调用 capture，`on_memory_write()` / `on_pre_compress()`
 也只写 raw；这些 hook 不自动调用 `extract`。仅填入模型配置不会自行生成 Candidate/Atom。
 需要提炼时由额外宿主调度调用共享 Runtime/Bridge 的 `extract`；
-provider 没有另设自动提炼开关。Hermes 的 `prefetch()` 直接调用 prompt recall，
-工具的 `recall.raw_policy` 等配置不因此自动成为 prefetch 参数。
+provider 没有另设自动提炼开关。Hermes 的 `prefetch()` 直接调用只取 Atom 的 prompt recall；只有 raw capture 时，在保存事实或抽取晋升前不会自动注入上下文。`recall.raw_policy` 等配置用于主动搜索。
 连接凭据优先用环境变量：不设 `api_key` 时读取 `api_key_env` 指定的变量（默认 `OCTOPMEMORY_LLM_API_KEY`），
 避免把明文 key 写入共享的配置文件。
 

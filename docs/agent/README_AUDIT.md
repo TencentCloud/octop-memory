@@ -10,8 +10,8 @@ Check these claims and both READMEs when public behavior changes. Maintain curre
 | Naming | `octop-memory` / `octop_memory` / `octopmemory`; Python agent host is `octop-harness`. Changed default paths and PG schema require the integration migration guide |
 | Quick start | Core needs no optional dependencies; MemoryService.recall returns snippets/rendered; `core.py`, `service.py` |
 | Facts / tree | AtomCard is canonical; leaves reference it; `core.py`, `storage/backends/` |
-| Search scope | Memory.recall projects leaves; Memory.search searches archived messages; prompt recall is multi-source; `core.py`, `pipeline/recall/` |
-| Recall policy | Default atom/raw; entity anchors add page_headline, indexes add vector. Raw fallback and current-session exclusion apply; router, multi_source, recall entry point |
+| Search scope | Memory.recall projects leaves; Memory.search searches archived messages; automatic prompt recall is atom-only, explicit tool search is multi-source; `core.py`, `pipeline/recall/`, Runtime |
+| Recall policy | Automatic gathering uses atom plus optional vector atom hits, with no raw/page fallback. Tools pass atom_only=False; OpenClaw prefetch passes atomOnly=True. Cache separates modes; current-session raw exclusion remains |
 | Backends | SQLite/PostgreSQL are relational backends. PG shares an 8+4 connection budget, 30-second waits, and 64 queued requests within a process/configuration. Chroma/Qdrant are indexes; PG skips are not acceptance |
 | Capture / pages | Not every message is captured; dirty does not mean regenerated; `application/runtime.py`, `pipeline/page/` |
 | Extraction progress | Default batches use 100 events/20,000 estimated characters; oversized events remain. Candidates and durable cursor share a transaction, with whole-pass retries on failure. The cursor does not certify promotion/page/Episode success; extractor and runtime |

@@ -107,9 +107,9 @@ Query semantics stay unchanged. Cost: rebuilding old indexes takes time; revisit
 with backend-specific implementations. Callers need not depend on engine terminology.
 Cost: locking, space, and shared-table scope differ; ordinary PG VACUUM also cannot promise no lock waits.
 
-## ADR-026: Raw is fallback by default (Accepted)
+## ADR-026: Raw is fallback by default (Superseded for automatic injection by ADR-044)
 
-Before reranking, prompt recall applies `raw_policy=fallback`: durable results prevent raw top-ups,
+With explicit multi-source retrieval, recall applies `raw_policy=fallback`: durable results prevent raw top-ups,
 and current-session/thread raw is excluded. This avoids echoing the active conversation into prompts,
 at the cost of possibly fewer results. Tools can explicitly select raw policy; review filter order when changing it.
 
@@ -293,3 +293,18 @@ When no version condition is supplied, Memory keeps the legacy backend call sign
 to implement the new parameter, maintain revisions, and compare atomically. Never catch TypeError and retry without a condition.
 The scope is writers honoring the existing dirty contract; this does not add governance to low-level atom SQL bypassing dirty
 invalidation, or promise that page journals and body commits share a transaction.
+
+
+## ADR-044: Canonical atoms only for automatic injection (Accepted; supersedes ADR-026 for injection)
+
+Raw fallback can inject casual conversation when there is no useful promoted fact. Restrict automatic recall at source gathering
+to atom and optional vector atom hits; no match returns empty. Raw, page headlines, episodes, and host files remain available
+through explicit search where supported, with existing raw policies and current-session exclusion. Add no model call or schema change.
+
+`recall_for_prompt` defaults to `atom_only=True`; explicit tools pass False. OpenClaw hybrid prefetch sends `atomOnly: true`
+and filters externally supplied results at prefetch/render boundaries. Service and Hermes use the pipeline default. Cache scope
+includes source mode, raw policy, session, and manual snapshots, preventing a broader cached search from entering an automatic prompt.
+
+Cost: unextracted history is no longer automatically surfaced, particularly for Hermes capture-only hooks. Low-value atoms and
+topic mismatch still need separate relevance/value work; do not treat this source restriction as a semantic relevance classifier.
+Review admission/ranking with positive and negative queries before adding model-assisted filtering.

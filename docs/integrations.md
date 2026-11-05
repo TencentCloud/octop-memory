@@ -39,7 +39,10 @@ Hosts provide identities, decide when to call, and manage background work; the l
 
 `Memory.search()` searches archived chat messages; `Memory.recall()` returns fact-backed leaves.
 Neither is the same as Service tool search or prompt recall. Service `recall()` calls the prompt pipeline directly;
-Runtime `recall` configuration primarily serves tool search and is not forwarded wholesale or used to add host files to prompt recall.
+automatic injection is atom-only, including optional vector atom hits, and returns empty when no atom matches.
+Runtime `recall` configuration serves explicit tool search; its raw/host-file policies do not widen automatic injection.
+OpenClaw hybrid prefetch passes `atomOnly: true` to the bridge and filters host-prefetched results to atom paths.
+Direct multi-source pipeline callers must explicitly pass `atom_only=False`.
 
 Manual USER.md/MEMORY.md governance is optional wiring: pass `manual_documents_provider` when constructing Service,
 register an immediately returning enqueue callback with `set_manual_review_scheduler()`, and let a worker call synchronous
@@ -228,7 +231,7 @@ Extraction controls `promote`, `regen_pages`, `max_candidates`, `max_tokens`, an
 Current `sync_turn()` only calls capture in the background; `on_memory_write()` and `on_pre_compress()` also write raw only.
 These hooks do not call extract. Model configuration alone therefore creates no Candidates/Atoms.
 Additional host scheduling must call shared Runtime/Bridge `extract`; the provider has no separate automatic-extraction switch.
-Hermes `prefetch()` calls prompt recall directly, without automatically passing tool settings such as `recall.raw_policy`.
+Hermes `prefetch()` calls atom-only prompt recall directly; raw-only capture produces no automatic context until facts are saved or extracted/promoted. Tool settings such as `recall.raw_policy` apply to explicit search.
 Prefer environment credentials: without `api_key`, the client reads `api_key_env` (default `OCTOPMEMORY_LLM_API_KEY`),
 keeping plaintext keys out of shared configuration files.
 

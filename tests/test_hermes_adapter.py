@@ -219,6 +219,11 @@ def test_prefetch_returns_memory_context(tmp_path: Path) -> None:
 
     block = provider.prefetch("What did we say about Hermes MemoryProvider?", session_id="sess_1")
 
+    assert block == ""
+    assert provider._memory is not None
+    provider._memory.store("Hermes uses the MemoryProvider contract.", topic="Hermes")
+    block = provider.prefetch("What did we say about Hermes MemoryProvider?", session_id="sess_1")
+
     assert "OctopMemory Recall" in block
     assert "MemoryProvider" in block
 

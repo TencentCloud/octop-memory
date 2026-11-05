@@ -8,6 +8,7 @@
 // build, this builder can render those results into the hybrid prompt
 // section.
 
+import { isAtomResult } from "./auto-recall.js";
 import type { RecallMode } from "./config.js";
 import type {
   CitationsMode,
@@ -106,7 +107,7 @@ function pickToolGuidance(hasSearch: boolean, hasGet: boolean, mode: RecallMode,
 }
 
 function hybridGuidancePrefix(ctx: MemoryPromptBuilderCtx): string {
-  if (Array.isArray(ctx.recallResults) && ctx.recallResults.length > 0) {
+  if (Array.isArray(ctx.recallResults) && ctx.recallResults.some(isAtomResult)) {
     return "Hybrid auto-recall has preloaded relevant memories below. ";
   }
   if (ctx.query || ctx.latestUserMessage) {
@@ -148,6 +149,7 @@ function renderPrefetchedRecall(
   const lines: string[] = ["Relevant memories:"];
   let used = 0;
   for (const result of recallResults) {
+    if (!isAtomResult(result)) continue;
     const line = renderRecallResult(result);
     if (!line) continue;
     const lineCost = line.length + 1;

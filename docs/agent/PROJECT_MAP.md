@@ -63,7 +63,8 @@ real-host E2E, and maintenance launchers; deployments are not substitutes for un
 
 Service configuration feeds Runtime tool search, capture, privacy, and extraction.
 `MemoryService.recall()` directly calls prompt recall without forwarding all Runtime recall configuration.
-Tool search and prompt injection need not use identical policies or file sources.
+Automatic injection is atom-only; Runtime raw/host-file configuration does not widen it.
+Tool search retains its multi-source policies and file sources.
 
 ## Repository integration map
 
@@ -236,10 +237,15 @@ Ordinary page apply retains legacy backend signatures; explicit version conditio
 
 ## Recall and reads
 
-Main pipeline: cache → parse → route → gather → raw policy → rerank → diversify → suppress → budget → render.
-Default routes are atom/raw; entity anchors add page_headline, configured indexes add vector, and tree is not a source.
-Raw fallback excludes raw when durable results exist rather than topping up the count;
-current session/thread scope excludes that conversation's raw. Tool search can merge allowed host Markdown according to policy.
+Main pipeline: cache → parse → route → atom-only source restriction → gather → raw policy → rerank → diversify → suppress → budget → render.
+`recall_for_prompt(atom_only=True)` is the automatic-injection default, gathering atom and optional vector atom hits only.
+No atom match returns empty; raw, page_headline, and episode cannot fill the prompt. Service, Hermes prefetch, and CLI use this default.
+Runtime `memory_search` explicitly passes `atom_only=False` for ordinary tools and preserves configurable raw fallback and host Markdown.
+OpenClaw hybrid prefetch sends `atomOnly: true`; Runtime then skips non-atom sources and host files. The plugin also filters
+host-prefetched/returned results and prompt rendering to canonical atom paths. Explicit tools keep existing sources.
+Cache scope includes atom-only mode, raw policy, current session, and manual-document snapshots to prevent cross-mode reuse.
+With multi-source retrieval, raw fallback excludes raw when durable results exist rather than topping up the count;
+current session/thread scope excludes that conversation's raw. The legacy `recall_multi_source` helper is unchanged.
 `memory_get` reads the virtual path returned by search; hosts should not guess IDs.
 
 ## Storage and connections
