@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- 每轮自动召回只检索 Atom（含可选向量 Atom），没有匹配时返回空，不再回退注入原始对话或页面摘要；主动工具搜索继续保留多源及 raw 策略。OpenClaw hybrid 预取与 Hermes 同步采用该规则，缓存隔离自动注入和多源搜索，不增加模型调用或删除历史记录。
+
 ## [1.0.3] - 2026-11-04
 
 ### 修复

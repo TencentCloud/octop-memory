@@ -75,6 +75,9 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
 
 ## Retrieval quality and validation
 
+- Atom-only injection removes raw/page fallback, not low-value or off-topic atoms already promoted. Relevance admission,
+  independent durable-value checks, and negative-query evaluation remain follow-up work. No additional model call is introduced.
+- Hermes captures raw without automatic extraction; its prefetch stays empty until canonical atoms exist through save or promotion.
 - Machine load affects recall wall-clock budgets. Distinguish scheduling jitter from actual retrieval regressions when investigating timeouts.
 - Chroma/Qdrant adapters currently have fake/mock coverage, not real vector-backend acceptance.
   Installing an extra does not initialize/inject an index or enable vector recall.

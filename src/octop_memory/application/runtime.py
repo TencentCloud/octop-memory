@@ -238,12 +238,15 @@ class MemoryRuntime:
 
             { query: string!, maxResults?: int>=1, minScore?: number,
               corpus?: "memory" | "wiki" | "all" | "sessions",
-              thread_id?: string }
+              thread_id?: string, atomOnly?: boolean }
 
         ``thread_id`` enables the M4 thread features: co-reference
         resolution against the active-entity stack ("那个项目怎么样")
         and the per-thread recall cache. The TS shell passes the
         session key it received at tool-registration time.
+
+        Automatic prefetch sets ``atomOnly=True`` to restrict retrieval to
+        canonical atoms and skip host-file results. Explicit tools omit it.
 
         We project our :class:`RecallResult` snippets onto::
 
@@ -276,6 +279,9 @@ class MemoryRuntime:
         if thread_id is not None and not isinstance(thread_id, str):
             raise ValueError("memory_search: 'thread_id' must be a string or null")
         thread_id = thread_id or None
+        atom_only = params.get("atomOnly", False)
+        if not isinstance(atom_only, bool):
+            raise ValueError("memory_search: 'atomOnly' must be a boolean")
 
         hits: list[dict[str, Any]] = []
 
@@ -293,6 +299,7 @@ class MemoryRuntime:
                 limit=max_results * 3,
                 cache=self._recall_cache,
                 raw_policy=raw_policy,
+                atom_only=atom_only,
             )
             for snip in result.snippets:
                 hits.append(
@@ -313,7 +320,12 @@ class MemoryRuntime:
         # AFTER the SQLite layer so highly-ranked atoms still come
         # first; budget enforcement happens on the TS side via the
         # tool's max_results.
-        if self._host_files is not None and host_files_policy != "off" and corpus in {"all", "sessions", "memory"}:
+        if (
+            not atom_only
+            and self._host_files is not None
+            and host_files_policy != "off"
+            and corpus in {"all", "sessions", "memory"}
+        ):
             for hit in self._host_files.search(query, limit=max_results * 3):
                 hits.append(
                     {

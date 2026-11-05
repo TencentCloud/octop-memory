@@ -91,6 +91,9 @@ reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the mem
 Describe the problem, resulting behavior, validation, and remaining limits. Add user-visible changes under
 Unreleased in `CHANGELOG.md`. For nontrivial code work, update the existing HANDOFF and affected map, decisions,
 tests, risks, glossary, and README audit. Do not append dated activity logs.
+Use English PR titles by default. When `docs/` updates issues, status, risks, or plans, synchronize the affected
+[GitHub Wiki](https://github.com/TencentCloud/octop-memory/wiki) pages in the same work session, including both
+language versions where present. Cite the source Issue/PR/revision and distinguish proposed, merged, and released states.
 
 ### Branching and releases
 

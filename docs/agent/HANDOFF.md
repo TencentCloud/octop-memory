@@ -24,9 +24,16 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
-No recorded task in this document currently requires further implementation. Consult the actual status of open Issues/PRs.
-Current capability gaps are in [KNOWN_RISKS](KNOWN_RISKS.md); commands are in [TEST_MATRIX](TEST_MATRIX.md).
-Add a record below for new code work. Do not create activity records for routine documentation layout, links, or build maintenance.
+### Atom-only automatic recall
+
+- **Status:** Validated; [PR #41](https://github.com/TencentCloud/octop-memory/pull/41) targets develop and awaits review/merge. Publishing is outside this delivery.
+- **Problem:** Raw-only matches can inject ordinary conversation; page summaries also bypass canonical-atom selection.
+- **Scope and acceptance:** Automatic Service/pipeline/Hermes/OpenClaw prefetch uses canonical atoms only, including optional vector atom hits. No matching atoms returns empty. Explicit tools retain multi-source/raw access; no model calls, schema changes, extraction changes, or historical deletion.
+- **Recall/write path change:** Source selection for automatic prompt injection changes; existing promoted facts and writes are unchanged. Cache separates source modes.
+- **Key files:** `pipeline/recall/__init__.py`, `application/runtime.py`, OpenClaw prefetch/prompt builder; ADR-044 and PROJECT_MAP document source boundaries.
+- **Validation:** `make all RUN='.venv/bin/python -m'` with dedicated PostgreSQL 16: format/lint/strict mypy pass, 1608 tests pass, 12 optional host cases skip. Focused Service/recall/retention/manual/Hermes/bridge/backend tests: 402 pass, 8 optional Harness cases skip. `pytest tests/test_backend_parity.py -k AtomOnlyRecall -q -rs` runs all 12 SQLite/real-PG cases without skips, including host-file exclusion. OpenClaw `npm test` passes 69 cases; `npm run typecheck` and `npm run build` pass.
+- **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
+- **Continuation:** PR #41 is open against develop; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
 
 
 ## Task template

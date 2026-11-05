@@ -197,7 +197,7 @@ Candidate 是候选，不代表每条都要人工审批。promotion 会按价值
 而是在标记 dirty 后由 runtime/CLI/host 触发再生成；Episode 与事实提炼是并列流程。
 `Memory.store()` 的手工写入无需模型，直接建立 RawEvent/Candidate/AtomCard 和 leaf 引用。
 
-prompt 召回默认路由 `atom`、`raw`；解析到 entity 时加入 `page_headline`，配置 vector index 后加入 `vector`。默认 raw fallback 策略在命中已提炼记忆时排除 raw；传入当前 session/thread 时排除本会话原始事件。
+自动 prompt 召回只使用 `atom` 事实，可选向量检索也只返回 Atom。没有匹配的 Atom 时返回空，不再回退注入原始对话或页面摘要。主动 `MemoryService.search()` / `memory_search` 保留多源检索及可配置的 raw 策略；底层调用方可用 `recall_for_prompt(..., atom_only=False)` 显式启用该行为，仍排除当前会话的 raw。
 
 系统生成的运行报错不自动进入长期记忆，也不通过历史 raw 兜底召回。octop-harness / Octop 将模型异常保留为 checkpoint 失败任务，由宿主单独显示错误；团队自动失败通知排除采集。仍生成合成报错的宿主必须使用 `payload.octop_runtime_error=true` 标记；在线链路只按结构化来源排除，不判断“记住”“已验证”等文字。Agent 自行决定调用 `memory_save`，手工保存与人工批准由来源记录保护。后台采集保留原长度策略，不再有记忆意图关键词例外；主动保存不受此长度限制。原始诊断证据仍可按 ID 检查。`operations.retention.audit_runtime_errors(memory)` 默认仅预览，显式 `apply=True` 也仅软停用全部证据均有错误标记的自动 Atom。旧版固定报错格式只生成 `review_atom_ids` / `review_candidate_ids` 审核清单；证据缺失或混合来源也保留待审，不自动改变这些记录的状态。
 
