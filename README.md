@@ -21,7 +21,8 @@
   <a href="#external-agent-adapters">Integrations</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#code-architecture">Architecture</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/TencentCloud/octop-memory/wiki">Wiki</a>
 </p>
 
 <p align="center">
@@ -57,7 +58,7 @@ Your host manages agent execution and model scheduling; Octop Memory handles cap
 
 **Python 3.12+** is required. Automated extraction, promotion checks, and page regeneration use an injected `LLMClient`;
 installing the package alone does not configure a model. See the [integration guide](docs/integrations.md) for host setup.
-Existing installations should read the [rename migration guide](docs/integrations.md#更名与已有安装迁移) before upgrading.
+Existing installations should read the [rename migration guide](docs/integrations.md#renaming-and-migrating-existing-installations) before upgrading.
 
 ## Quick start
 
@@ -130,7 +131,7 @@ octop-memory --help
 | `db`, `gc`, `consolidate` | Storage maintenance and lifecycle operations |
 | `config`, `openclaw`, `backfill` | Configuration, integration, historical extraction |
 
-Run `<command> --help` for arguments. `db slim FILE` previews SQLite checkpoint deduplication; `--apply --offline` creates a backup and performs it without deleting history. Read [checkpoint compatibility and maintenance](CONTRIBUTING.md#checkpoint-维护) before migration or reader downgrade.
+Run `<command> --help` for arguments. `db slim FILE` previews SQLite checkpoint deduplication; `--apply --offline` creates a backup and performs it without deleting history. Read [checkpoint compatibility and maintenance](CONTRIBUTING.md#checkpoint-maintenance) before migration or reader downgrade.
 
 The dashboard is available from a source checkout with `[dashboard]` dependencies; its modules are currently excluded from the wheel. Installing `octop-memory[dashboard]` from PyPI alone does not provide the dashboard command.
 

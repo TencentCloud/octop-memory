@@ -1,11 +1,12 @@
-# 开发指南
+# Contributing
 
-从 [README](README_CN.md) 了解用途，从本文了解实现和贡献流程。AI 工作规则只维护在
-[AGENTS.md](AGENTS.md)；外部 Agent 的接入方式、已有适配的安装配置和宿主契约统一见[集成指南](docs/integrations.md)。
+Read the [README](README.md) for an introduction and this guide for implementation and contribution workflows.
+Shared coding-agent rules live in [AGENTS.md](AGENTS.md). Host installation, configuration, and integration contracts
+are maintained in the [integration guide](docs/integrations.md) ([Chinese](docs/integrations_CN.md)).
 
-## 开始开发
+## Getting started
 
-要求 Python 3.12+、支持 FTS5 的 SQLite 和 uv。
+Use Python 3.12+, SQLite with FTS5, and uv.
 
 ```bash
 git clone https://github.com/TencentCloud/octop-memory.git
@@ -15,102 +16,123 @@ make install-hooks
 make all
 ```
 
-从 `develop` 创建 `feature/*` 或 `fix/*`，用合成数据复现问题，再添加实现和相关行为测试。
-`make all` 包括 format、lint、strict mypy、pytest；format 会改写文件。pre-commit 执行相同门禁。
+Create `feature/*` or `fix/*` branches from `develop`. Reproduce issues with synthetic data,
+then add the implementation and relevant behavior tests. `make all` runs format, lint, strict mypy, and pytest;
+format rewrites files. The pre-commit hook runs the same gate.
 
-源码辅助目录各有用途：`examples/basic_usage.py` 是唯一的基础示例，使用临时数据库演示公共 API、
-组织树和 prompt recall；`evals/recall/` 是合成数据回归工具，指标局限见测试矩阵。
-`scripts/` 保留插件构建、部署和宿主验收入口；部署/E2E 脚本需专用环境，不属于普通单测。
-个人工具设置留在被忽略的 `.claude/`、`.codebuddy/`、`.cursor/` 中；共享的发版流程除外（已纳入版本库的 `.cursor/skills/publish` / `.codebuddy/skills/publish`）。项目规则只维护在 AGENTS.md。
+Supporting directories have distinct roles: `examples/basic_usage.py` is the single basic example, demonstrating
+public APIs, the organization tree, and prompt recall with a temporary database. `evals/recall/` provides synthetic
+regression evaluation; see TEST_MATRIX for metric limitations. `scripts/` contains plugin builds, deployments,
+and real-host acceptance checks. Deployment/E2E scripts need dedicated environments and are not ordinary unit tests.
+Keep personal settings in ignored `.claude/`, `.codebuddy/`, and `.cursor/` directories. The tracked
+`.cursor/skills/publish` and `.codebuddy/skills/publish` are shared release workflows, not personal settings.
+Maintain project-wide agent rules only in AGENTS.md.
 
-## Harness 维护流程
+## Documentation language
 
-代码相关 bug / 新需求先写明问题、范围和验收，再实现、验证、同步项目认知。已有 Issue / PR 可作为澄清正文，
-在 [HANDOFF](docs/agent/HANDOFF.md) 留链接和当前状态即可；尚未开 Issue 的任务直接使用其中的简短模板。
-规则集中在 [AGENTS.md](AGENTS.md)，人工开发者也沿用同一闭环。
-banner、排版、链接、Python/依赖版本、构建/CI 等常规维护只更新对应文件与必要的用户说明，不写 Harness 记录。
-若同时改变运行行为或数据契约，只记录代码影响。
+`AGENTS.md`, this guide, and `docs/agent/` are maintained in English as a single engineering source of truth.
+The README and integration guide have English and Chinese versions with reciprocal links.
+When changing public contracts, commands, or examples, update both user-facing versions together.
+Use the [documentation index](docs/README.md) to find the relevant document.
 
-| 文档 | 单一职责 |
+## Engineering documentation workflow
+
+For code bugs and requirements, describe the problem, scope, and acceptance criteria before implementing,
+validating, and updating project knowledge. Use an existing Issue/PR as the clarification record and retain its
+link and current status in [HANDOFF](docs/agent/HANDOFF.md); without an Issue, use its short template.
+Human contributors follow the same loop as coding agents; the shared rules are in [AGENTS.md](AGENTS.md).
+Routine banner, layout, link, Python/dependency, and build/CI maintenance only updates the affected files
+and necessary user documentation. Do not create engineering activity logs for it; if runtime behavior or a data
+contract also changes, document that code impact.
+
+| Document | Single responsibility |
 |---|---|
-| [HANDOFF](docs/agent/HANDOFF.md) | 当前任务的澄清、进度、验证、遗留问题和下一步 |
-| [PROJECT_MAP](docs/agent/PROJECT_MAP.md) | 模块入口、调用链、数据流与边界 |
-| [DECISIONS](docs/agent/DECISIONS.md) | 架构选择、理由、代价和替代关系 |
-| [TEST_MATRIX](docs/agent/TEST_MATRIX.md) | 按改动范围选择验证命令和环境 |
-| [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md) | 当前缺口、限制与应对 |
-| [GLOSSARY](docs/agent/GLOSSARY.md) | 核心术语 |
-| [README_AUDIT](docs/agent/README_AUDIT.md) | 对外声明与实现的核对项 |
+| [HANDOFF](docs/agent/HANDOFF.md) | Clarification, progress, validation, unresolved items, and next steps for active work |
+| [PROJECT_MAP](docs/agent/PROJECT_MAP.md) | Module entry points, call chains, data flows, and boundaries |
+| [DECISIONS](docs/agent/DECISIONS.md) | Architecture choices, reasons, costs, and supersession relationships |
+| [TEST_MATRIX](docs/agent/TEST_MATRIX.md) | Commands and environments selected by change scope |
+| [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md) | Current gaps, limitations, and mitigations |
+| [GLOSSARY](docs/agent/GLOSSARY.md) | Core terminology |
+| [README_AUDIT](docs/agent/README_AUDIT.md) | Public claims checked against implementation |
 
-仅更新受影响的文档，不为每个任务新建文件；已完成任务的细节由 Issue / PR / Git 保存。
-开发从 [项目地图](docs/agent/PROJECT_MAP.md) 开始，验证命令见 [测试矩阵](docs/agent/TEST_MATRIX.md)，
-已知限制见 [风险清单](docs/agent/KNOWN_RISKS.md)。
+Update affected documents rather than creating a file for every task. Keep completed-task details in Issue/PR/Git history.
+Start from the [project map](docs/agent/PROJECT_MAP.md), choose checks from the
+[test matrix](docs/agent/TEST_MATRIX.md), and consult [known risks](docs/agent/KNOWN_RISKS.md).
 
-## Checkpoint 维护
+<a id="checkpoint-维护"></a>
 
-SQLite `CompactSqliteSaver` 默认复用较大的 `skills_metadata` 和 `memory_contents`，在同库
-`hm_checkpoint_blobs` 保存不可变内容，`harness-checkpoint-v1` checkpoint 保存引用。
-内容和 checkpoint 原子提交，读取时恢复原值；旧 inline 仍可读，历史不会自动批量迁移。
-独立 reader 使用 `CheckpointSerializer.with_connection(conn)` 获取自身 decoder/cache 和一致事务视图。
+## Checkpoint maintenance
+
+SQLite's `CompactSqliteSaver` reuses large `skills_metadata` and `memory_contents` values by default.
+Immutable content lives in `hm_checkpoint_blobs` in the same database; `harness-checkpoint-v1` checkpoints store references.
+Content and checkpoint writes are atomic, legacy inline values remain readable, and existing history is not migrated in bulk automatically.
+Independent readers use `CheckpointSerializer.with_connection(conn)` for their own decoder/cache and consistent transaction view.
 
 ```bash
-# 默认只读预览。
+# Read-only preview by default.
 octop-memory db slim /path/to/memory.sqlite
-# 停止所有数据库使用者后：自动备份、去重、VACUUM，不删历史。
+# After stopping all database users: back up, deduplicate, and VACUUM without deleting history.
 octop-memory db slim /path/to/memory.sqlite --apply --offline
-# 降级 reader 前，显式展开旧格式；备份路径必须不存在。
+# Before downgrading a reader, expand the legacy representation. The backup path must not exist.
 octop-memory --db /path/to/memory.sqlite db checkpoints \
   --apply --offline --backup /path/to/new-backup.sqlite --expand
 ```
 
-`--offline` 是操作者声明，不会停止进程。备份包含已提交 WAL，并需要额外磁盘空间。
-`OCTOP_MEMORY_CHECKPOINT_DEDUP=0` 仅停止新引用写入，不展开存量；旧 reader 无法直接读取新格式。
-迁移分批提交，重跑跳过已转换行；retention 需显式 completed thread、外部引用和依赖闭包。
-在线 `slim_live_checkpoints` 由宿主负责暂停新 invocation、协调 reader 和恢复；长 reader 可能延期 WAL 回收。
-这些格式维护仅支持 SQLite，明确拒绝 PostgreSQL；PG 使用原 saver，checkpoint_ns 不等于 memory namespace。
+`--offline` is an operator declaration; it does not stop processes. Backups include committed WAL and need extra disk space.
+`OCTOP_MEMORY_CHECKPOINT_DEDUP=0` stops new reference writes but does not expand existing records; old readers cannot
+read the new format directly. Migration commits in batches and skips converted rows on reruns.
+Retention requires explicit completed threads, external references, and dependency closure.
+The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
+Long-lived readers may delay WAL reclamation. These format-maintenance operations support SQLite only and explicitly
+reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the memory namespace.
 
-## PR 与发布
+## Pull requests and releases
 
-PR 描述说明问题、改动、验证和剩余限制；用户可见变更更新 `CHANGELOG.md` 的 Unreleased。
-代码相关的非平凡改动更新现有 HANDOFF，并按影响同步地图、决策、测试、风险、术语和 README 核对项；不追加日期流水账。
+Describe the problem, resulting behavior, validation, and remaining limits. Add user-visible changes under
+Unreleased in `CHANGELOG.md`. For nontrivial code work, update the existing HANDOFF and affected map, decisions,
+tests, risks, glossary, and README audit. Do not append dated activity logs.
 
-### 分支策略
+### Branching and releases
 
-| 分支 | 角色 |
-|------|------|
-| `main` | 生产真源；GitHub 默认分支；仅合入 release / hotfix |
-| `develop` | 日常集成；**特性 PR 请打向 `develop`** |
-| `release/x.y.z` | 临时发版分支；发版完成后删除 |
-| `hotfix/*` | 从 `main` 紧急修复；合入 `main` 后再合回 `develop` |
+| Branch | Role |
+|---|---|
+| `main` | Production source of truth and GitHub default; release/hotfix merges only |
+| `develop` | Daily integration; **feature PRs target `develop`** |
+| `release/x.y.z` | Temporary release branch; delete after release |
+| `hotfix/*` | Emergency fix from `main`; merge into `main`, then back into `develop` |
 
-```
+```text
 feature/* ──PR──► develop ──► release/x.y.z ──PR──► main ──tag v*──► publish
 hotfix/* ──PR──► main (+ tag) and ──PR──► develop
 ```
 
-**规则：**
+- Never push `develop` directly onto `main` or bulk-merge it into `main`; never push directly to `main`/`develop`.
+  Use the protected PR flow.
+- Merge `release/x.y.z` into `main` with a **merge commit**, not squash.
+- Actions creates production `v*` tags only after the release/hotfix has merged, on the main tip.
+- `sync-main-to-develop.yml` keeps `main` an ancestor of `develop` after release.
 
-- 禁止 `develop` 直推/直 merge 到 `main`；禁止直接 push 到 `main` / `develop`（GitHub 分支保护）。
-- `release/x.y.z` → `main` 必须用 **merge commit**，不要 squash。
-- 生产 `v*` tag 仅在合入 `main` 之后由 Actions 打在 main tip。
-- 发版后由 `sync-main-to-develop.yml` 保持 `main` 为 `develop` 的祖先。
+Daily work starts from `develop` on `feature/*`/`fix/*` and targets `develop`.
+Release through a `release/x.y.z` or `hotfix/*` PR into `main`; keep project version, CHANGELOG, and tag consistent.
+The workflows create the `v*` tag after merge, publish to PyPI/GitHub Release, then sync back into `develop`.
+Without release authorization, validate builds only; do not push tags or upload artifacts.
+Use the PR/Actions release flow rather than local `make publish`/`twine upload`.
+Before release, verify version availability, the Unreleased archive, and gates; afterward check the tag/artifacts
+and clean release branches according to repository policy.
 
-从 `develop` 创建 `feature/*` 或 `fix/*`，PR base 选 `develop`。发布从 `release/x.y.z`（或 `hotfix/*`）通过 PR 合入 main，
-project version、CHANGELOG 与标签一致。现有 workflow 在合并后创建 `v*` tag 并触发 PyPI/GitHub Release，再 sync 回 develop；
-没有发布授权时只验证构建，不推 tag 或上传。
-公开发布统一走上述 PR 与 Actions 流程，不在本地用 `make publish` / `twine upload` 代替；
-发布前检查版本未占用、Unreleased 归档正确和门禁结果，发布后核对 tag 与产物，再按仓库策略清理发布分支。
-
-Agent 辅助发布：`.cursor/skills/publish` / `.codebuddy/skills/publish`（`/publish <version>`），发版时同步更新 CHANGELOG / README 等。
+Agent-assisted release workflows are `.cursor/skills/publish` and `.codebuddy/skills/publish` (`/publish <version>`).
+They synchronize CHANGELOG/README versions and related release content.
 
 ```bash
 uv build --out-dir dist/package-review
 uv build --wheel --out-dir dist/package-review/direct
 ```
 
+The first command rebuilds a wheel from the sdist; compare extracted wheel filenames and contents with the direct build.
+Python sdist packaging uses an allowlist. Build standalone plugins separately; tests and CI remain in the full checkout.
+Plugin READMEs are short distribution entry points; detailed instructions live in the English/Chinese integration guide.
 
-首条从 sdist 重建 wheel；比较两种 wheel 解压后的文件名与内容。Python sdist 使用 allowlist，
-独立插件另行构建，测试/CI 留在完整 checkout。插件短 README 是分发入口，详细说明只有集成指南一份。
-
-不要提交 `.env`、数据库/WAL、备份、日志、`.hmpkg`、依赖安装目录或私人运维记录。
-个人 editor 配置与访问真实库的诊断脚本不属于公共源码；共享 `/publish` skill 属于公共发版流程。
-ignore 不删除已跟踪内容，工作树脱敏也不清理 Git 历史或已有附件。漏洞报告见 [SECURITY.md](SECURITY.md)。
+Never commit `.env`, databases/WAL, backups, logs, `.hmpkg`, dependency-installation directories, or personal operations records.
+Personal editor settings and scripts inspecting real databases do not belong in public source; the shared `/publish` skill does.
+Ignore rules do not remove tracked files, and sanitizing a worktree does not clean Git history or existing attachments.
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.

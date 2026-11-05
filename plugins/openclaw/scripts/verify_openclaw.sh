@@ -202,7 +202,7 @@ echo "════════════════════════�
 
 if [[ $FAIL -gt 0 ]]; then
   echo ""
-  echo "  请参考 docs/integrations.md 中的「共同验证与排错」解决上述问题。"
+  echo "  请参考 docs/integrations_CN.md 中的「共同验证与排错」解决上述问题。"
   exit 1
 fi
 

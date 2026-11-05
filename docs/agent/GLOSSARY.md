@@ -1,24 +1,32 @@
 # GLOSSARY.md
 
-仅解释核心术语；模块和数据流见 [PROJECT_MAP](PROJECT_MAP.md)。代码实体保持英文。
+Core terminology only; see [PROJECT_MAP](PROJECT_MAP.md) for modules and data flows. Preserve code identifiers verbatim.
 
-| 术语 | 含义 |
+| Term | Meaning |
 |---|---|
-| octop-memory / octop_memory / octopmemory | 项目与发行包名 / Python 包名 / 宿主插件 ID |
-| Harness 维护闭环 | 文本澄清 → 最小实现 → 验证 → 项目认知回写；不等同于新增任务日志 |
-| Memory / MemoryBackend | 公共存储 API / SQLite 与 PostgreSQL 共用 contract |
-| MemoryRuntime | MemoryService 和 Bridge 复用的宿主无关编排 |
-| RawEvent / L0 | 不可变来源证据，受 capture policy 过滤 |
-| Candidate / L1 | 待 review/promotion 的提炼结果，保留证据引用 |
-| AtomCard / L2 | canonical fact；修正追加 successor，旧事实失效 |
-| Episode / L2.5 | 事件记忆；绝对时间统一 aware UTC |
-| Entity / EntityPage / L3 | 实体锚点 / 有版本、可重新生成的整合页面 |
-| journal / L4 | 业务决策与部分 lifecycle 记录，不是全部 SQL 操作日志 |
-| root / branch / leaf | 组织树层级；leaf 通过 atom_id 引用事实 |
-| source | recall 的候选来源；默认 atom/raw，按条件加入 page_headline/vector |
-| raw_policy | 控制 raw 参与 prompt recall 的方式；fallback 为默认兜底 |
-| namespace | 记忆隔离标识；SQLite 表名前缀、PostgreSQL shared schema 中的 namespace key |
-| checkpoint_ns | LangGraph 执行流命名空间，不等同于 memory namespace |
-| retention / vacuum | 历史留存删除 / 物理空间维护；不可互相替代 |
-| VectorIndex | 可选向量检索增强，不替代关系 backend |
-| ADR | 带稳定编号的设计决策，保留理由、代价与 superseded 关系 |
+| octop-memory / octop_memory / octopmemory | Project/distribution name / Python package / host plugin ID |
+| Engineering maintenance loop | Clarify in text → implement minimally → validate → update project knowledge; not a new task diary |
+| Memory / MemoryBackend | Public storage API / shared SQLite and PostgreSQL contract |
+| octop_memory MemoryRuntime | `application.runtime.MemoryRuntime`: host-neutral orchestration shared by MemoryService and Bridge |
+| octop_harness MemoryRuntime | `memory.runtime.MemoryRuntime`: adapts Memory/Service, models, tools, middleware, and resource lifecycle to agents; distinct from this library's class |
+| Bridge | JSON-RPC adapter; OpenClaw uses stdio and Hermes reuses it in-process |
+| RawEvent / L0 | Immutable source evidence, subject to capture-policy filtering |
+| Candidate / L1 | Extraction result awaiting review/promotion, with evidence references |
+| AtomCard / L2 | Canonical fact; corrections append a successor and invalidate the old fact |
+| Episode / L2.5 | Event memory; absolute times use aware UTC |
+| Entity / EntityPage / L3 | Entity anchor / versioned, regenerable consolidated page |
+| journal / L4 | Business decisions and selected lifecycle records; not a log of every SQL operation |
+| root / branch / leaf | Organization-tree levels; leaves reference facts through atom_id |
+| source | Recall candidate source: atom/raw by default, with conditional page_headline/vector sources |
+| host file / virtual path | Indexed snapshot of host Markdown / readable path projected from a database record; tool access does not imply prompt injection |
+| raw_policy | Controls raw participation in prompt recall; fallback is the default |
+| extraction cursor | Meta key `extracted_ids/v1/<session>`; indicates candidate extraction committed, not that promotion/page/Episode stages all completed |
+| summary_version / mutation_version | Page generation/edit version / storage-managed mutation revision; the latter rejects stale generation writebacks |
+| manual_documents / manual_context | Current files for semantic governance / actual session snapshot for recall deduplication; governance does not refresh chat context |
+| uncertain | Compared but inconclusive active assertions, tracked by assertion hash; neither complete nor unexamined |
+| scheduler / review worker | Immediately returning post-save enqueue callback / host background task that calls synchronous review |
+| namespace | Memory isolation identity: SQLite table prefix or namespace key in PostgreSQL's shared schema |
+| checkpoint_ns | LangGraph execution-flow namespace, distinct from the memory namespace |
+| retention / vacuum | Deleting history according to retention rules / maintaining physical storage space; not interchangeable |
+| VectorIndex | Optional retrieval augmentation; does not replace the relational backend |
+| ADR | Design decision with a stable number, rationale, costs, and supersession relationships |

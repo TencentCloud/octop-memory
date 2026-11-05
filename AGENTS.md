@@ -1,96 +1,172 @@
 # AGENTS.md
 
-本文件是所有 coding agent 共用的工作协议。用户入口见 [README_CN.md](README_CN.md)，
-贡献入口见 [CONTRIBUTING.md](CONTRIBUTING.md)，项目认知保留在 `docs/agent/`，宿主接入见
-[docs/integrations.md](docs/integrations.md)。沿用 Harness 的澄清、实现、验证、文档对齐闭环。
+Shared working agreement for coding agents. Start with the [README](README.md),
+[documentation index](docs/README.md), and [CONTRIBUTING](CONTRIBUTING.md).
+Engineering knowledge lives in `docs/agent/`; host setup lives in the
+[integration guide](docs/integrations.md). Follow the clarification, implementation,
+validation, and documentation loop below.
+This file governs repository contributions. Hosts own the memory instructions,
+workspace templates, and file-access policies used by their running agents.
 
-## 项目速览
+## Project overview
 
-`octop-memory` 是可独立使用的 Agent 记忆组件，为 Octop / octop-harness 及其他宿主提供记忆能力。
-本仓负责证据捕获、事实提炼、召回、存储与迁移；Agent 执行、模型调用调度和用户界面由宿主组织。
-核心是 stdlib + SQLite，PostgreSQL、向量索引和 LLM 通过可选后端/接口接入。
+`octop-memory` is an independently usable and releasable memory library, called at runtime
+by Octop, octop-harness, and other hosts. Maintain it as a reusable memory foundation;
+users need neither an Octop deployment nor adjacent repository checkouts.
+This repository owns evidence-capture rules, fact extraction, recall, storage, and migration.
+Upper layers own agent-turn wiring, execution scheduling, and product interfaces.
+The core uses the standard library and SQLite; PostgreSQL, vector indexes, and LLMs use optional backends/interfaces.
 
-- 公共入口：`Memory`（`core.py`）与 `MemoryService`（`service.py`）；共享编排在 `application/`。
-- 业务流水线在 `pipeline/`，持久化在 `storage/`；CLI / JSON-RPC 在 `adapters/`。
-- `plugins/<host>/` 是外部 Agent 适配目录；当前实现包括 OpenClaw、Hermes，新增宿主复用共享业务逻辑。
-- 按任务找代码和验证入口，见 [PROJECT_MAP](docs/agent/PROJECT_MAP.md) 与 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)。
+- Public entry points: `Memory` (`core.py`) and `MemoryService` (`service.py`); shared orchestration is in `application/`.
+- Business pipelines live in `pipeline/`, persistence in `storage/`, and CLI/JSON-RPC adapters in `adapters/`.
+- `plugins/<host>/` adapts external hosts, currently OpenClaw and Hermes. New adapters reuse shared business logic.
+- Find implementation and validation entry points in [PROJECT_MAP](docs/agent/PROJECT_MAP.md)
+  and [TEST_MATRIX](docs/agent/TEST_MATRIX.md). Package paths above are relative to `src/octop_memory/`.
 
-## 工作方式
+## Repository ownership and collaboration
 
-- 开始前检查 `git status --short` 和相关 diff，保留用户已有改动。
-- 非平凡改动先说明目标、涉及文件、预期行为、最小验证和风险；大任务分阶段，保持范围聚焦。
-- 代码、测试、配置和文档同步更新；不顺手重构无关模块，不为每次任务新增文档。
-- 中文解释设计，保留代码实体、字段、CLI、环境变量与错误信息原文。
-- 示例使用通用占位符和临时数据库，不提交私人路径、运行记录、凭据、导出记忆或真实数据库。
+Dependencies flow **Octop → octop-harness → octop-memory**; Octop's memory-management API also calls octop-memory directly.
+Production code here must not depend on the other two repositories. Identify the owner of a behavior before editing;
+a problem appearing in Octop's UI does not justify copying memory algorithms or agent-turn logic into Octop.
 
-## Harness 文档闭环
+| Change | Primary repository | Check related consumers |
+|---|---|---|
+| Extraction results, promotion/conflict rules, recall sources/ranking, evidence, data contracts | octop-memory | Check Harness consumers and Octop's management API when public interfaces/results change. Algorithm fixes with unchanged interfaces need no duplicate implementations upstream. |
+| Capture/extraction timing, prompt injection/replay, memory-tool binding, background review/maintenance, instance lifecycle | octop-harness | Reuse memory APIs; involve Octop for product switches, persisted settings, or status display. |
+| Auxiliary-model selection, retries, timeouts, and configuration forwarding for Octop agents | octop-harness | Octop owns configuration UI/storage/mapping; memory owns the generic LLM protocol and algorithm budgets. Fix host calls rather than hiding failures with prompt changes. |
+| Session loading of USER.md/MEMORY.md, agent write protection, runtime memory instructions | octop-harness | Octop owns user editing, owner permissions, and file saving; memory owns semantic reconciliation, conflict candidates, and recall suppression. |
+| User memory settings, HTTP/CLI, permissions, memory/review UI, proactive-reminder product flows | Octop | Apply settings through Harness configuration/public memory APIs. Put new algorithms or generic turn behavior in the owning library. |
+| Schema, SQL, namespaces, checkpoint encoding, migrations, generic space maintenance | octop-memory | Check Harness resource reuse/closure and Octop statistics, backup/restore, thread cleanup, and online-pause coordination. |
+| OpenClaw/Hermes hooks, tool schemas, installation configuration | This repository's `plugins/<host>/` | Reuse this repository's Runtime; external hosts need no changes to octop-harness or Octop. |
 
-**记录范围**：`docs/agent/` 用于理解代码和接续开发，记录业务逻辑、架构、public API、数据契约、
-召回/写入行为，以及相关 bug、新需求、设计取舍和未解决风险。
-banner、排版、措辞、链接、Python 版本、依赖/锁文件、构建/CI 和个人工具配置等常规维护，
-只更新对应文件及必要的 README/CONTRIBUTING/CHANGELOG，不写入 Harness，也不为此新建 HANDOFF 或 ADR。
-若这类维护同时改变了运行行为或数据契约，仅记录其代码影响，不记录维护操作流水账。
-以下回写要求仅适用于上述代码相关范围；判断依据是实际影响，不是改动文件数量或是否修改了代码文件。
+Do not confuse the two `MemoryRuntime` classes: this package's `application.runtime.MemoryRuntime`
+is host-neutral orchestration; `octop_harness.memory.runtime.MemoryRuntime` adapts assembly and lifecycle to agents.
+See the [repository integration map](docs/agent/PROJECT_MAP.md#repository-integration-map) for files and call chains.
 
-1. **入场核对**：快速扫描相关代码、diff 与近期相关提交，对照 [HANDOFF](docs/agent/HANDOFF.md)
-   和 [PROJECT_MAP](docs/agent/PROJECT_MAP.md)。核对召回 source/顺序、public API、配置、prompt 与验证命令；
-   不依赖日期或提交数推断新鲜度。发现漂移，修正相关描述；范围外缺口记入 [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md)。
-2. **文本澄清**：在现有 Issue / PR 或 HANDOFF 中写明 bug 的实际/预期行为、最小复现，
-   或需求的使用场景、范围/不做什么、可验证验收条件；列出假设和待澄清问题。
-   会改变范围、兼容性或数据安全的未决问题需先澄清；已明确授权的工作继续执行，不重复索要确认。
-3. **实现与验证**：按最小可验证闭环实现，运行相关测试及完整门禁。涉及召回/写入或双 backend 时执行下述硬规则。
-4. **认知回写**：代码相关的非平凡任务更新 HANDOFF 的当前状态、关键文件、验证结果、风险与下一步；
-   模块/调用链/运行策略配置变更更新 PROJECT_MAP；重要代码取舍更新 [DECISIONS](docs/agent/DECISIONS.md)；
-   行为验证方式变更更新 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)；代码相关缺口更新 KNOWN_RISKS；
-   术语变更更新 [GLOSSARY](docs/agent/GLOSSARY.md)，对外行为变更核对 [README_AUDIT](docs/agent/README_AUDIT.md)。
+For work spanning repositories:
 
-每份文档只承载自己的事实，不重复复制。HANDOFF 保留当前任务/未决项，历史通过 Issue / PR / Git 查阅；
-DECISIONS 保留稳定 ADR 编号及替代关系，不追加日期流水账。只改 HANDOFF 而遗漏受影响的地图或测试矩阵不算完成。
+1. State the primary repository, affected consumers, API/configuration/data compatibility, and acceptance criteria
+   in the Issue/PR. Read the other repository's AGENTS before editing it.
+2. Trace real consumers when public fields, RPC results, configuration, or persistent formats change;
+   library unit tests alone are insufficient. Audit Octop's existing direct table readers, but do not use
+   those management paths as a template for new business logic that bypasses library APIs.
+3. Use [validation across repositories](docs/agent/TEST_MATRIX.md#validation-across-repositories).
+   Record the versions/source revisions actually loaded. A green library suite, a green old installation,
+   or skipped PostgreSQL/host cases cannot establish cross-repository acceptance.
+4. Link related PRs and state dependency order. To consume new interfaces, release the lower-level library first,
+   then update Harness/Octop dependency declarations and lockfiles and verify the consumer loads the new version.
+   Local source integration does not mean released users have the fix. UI-only work needs no unrelated library edits.
 
-## 架构约束
+## Working practices
 
-- `Memory` 为公共存储 API；`MemoryService` / `Bridge` 复用 `application.MemoryRuntime`。
-- pipeline、storage、domain 不依赖 adapters；storage 不依赖 pipeline；service 不依赖 bridge。
-- 新宿主通过 application 接入；现有源码 dashboard 的直接 SQLite 访问不是新模块的模板。
-- `AtomCard` 是事实真源，tree leaf 只引用 atom；Chroma/Qdrant 是可选 index，不是关系 backend。
-- 不擅自改变 public API、数据格式、配置默认值或增加生产依赖。
+- Check `git status --short` and relevant diffs first; preserve existing user changes.
+- For nontrivial work, state the goal, files, expected behavior, minimal validation, and risks. Stage large work and keep scope focused.
+- Update affected code, tests, configuration, and documentation together. Avoid unrelated refactors and per-task document proliferation.
+- Communicate in the requester's language; preserve code identifiers, CLI flags, environment variables, and error messages verbatim.
+- Use generic placeholders and temporary databases. Never commit personal paths, runtime records, credentials, memory exports, or real databases.
 
-## 双 backend gate
+## Documentation language
 
-SQLite/PostgreSQL 均为正式支持的 memory backend。涉及 public 读写、持久化编排、backend contract、
-schema、SQL、transaction、FTS 或 lifecycle 时：
+Maintain `AGENTS.md`, `CONTRIBUTING.md`, and `docs/agent/` in English as the engineering source of truth.
+Keep the README and integration guide available in English and Chinese, with reciprocal language links;
+keep their technical contracts, commands, and examples aligned. The documentation index is in English and links both user-facing languages.
 
-1. 同步维护两种 backend，用同一组行为断言验证，优先扩展 `tests/test_backend_parity.py`。
-2. 使用真实专用 PostgreSQL 和 `TEST_POSTGRES_DSN`，确认相关 PG cases 未 skip。
-3. 有意的单 backend 能力必须明确拒绝另一 backend，并在 KNOWN_RISKS 中说明原因。
-4. backend-specific SQL 留在 `storage/backends/`；不把既有能力缺口当作新代码可以静默分叉的理由。
+## Engineering documentation workflow
 
-## 召回与写入敏感路径
+**Scope:** `docs/agent/` records business logic, architecture, public APIs, data contracts, recall/write behavior,
+and related bugs, requirements, design tradeoffs, and unresolved risks.
+Routine banner, layout, wording, link, Python/dependency/lockfile, build/CI, and personal-tool maintenance belongs
+in the affected files and necessary README/CONTRIBUTING/CHANGELOG updates; do not create HANDOFF entries or ADRs for it.
+If such maintenance changes runtime behavior or data contracts, document that code impact rather than a maintenance diary.
+The following requirements apply according to actual impact, not file count or whether source files changed.
 
-| 范围 | 需要说明的影响 |
+1. **Check in:** inspect relevant code, diffs, and recent related commits against
+   [HANDOFF](docs/agent/HANDOFF.md) and [PROJECT_MAP](docs/agent/PROJECT_MAP.md).
+   Check recall sources/order, public APIs, configuration, prompts, and validation commands.
+   Judge freshness from implementation, not dates or commit counts. Correct drift; record out-of-scope gaps in
+   [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md).
+2. **Clarify in text:** use the existing Issue/PR or HANDOFF to describe actual/expected behavior and a minimal
+   reproduction, or the user scenario, scope, exclusions, and verifiable acceptance criteria.
+   List assumptions and unresolved questions. Resolve questions affecting scope, compatibility, or data safety;
+   continue already-authorized work without asking for the same permission again.
+3. **Implement and validate:** complete the smallest verifiable loop and run relevant tests and the full gate.
+   Apply the mandatory recall/write and backend rules below when affected.
+4. **Update knowledge:** for nontrivial code work, update HANDOFF with current status, key files, actual validation,
+   risks, and next steps. Update PROJECT_MAP for modules/call chains/runtime configuration;
+   [DECISIONS](docs/agent/DECISIONS.md) for important tradeoffs;
+   [TEST_MATRIX](docs/agent/TEST_MATRIX.md) for validation changes; KNOWN_RISKS for code-related gaps;
+   [GLOSSARY](docs/agent/GLOSSARY.md) for terms; and check [README_AUDIT](docs/agent/README_AUDIT.md)
+   when public behavior changes.
+
+Each document owns its facts. HANDOFF keeps active work and unresolved items; move merged tasks out of active work,
+retaining only useful history links and follow-up boundaries. Put durable knowledge in the map, decisions, tests, or risks.
+Merged code is not evidence of fresh validation in the current environment.
+Keep stable ADR numbers and supersession relationships, check statuses against implementation, and avoid dated activity logs.
+Correct documentation drift in the relevant knowledge files without recording documentation cleanup as a new code task.
+Updating only HANDOFF while omitting affected maps or test guidance is incomplete.
+
+## Architecture constraints
+
+- `Memory` is the public storage API. Shared host operations in `MemoryService`/`Bridge` reuse `application.MemoryRuntime`.
+  `MemoryService.recall()` calls the prompt pipeline directly; verify tool-search and prompt-recall configuration/sources separately.
+- pipeline/storage/domain must not depend on adapters; storage must not depend on pipeline; service must not depend on bridge.
+- New hosts use shared application logic. The source dashboard's direct SQLite access is an existing exception, not a new-adapter template.
+- `AtomCard` is the canonical fact; tree leaves reference atoms. Chroma/Qdrant are optional indexes, not relational backends.
+- Runtime incremental extraction commits candidates and the durable cursor in one transaction, then advances in-memory progress.
+  Never mark success before candidates persist, or equate that commit with successful promotion/page/Episode stages.
+  Check lower-level extractor failure semantics separately.
+- Automatic page regeneration passes and atomically checks the snapshot's `mutation_version`; failed guards must not fall back
+  to unconditional writes. Preserve legacy public low-level page calls without version conditions; all page writers maintain revision semantics.
+- `MemoryService.save()` stores the fact and notifies a nonblocking scheduler. Hosts run synchronous `review_new_memory()` in the background.
+  Current manual files govern reconciliation; the actual chat snapshot governs recall deduplication. Keep those inputs distinct.
+- Verify host configuration forwarding, hook scheduling, and actual execution separately. A configured model does not prove extraction ran;
+  do not assume profiles have identical semantics across hosts.
+- Do not change public APIs, data formats, configuration defaults, or production dependencies without task authorization.
+
+Detailed contracts are in [PROJECT_MAP](docs/agent/PROJECT_MAP.md); host capabilities and limits are in the
+[integration guide](docs/integrations.md) and [KNOWN_RISKS](docs/agent/KNOWN_RISKS.md).
+
+## SQLite and PostgreSQL gate
+
+Both are supported production memory backends. Changes to public reads/writes, persistence orchestration,
+backend contracts, schema, SQL, transactions, FTS, or lifecycle must:
+
+1. Maintain both implementations and validate the same behavior assertions, preferably in `tests/test_backend_parity.py`.
+2. Use a real dedicated PostgreSQL database through `TEST_POSTGRES_DSN`; confirm relevant PG cases did not skip.
+3. Explicitly reject the other backend for deliberately backend-specific capabilities, documenting the reason in KNOWN_RISKS.
+4. Keep backend-specific SQL in `storage/backends/`. Existing capability gaps do not justify new silent divergence.
+
+## Sensitive recall and write paths
+
+| Area | Explain the effect on |
 |---|---|
-| `core.py`、`storage/backends/` | 公共写入、事务、schema、索引、namespace |
-| `pipeline/extractor/`、`pipeline/promotion/`、`pipeline/episode/` | 哪些内容成为 Candidate、AtomCard 或 Episode |
-| `pipeline/recall/`、`pipeline/page/` | source、排序、raw policy、去重、budget、页面内容 |
-| `application/runtime.py`、`application/path_projection.py`、`application/host_files.py` | 工具搜索、路径可读内容和 host 文件 |
-| `adapters/bridge/handlers.py`、宿主插件 hook | capture/extract、memory_search/memory_get 的宿主行为 |
+| `core.py`, `storage/backends/` | Public writes, transactions, schema, indexes, namespaces |
+| `pipeline/extractor/`, `pipeline/promotion/`, `pipeline/episode/` | What becomes a Candidate, AtomCard, or Episode |
+| `pipeline/recall/`, `pipeline/page/` | Sources, ranking, raw policy, deduplication, budgets, page content |
+| `application/runtime.py`, `application/path_projection.py`, `application/host_files.py` | Tool search, readable paths, host files |
+| `adapters/bridge/handlers.py`, host hooks | Host capture/extraction and memory_search/memory_get behavior |
 
-修改这些行为时，用 `⚠️ 召回/写入路径变更` 明确说明具体影响、受影响 source/layer 和验证命令。
-仅编辑说明或构建清单时说明行为未变，不将文档整理描述为 runtime 变更。
+Mark behavior changes with `⚠️ Recall/write path change`, naming the affected sources/layers and validation commands.
+For documentation/build-list edits, state that behavior is unchanged; do not describe documentation cleanup as a runtime change.
 
-## 验证与交付
+## Validation and delivery
 
 ```bash
-make install-hooks    # 每个 clone 一次，提交前不得绕过失败门禁
-make all              # format + lint + strict mypy + pytest
+make install-hooks    # Once per clone; never bypass a failed gate.
+make all              # Format + lint + strict mypy + pytest.
 ```
 
-代码改动先运行最小相关测试，再执行完整门禁；纯文档维护只需相关文档检查，提交前仍执行完整门禁。
-失败时找到首个根因、做范围内最小修复并重跑；
-环境或既有问题阻止验证时，明确报告失败/skip 和复现命令，不声称通过。
-交付前确认实现符合验收、相关文档与代码一致；属于 Harness 记录范围的任务将实际验证和未解决项写入 HANDOFF；
-无法通过的门禁必须说明根因及后续命令，不能把未验证状态写成完成验收。
-完成回复简述改动、验证和剩余限制即可，不要求固定多节交接模板。
+Run focused tests before the full gate for code changes. Documentation-only work needs relevant documentation checks;
+the full gate still runs before a commit.
+Use `tests/test_agent_docs.py` and `tests/test_architecture_boundaries.py` for documentation checks.
+When adding/moving files or changing headings, update navigation, local links, and heading anchors;
+check public-document coverage, directory contracts, and the sdist allowlist.
+Find the first failure's cause, make the smallest in-scope fix, and rerun.
+If the environment or an existing issue prevents validation, report failures/skips and reproduction commands without claiming success.
+Before delivery, confirm acceptance and alignment with code. For work within the engineering-documentation scope,
+record actual validation and unresolved items in HANDOFF. Never label an unvalidated state as accepted.
+Summarize changes, validation, and remaining limits; no fixed multi-section handoff response is required.
 
-未经用户明确授权，不执行 push、重写 Git 历史、大目录删除、生产部署或密钥修改。
-详细验证与双 backend 命令见 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)，分支与发布检查见 [CONTRIBUTING.md](CONTRIBUTING.md)（`develop` 集成 + `/publish` skill）。
+Without explicit user authorization, do not push, rewrite Git history, delete large directories, deploy production, or change secrets.
+See [TEST_MATRIX](docs/agent/TEST_MATRIX.md) for backend/environment commands and
+[CONTRIBUTING](CONTRIBUTING.md) for branching and release checks (`develop` integration and the `/publish` skill).

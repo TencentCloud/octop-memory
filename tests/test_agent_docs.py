@@ -14,7 +14,7 @@ PUBLIC_FILES = [
     ROOT / "CONTRIBUTING.md",
     ROOT / "README.md",
     ROOT / "README_CN.md",
-    ROOT / "docs" / "integrations.md",
+    *sorted((ROOT / "docs").glob("*.md")),
     *sorted((ROOT / "docs" / "agent").glob("*.md")),
     ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.md",
     ROOT / ".github" / "ISSUE_TEMPLATE" / "feature_request.md",
@@ -23,10 +23,19 @@ PUBLIC_FILES = [
     ROOT / "plugins" / "hermes" / "octopmemory" / "README.md",
     ROOT / "plugins" / "hermes" / "octopmemory" / "after-install.md",
 ]
+MAINTAINER_FILES = [
+    ROOT / "AGENTS.md",
+    ROOT / "CONTRIBUTING.md",
+    *sorted((ROOT / "docs" / "agent").glob("*.md")),
+]
 
 
-def test_documentation_keeps_harness_and_one_integration_guide() -> None:
-    assert {path.name for path in (ROOT / "docs").glob("*.md")} == {"integrations.md"}
+def test_documentation_keeps_engineering_docs_and_bilingual_integration_guide() -> None:
+    assert {path.name for path in (ROOT / "docs").glob("*.md")} == {
+        "README.md",
+        "integrations.md",
+        "integrations_CN.md",
+    }
     assert {path.name for path in (ROOT / "docs" / "agent").glob("*.md")} == {
         "HANDOFF.md",
         "PROJECT_MAP.md",
@@ -38,6 +47,30 @@ def test_documentation_keeps_harness_and_one_integration_guide() -> None:
     }
     assert not (ROOT / "CLAUDE.md").exists()
     assert (ROOT / "AGENTS.md").read_text(encoding="utf-8").startswith("# AGENTS.md\n")
+
+
+@pytest.mark.parametrize("path", MAINTAINER_FILES, ids=lambda path: path.name)
+def test_maintainer_docs_have_no_chinese_prose(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"`[^`]+`", "", text)
+    # Legacy fragment aliases may contain Chinese; they are not visible prose.
+    text = re.sub(r"<[^>]+>", "", text)
+    assert not re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", text), f"{path.relative_to(ROOT)}: Chinese prose"
+
+
+@pytest.mark.parametrize(
+    ("english", "chinese"),
+    [
+        (ROOT / "README.md", ROOT / "README_CN.md"),
+        (ROOT / "docs" / "integrations.md", ROOT / "docs" / "integrations_CN.md"),
+    ],
+    ids=["readme", "integrations"],
+)
+def test_user_docs_link_to_their_translation(english: Path, chinese: Path) -> None:
+    for source, target in ((english, chinese), (chinese, english)):
+        text = source.read_text(encoding="utf-8")
+        assert f"]({target.name})" in text or f'href="{target.name}"' in text
 
 
 @pytest.mark.parametrize("path", PUBLIC_FILES, ids=lambda path: path.name)
