@@ -21,7 +21,8 @@
   <a href="#external-agent-adapters">Integrations</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#code-architecture">Architecture</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/TencentCloud/octop-memory/wiki">Wiki</a>
 </p>
 
 <p align="center">

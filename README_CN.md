@@ -21,7 +21,8 @@
   <a href="#外部-agent-适配">宿主接入</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#代码架构">架构</a> ·
-  <a href="CONTRIBUTING.md">参与贡献</a>
+  <a href="CONTRIBUTING.md">参与贡献</a> ·
+  <a href="https://github.com/TencentCloud/octop-memory/wiki">Wiki 指南</a>
 </p>
 
 <p align="center">
