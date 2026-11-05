@@ -63,6 +63,7 @@ For work spanning repositories:
 - For nontrivial work, state the goal, files, expected behavior, minimal validation, and risks. Stage large work and keep scope focused.
 - Update affected code, tests, configuration, and documentation together. Avoid unrelated refactors and per-task document proliferation.
 - Communicate in the requester's language; preserve code identifiers, CLI flags, environment variables, and error messages verbatim.
+- Use English PR titles by default unless the requester explicitly asks for another language.
 - Use generic placeholders and temporary databases. Never commit personal paths, runtime records, credentials, memory exports, or real databases.
 
 ## Documentation language
@@ -97,6 +98,11 @@ The following requirements apply according to actual impact, not file count or w
    [TEST_MATRIX](docs/agent/TEST_MATRIX.md) for validation changes; KNOWN_RISKS for code-related gaps;
    [GLOSSARY](docs/agent/GLOSSARY.md) for terms; and check [README_AUDIT](docs/agent/README_AUDIT.md)
    when public behavior changes.
+5. **Sync GitHub Wiki:** whenever `docs/` changes issue descriptions, status, known risks, or development plans,
+   update the corresponding pages in this repository's [GitHub Wiki](https://github.com/TencentCloud/octop-memory/wiki)
+   in the same work session. Keep affected English/Chinese pages aligned, cite the source Issue/PR/revision,
+   and distinguish proposed, merged, and released behavior. Check the actual PR state before publishing;
+   a validated PR is not a released fix. If Wiki access prevents synchronization, report the exact pending pages.
 
 Each document owns its facts. HANDOFF keeps active work and unresolved items; move merged tasks out of active work,
 retaining only useful history links and follow-up boundaries. Put durable knowledge in the map, decisions, tests, or risks.
