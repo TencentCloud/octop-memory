@@ -64,6 +64,70 @@ backend-specific SQL 留在 storage。源码 dashboard 直接访问 SQLite，是
 `MemoryService.recall()` 直接调用 prompt recall，不把 Runtime 的 recall 配置整体转发给该函数；
 不能假定工具搜索和 prompt 注入使用完全相同的配置或文件来源。
 
+## 跨仓协作地图
+
+三个仓库分别是 [octop-memory](https://github.com/TencentCloud/octop-memory)、
+[octop-harness](https://github.com/TencentCloud/octop-harness)、[Octop](https://github.com/TencentCloud/Octop)。
+仓库 checkout 目录名不构成接口；下列路径各自相对所属仓库，不要求开发者按固定目录并排 clone。
+本库以运行时库、CLI 和 bridge 提供可复用记忆能力；Harness 是 Agent 运行库，Octop 是应用宿主。
+三者独立发布，不能用修改本地库源码推断已安装的应用自动取得修复。
+
+### 两条接入链
+
+```text
+聊天执行：
+Octop AgentManager._build_harness_config()
+  → HarnessAgentConfig → HarnessAgent / octop_harness.memory.MemoryRuntime
+  → MemoryMiddleware / memory tools → MemoryService
+  → octop_memory MemoryRuntime 或 prompt pipeline → Memory → backend
+
+记忆管理：
+Octop dashboard/src/pages/Agent/Memory/ → dashboard/src/api/modules/memoryDashboard.ts
+  → api/routers/memory.py、agent_files.py → api/common/memory_client.py / AgentManager
+  → Bridge / MemoryService → 本库 application/dashboard_data.py、Runtime、core/pipeline
+```
+
+`octop_memory.application.runtime.MemoryRuntime` 组织宿主无关的记忆业务；
+`octop_harness.memory.runtime.MemoryRuntime` 创建/复用库实例、注入模型和文档 provider，
+绑定工具/中间件并管理资源。这两个类不能互相替代。
+Octop 的管理接口可以在 Agent 停止时打开库或临时装配 Harness Runtime，
+因此修复不能只验证聊天中的 live Agent 路径。
+
+### 按职责定位文件
+
+表内 memory/Harness 的 Python 路径分别相对 `src/octop_memory/`、`src/octop_harness/`；
+Octop 的 Python 路径相对 `src/octop/`，`dashboard/` 路径从 Octop 仓库根目录起。
+
+| 职责 | 仓库 | 代码入口 |
+|---|---|---|
+| 通用捕获过滤、提炼编排与进度 | memory | `application/runtime.py`、`domain/retention.py`、`pipeline/extractor/` |
+| 事实、冲突候选、排序、页面和事件的业务语义 | memory | `core.py`、`pipeline/promotion/`、`pipeline/recall/`、`pipeline/page/`、`pipeline/episode/`、`operations/retention.py` |
+| 表结构、事务、FTS、连接池、向量索引、checkpoint 编码与迁移 | memory | `storage/`、`application/checkpoint_maintenance.py`、`operations/migration/` |
+| 通用 LLM 协议与独立 bridge 的模型客户端 | memory | `ports/llm/`；不承担 Octop Agent 的 provider/凭据选择 |
+| 记忆管理协议、结果和虚拟路径 | memory | `application/dashboard_data.py`、`application/path_projection.py`、`adapters/bridge/handlers.py`；Octop 负责 HTTP 和前端消费 |
+| Agent 级开关、字段序列化、Runtime 装配和实例复用 | Harness | `config/__init__.py`、`memory/runtime.py`、`memory/store.py` |
+| 每轮采集、召回注入/回放、提炼计时和后台维护 | Harness | `middleware/memory.py`、`middleware/memory_recall.py`；图装配、会话结束与 checkpointer 选择在 `agent.py` |
+| 模型看到的 memory_search/get/save 工具及返回适配 | Harness | `builtin/tools/memory_tools.py`；工具内部委托 Service，不另写记忆算法 |
+| Octop Agent 辅助模型选择、provider 调用、重试与超时 | Harness | `memory/llm_client.py`；通用接口和独立 bridge 的模型客户端归 memory |
+| USER.md/MEMORY.md 的会话快照、运行时提示与 Agent 写保护 | Harness | `agent.py`、`memory/policy.py`、`middleware/filesystem_guard.py`、`backends/workspace.py` |
+| 产品配置保存、能力探测、namespace/DB 路径与 Harness 配置映射 | Octop | `infra/agents/manager.py` 的 `_memory_extract_settings` / `_build_harness_config`，以及 `infra/agents/memory/backend.py` |
+| HTTP、所有者权限、手动文档编辑、候选采纳时附当前文档 | Octop | `api/routers/memory.py`、`api/routers/agent_files.py`、`api/common/memory_client.py`、`infra/agents/manager.py` |
+| 记忆页、设置、冲突候选、用户档案、存储与迁移交互 | Octop | `dashboard/src/pages/Agent/Memory/`、`dashboard/src/api/modules/memoryDashboard.ts`、`dashboard/src/api/modules/memoryPortable.ts` |
+| Agent 停机/恢复、备份恢复、在线暂停、线程/Agent 删除、存储统计 | Octop | `infra/agents/memory/`、`infra/agents/manager.py`、`api/routers/memory_storage.py`、`api/routers/memory_portable.py` |
+| 从 Episode 选择提醒、主动关怀和 cron 产品调度 | Octop | `infra/proactive/`、`infra/cron/`；不等于 memory 的通用 prompt recall 排序 |
+
+### 典型联动判断
+
+- **搜索结果不准确**：先查 memory 的候选来源/过滤/排序；若结果正确却没有进入下一轮提示，查 Harness 注入与快照回放；若 API 返回正确但页面显示错误，查 Octop。不要把三类问题都归为“改召回算法”。
+- **调整提炼模型或预算**：memory 定义算法所需的调用协议和预算；Harness 负责选模型、实际调用及配置转发；Octop 负责让用户填写、持久化并映射参数。新增设置要逐层核对，不能以 UI 保存成功代替执行端生效。
+- **手动档案与普通事实冲突**：memory 实现原文核对、软停用和候选/审计；Harness 负责 provider、非阻塞 scheduler、会话快照和 Agent 文件权限；Octop 负责用户文件保存、所有者权限、显式核对和候选审核交互。文件编辑、模型治理和当前会话快照是不同环节。
+- **数据库或 checkpoint 格式变更**：算法/迁移属于 memory，选择和复用 saver 属于 Harness，暂停运行、恢复和用户备份流程属于 Octop；同时核对 Octop 的 `infra/history/` 读取与恢复路径。
+
+Octop 已有 `infra/agents/memory/sqlite_storage.py`、`postgres_storage.py`、`thread_cleanup.py`
+等直接访问记忆表的管理实现。这些是 schema 变化时必须审计的既有消费者，不能从“算法归 memory”
+推断它们不会受影响。新增通用 SQL/数据语义优先归库侧 API；产品所有权、运行锁和停机协调留在宿主。
+本仓 `adapters/dashboard/` 是源码诊断工具，Octop 用户记忆页的改动应在 Octop 的 `dashboard/` 完成。
+
 ## 数据与写入
 
 | 数据 | 用途 |

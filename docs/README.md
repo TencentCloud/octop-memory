@@ -9,6 +9,7 @@
 |---|---|
 | 在 Python 中保存、召回记忆 | [快速开始](../README_CN.md#快速开始)、[公共 API 示例](../examples/basic_usage.py) |
 | 接入自有 Agent、OpenClaw 或 Hermes | [集成指南](integrations.md#接入方式与边界) |
+| 判断记忆需求应改 memory、Harness 还是 Octop | [三仓共建规则](../AGENTS.md#三仓共建与改动归属)、[跨仓协作地图](agent/PROJECT_MAP.md#跨仓协作地图) |
 | 升级旧名称的安装与数据目录 | [更名与已有安装迁移](integrations.md#更名与已有安装迁移) |
 | 备份、瘦身或回退 checkpoint 格式 | [Checkpoint 维护](../CONTRIBUTING.md#checkpoint-维护) |
 | 确认支持范围和未完成能力 | [已知风险](agent/KNOWN_RISKS.md) |

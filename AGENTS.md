@@ -4,17 +4,49 @@
 文档导航见 [docs/README.md](docs/README.md)，贡献入口见 [CONTRIBUTING.md](CONTRIBUTING.md)，
 项目认知保留在 `docs/agent/`，宿主接入见
 [docs/integrations.md](docs/integrations.md)。沿用 Harness 的澄清、实现、验证、文档对齐闭环。
+本文件约束仓库贡献工作；Agent 实际使用的记忆提示、用户工作区模板与文件权限策略由宿主实现。
 
 ## 项目速览
 
-`octop-memory` 是可独立使用的 Agent 记忆组件，为 Octop / octop-harness 及其他宿主提供记忆能力。
-本仓负责证据捕获、事实提炼、召回、存储与迁移；Agent 执行、模型调用调度和用户界面由宿主组织。
+`octop-memory` 是可独立使用、发布并在运行时被调用的记忆基础库，为 Octop / octop-harness 及其他宿主提供记忆能力。
+它在生态中提供记忆底座，贡献者按可复用库维护，不能假定用户部署了 Octop 或拥有相邻仓库 checkout。
+本仓负责证据捕获规则、事实提炼、召回、存储与迁移；Agent 回合接线、执行调度和产品界面由上层组织。
 核心是 stdlib + SQLite，PostgreSQL、向量索引和 LLM 通过可选后端/接口接入。
 
 - 公共入口：`Memory`（`core.py`）与 `MemoryService`（`service.py`）；共享编排在 `application/`。
 - 业务流水线在 `pipeline/`，持久化在 `storage/`；CLI / JSON-RPC 在 `adapters/`。
 - `plugins/<host>/` 是外部 Agent 适配目录；当前实现包括 OpenClaw、Hermes，新增宿主复用共享业务逻辑。
 - 按任务找代码和验证入口，见 [PROJECT_MAP](docs/agent/PROJECT_MAP.md) 与 [TEST_MATRIX](docs/agent/TEST_MATRIX.md)。
+
+## 三仓共建与改动归属
+
+依赖方向为 **Octop → octop-harness → octop-memory**；Octop 的记忆管理 API 也直接使用 octop-memory。
+本仓生产代码不反向依赖另两仓。新增能力先判断行为归属，再决定是否联动；不能因问题从 Octop 界面暴露，
+就把记忆算法或 Agent 回合逻辑复制到 Octop。
+
+| 要改变什么 | 主改仓库 | 需要检查的联动 |
+|---|---|---|
+| 提炼结果、晋升/冲突规则、召回来源与排序、证据和数据契约 | octop-memory | 公共接口/结果变化时检查 Harness 消费及 Octop 管理 API；接口不变的算法修复无需另两仓复制实现 |
+| 何时 capture/extract、prompt 注入与回放、memory 工具绑定、后台审核/维护、实例生命周期 | octop-harness | 复用 memory API；需要产品开关、持久配置或状态展示时联动 Octop |
+| Octop Agent 的辅助模型选择、重试、超时与配置转发 | octop-harness | Octop 负责配置界面/保存/映射；memory 负责通用 LLM 协议和算法所需预算，不能用改 prompt 代替修复宿主调用 |
+| USER.md/MEMORY.md 的会话加载、Agent 写保护和运行时记忆提示 | octop-harness | Octop 负责用户编辑入口、所有者权限和文件保存；memory 负责语义对账、冲突候选及召回抑制 |
+| 用户记忆设置、HTTP/CLI、权限、记忆页/候选审核交互、主动提醒产品流程 | Octop | 通过 Harness 配置/公共记忆接口落地；新增算法或通用回合能力回到对应库 |
+| schema、SQL、namespace、checkpoint 编码、迁移和通用空间维护 | octop-memory | 检查 Harness 的资源复用/关闭，以及 Octop 的统计、备份恢复、线程清理和在线暂停协调 |
+| OpenClaw/Hermes hook、工具 schema、安装配置 | 本仓 `plugins/<host>/` | 复用本仓 Runtime；无须为外部宿主修改 octop-harness 或 Octop |
+
+两个同名类不可混用：本仓 `application.runtime.MemoryRuntime` 是宿主无关编排；
+`octop_harness.memory.runtime.MemoryRuntime` 是 Agent 侧装配与生命周期适配。
+具体文件和端到端调用链见 [跨仓协作地图](docs/agent/PROJECT_MAP.md#跨仓协作地图)。
+
+跨仓任务按以下方式交付：
+
+1. 在 Issue / PR 中列明主改仓库、受影响消费者、API/配置/数据兼容性，以及各仓验收条件；编辑其它仓库前读取其 AGENTS。
+2. 公共字段、RPC 返回、配置项或持久化格式变化时沿真实消费链核对，不只验证本库单测。
+   Octop 已有直接读记忆表的管理代码属于需审计的消费者，不能作为新增业务绕过库接口的模板。
+3. 按 [跨仓验证](docs/agent/TEST_MATRIX.md#跨仓验证) 运行相关库测试与真实宿主契约，记录实际加载的版本或源码 revision；
+   本仓绿色、旧安装包绿色、PG/宿主 skip 均不能代替跨仓验收。
+4. 相关 PR 相互链接，说明依赖顺序。需要消费新接口时先发布底层库，再更新 Harness/Octop 的依赖声明与锁文件，
+   确认消费环境实际加载新版；本地源码联调不代表发布用户已取得修复。只改产品展示时不要求其它仓库陪改。
 
 ## 工作方式
 
@@ -60,7 +92,8 @@ DECISIONS 保留稳定 ADR 编号及替代关系，状态需核对当前实现�
 - `AtomCard` 是事实真源，tree leaf 只引用 atom；Chroma/Qdrant 是可选 index，不是关系 backend。
 - Runtime 增量提炼的候选与持久游标必须同事务提交，提交后再推进内存进度；不先标记成功再落候选，
   不将游标提交等同于后续 promotion/page/Episode 全部完成。低层 extractor 入口的失败语义另行核对。
-- 页面生成写回必须原子校验 `mutation_version`；条件失败不降级为无条件写入，所有页面写入者维护修订契约。
+- 自动页面再生成路径必须传入并原子校验读取时的 `mutation_version`；条件失败不降级为无条件写入。
+  保留公共底层页接口未传版本条件时的旧调用兼容性；所有页面写入者维护修订契约。
 - `MemoryService.save()` 只落库并通知非阻塞 scheduler；同步的 `review_new_memory()` 由宿主后台执行。
   手动文档的当前文件用于治理，实际聊天快照用于召回去重，不互相替代。
 - 宿主配置转发、hook 调度和实际执行分别验证；模型配置可用不等于已触发提炼，profile 策略不跨宿主推定一致。

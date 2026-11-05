@@ -76,6 +76,33 @@ backend-specific 能力必须显式拒绝另一 backend 并记录限制。
 Windows 或 hard limit 不足时会 skip；Linux `/proc` 的旧短线程回归与此测试分开报告。
 若 uv 缓存不可用但虚拟环境工具齐全，可用 `make all RUN='.venv/bin/python -m'`。
 
+## 跨仓验证
+
+以下为受影响消费者的定向入口，在各自仓库根目录运行；按实际改动选择，不要求每个任务重跑所有仓库。
+先读取目标仓库的 AGENTS 并准备其开发环境；对相应仓库的代码提交仍执行该仓完整门禁。
+纯文档整理只核对这些入口和相关文档，不因此操作运行中的 Agent 或真实用户数据。
+
+| 改动触点 | 仓库与代表验证命令 |
+|---|---|
+| Service、管理协议与手动文档语义 | memory：`uv run pytest tests/test_service.py tests/test_bridge_extract.py tests/test_bridge_dashboard.py tests/test_manual_documents.py -q -rs`；持久化改动另执行双 backend gate |
+| 回合采集、工具绑定、提炼调度和真实 Service 接线 | Harness：`uv run pytest tests/test_memory_service_integration.py tests/test_memory_middleware.py tests/test_memory_tools.py tests/test_memory_integration.py -q` |
+| 记忆提示、文件保护和会话召回回放 | Harness：`uv run pytest tests/test_strong_memory.py tests/test_memory_recall_replay.py tests/test_memory_tools.py tests/test_filesystem_guard.py -q` |
+| 辅助模型调用、重试与配置序列化 | Harness：`uv run pytest tests/test_memory_core.py tests/test_memory_call_policy.py tests/test_config -q` |
+| Runtime 复用、关闭和维护暂停 | Harness：`uv run pytest tests/test_memory_store.py tests/test_memory_restore_pause.py -q` |
+| 产品配置/API 与存储选择映射 | Octop：`uv run pytest tests/unit/agents/test_agent_manager.py tests/unit/agents/test_memory_backend.py tests/integration/test_memory_api.py -q` |
+| 手动文档编辑权限、停止 Agent 时可用和采纳时的当前文件 | Octop：`uv run pytest tests/unit/api/test_strong_memory.py -q` |
+| 存储、备份恢复、在线瘦身和 PG 统计 | Octop：`uv run pytest tests/unit/agents/test_memory_storage.py tests/unit/agents/test_memory_slim.py tests/integration/test_memory_storage_api.py tests/integration/test_postgres_memory_storage.py -q -rs`；真实专用 PG 的配置依该仓测试说明 |
+
+Octop 前端记忆组件有同目录 `*.test.tsx`；在 `dashboard/` 运行 `npm test -- src/pages/Agent/Memory`
+或受影响的单个文件，并按该仓规则执行 `npx tsc -b` 及 `make build-frontend`。
+只有前端展示改动时不要求 memory/Harness 新增业务实现。
+
+跨仓用例需加载真正被修改的版本：记录各仓 revision/依赖解析版本，并核对导入来源；
+宿主环境里的旧版发行包通过，不等于新源码通过。`--no-sync` 仅用于保留已经准备好的联调环境，
+不代替实际安装和版本核对。本仓 CI 的 Harness 固定提交只覆盖所列契约，不自动证明所有后续宿主版本兼容。
+模型响应可 mock，Service/Middleware/配置转发及需要验收的 backend 不应整段替换为 stub。
+联动 schema/持久化时使用真实专用 PG，并覆盖旧数据升级、namespace 隔离及消费者重开/恢复。
+
 ## 验证边界
 
 portable 默认发现测试将用户目录展开隔离到 `tmp_path`，覆盖当前 Agent 路径和显式 `extra_paths`。

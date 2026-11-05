@@ -7,7 +7,8 @@
 | octop-memory / octop_memory / octopmemory | 项目与发行包名 / Python 包名 / 宿主插件 ID |
 | Harness 维护闭环 | 文本澄清 → 最小实现 → 验证 → 项目认知回写；不等同于新增任务日志 |
 | Memory / MemoryBackend | 公共存储 API / SQLite 与 PostgreSQL 共用 contract |
-| MemoryRuntime | MemoryService 和 Bridge 复用的宿主无关编排 |
+| octop_memory 的 MemoryRuntime | `application.runtime.MemoryRuntime`；MemoryService 和 Bridge 复用的宿主无关编排 |
+| octop_harness 的 MemoryRuntime | `memory.runtime.MemoryRuntime`；将 Memory/Service、模型、工具、中间件和资源生命周期接入 Agent 的适配，非本库同名类 |
 | Bridge | JSON-RPC adapter；OpenClaw 通过 stdio 调用，Hermes 在进程内复用 |
 | RawEvent / L0 | 不可变来源证据，受 capture policy 过滤 |
 | Candidate / L1 | 待 review/promotion 的提炼结果，保留证据引用 |
