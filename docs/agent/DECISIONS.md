@@ -1,244 +1,295 @@
 # DECISIONS.md
 
-保留历史 ADR 编号，压缩为对外可用的设计依据；省略私人样本、部署记录与日期。
-Accepted 表示当前设计选择，不表示所有环境均已验证；验证缺口见 [KNOWN_RISKS](KNOWN_RISKS.md)。
-新决策记录「背景 → 选择及理由 → 替代方案/代价 → 复核条件」，必要时标明 supersedes，禁止静默覆盖旧约束。
+Preserve historical ADR numbers and concise, public design rationale; omit private samples, deployment records, and dates.
+Accepted identifies the current design choice, not validation in every environment. See [KNOWN_RISKS](KNOWN_RISKS.md) for gaps.
+New decisions describe context, choice/reason, alternatives/cost, and review conditions. Mark supersession explicitly;
+never silently overwrite an existing constraint.
 
-## ADR-001：Memory / MemoryBackend 边界（Accepted）
+## ADR-001: Memory / MemoryBackend boundary (Accepted)
 
-上层需要可替换存储；公共存储 API 集中于 `Memory`，backend 以 Protocol 约束并 lazy import。
-避免上层直接依赖 SQL 和可选依赖；代价是两种 backend 都要维护同一 contract，扩展 API 时复核。
+Hosts need replaceable storage. Keep the public storage API in `Memory`, constrain backends with a Protocol, and lazy-load them.
+This avoids upper-layer SQL and optional-dependency coupling. Cost: both backends must maintain the same contract;
+review parity when extending an API.
 
-## ADR-002：RawEvent 是派生记忆证据（Accepted）
+## ADR-002: RawEvent is evidence for derived memory (Accepted)
 
-L0 append-only，Candidate/AtomCard 保留 raw refs 和原文引用，支持追溯与重新提炼。
-不以模型改写替代高价值原文；代价是证据存储与隐私留存需单独管理，调整 retention 时复核。
+L0 is append-only; Candidates/AtomCards retain raw references and verbatim quotations for tracing and re-extraction.
+Model rewrites do not replace valuable originals. Cost: evidence storage and privacy retention require separate management;
+review them when changing retention.
 
-## ADR-003：Extractor 无持久化副作用（Accepted）
+## ADR-003: Extractor has no persistence side effects (Accepted)
 
-`CandidateExtractor.extract()` 返回结果，由 caller 决定入库；LLM/parse failure 返回 `failure_reason`。
-便于测试、检查与重试；代价是 caller 必须处理失败，不能把空结果一律当作成功。
-当前 extractor 分批调用，任一批失败即停止；Runtime 仅在整轮候选提炼成功后，
-把候选和 `extracted_ids/v1/<session>` 游标在同一事务内提交，再推进内存进度。
-不逐批保留部分成功结果；候选/游标落库失败均回滚。预算和后续阶段边界见
-[提炼与增量进度](PROJECT_MAP.md#提炼与增量进度)。
+`CandidateExtractor.extract()` returns results; its caller decides persistence. LLM/parse failures return `failure_reason`.
+This supports tests, inspection, and retries, but callers must distinguish failure from a successful empty result.
+The extractor currently calls the model in batches and stops at the first failed batch. Only after the entire extraction
+pass succeeds does Runtime atomically commit candidates and the `extracted_ids/v1/<session>` cursor, then advance memory state.
+Runtime does not persist partial successes batch by batch; candidate/cursor write failures roll back together.
+See [extraction and durable progress](PROJECT_MAP.md#extraction-and-durable-progress) for budgets and downstream-stage boundaries.
 
-## ADR-004：规则优先的 Promotion（Accepted）
+## ADR-004: Rule-first promotion (Accepted)
 
-按 value → evidence → entity → duplicate → conflict 执行，首个 terminal outcome 生效，歧义才使用 LLM。
-避免每条候选都调用模型；代价是规则与状态映射需要共同验证。新增自动晋升条件时复核 demotion-only 边界。
+Run value → evidence → entity → duplicate → conflict checks; the first terminal outcome wins. Escalate ambiguity to an LLM.
+This avoids a model call per candidate. Cost: jointly validate rules and state mapping; review the demotion-only boundary
+when adding automatic promotion conditions.
 
-## ADR-005：事实 append + deprecate（Accepted）
+## ADR-005: Append and deprecate facts (Accepted)
 
-创建新 Atom，用 `superseded_by` / `deprecated_at` 使旧事实失效，默认查询排除失效事实。
-不原地覆盖 assertion，以保留关系与审计；代价是历史存储和并发替换控制，人工修正见 ADR-034。
+Create a new atom and invalidate the old one through `superseded_by`/`deprecated_at`; default queries exclude invalid facts.
+Do not overwrite assertions in place, preserving relationships and auditability. Cost: historical storage and concurrent
+replacement control. Manual correction is covered by ADR-034.
 
-## ADR-006：EntityPage 独立存储（Accepted）
+## ADR-006: Store EntityPage separately (Accepted)
 
-Entity 与页面分表，page 有 dirty/version/regen 状态，失败保留旧内容，保护 `## My Notes`。
-避免热索引读取大正文与模型覆盖人工笔记；代价是异步更新可能暂时陈旧，修改 regeneration 时复核。
+Separate entity and page tables. Pages track dirty/version/regeneration state, retain old content on failure, and preserve `## My Notes`.
+This keeps large bodies out of hot indexes and protects user notes from generation. Cost: asynchronous updates may be stale;
+review that behavior when changing regeneration.
 
-## ADR-007：独立笔记树（Superseded by ADR-010）
+## ADR-007: Independent notes tree (Superseded by ADR-010)
 
-曾把 tree 与 pipeline 事实分开，并将 leaf 作为独立召回 source；该方案已被单一事实源替代，不作为当前实现规则。
+Previously, tree facts and pipeline facts were separate and tree leaves were an independent recall source.
+The single-fact-source design replaces this arrangement; it is not a current implementation rule.
 
-## ADR-008：宿主 shell 复用 Python runtime（Accepted）
+## ADR-008: Host shells reuse the Python runtime (Accepted)
 
-OpenClaw 用 TypeScript + stdio JSON-RPC bridge，Hermes 在进程内复用 Bridge handler。
-不维护第二套记忆算法或额外网络 daemon；代价是解释器、进程和协议生命周期需验证，见[集成指南](../integrations.md)。
+OpenClaw uses TypeScript plus a stdio JSON-RPC bridge; Hermes reuses Bridge handlers in-process.
+Avoid a second memory algorithm implementation or an extra network daemon. Cost: validate interpreter, process,
+and protocol lifecycles; see the [integration guide](../integrations.md).
 
-## ADR-009：有版本的 JSONL 迁移（Accepted）
+## ADR-009: Versioned JSONL migration (Accepted)
 
-首行 header、记录 envelope 和依赖顺序支持流式导入/导出；不直接复制 backend 私有 SQL 数据。
-代价是新字段与格式升级需要明确兼容规则，修改 export/import 时复核。
+A first-line header, record envelopes, and dependency order enable streaming import/export instead of copying backend-private SQL data.
+Cost: new fields and format upgrades need explicit compatibility rules. Revisit when changing export/import.
 
-## ADR-010：AtomCard 为事实真源（Accepted；替代 ADR-007）
+## ADR-010: AtomCard is the canonical fact (Accepted; supersedes ADR-007)
 
-leaf 只存 `atom_id`，读取 JOIN atom assertion；manual store、promotion 和 direct atom write 共用事实链。
-Entity 对应组织 branch；tree 不再是独立召回 source。避免事实双写，代价是 leaf 生命周期依赖 atom。
-召回 source 的当前条件见 [PROJECT_MAP](PROJECT_MAP.md)，不沿用历史“只有 atom/raw”的绝对表述。
+Leaves store only `atom_id`; reads JOIN the atom assertion. Manual store, promotion, and direct atom writes share one fact chain.
+Entities map to organization branches; tree is no longer a recall source. This avoids duplicate fact writes, at the cost of
+leaf lifecycle depending on atoms. See current source conditions in [PROJECT_MAP](PROJECT_MAP.md);
+do not reuse the historical absolute claim that recall has only atom/raw sources.
 
-## ADR-011：hybrid context 由 host 提供（Accepted，真实 host 待验证）
+## ADR-011: Host supplies hybrid context (Accepted; real-host validation pending)
 
-OpenClaw 在 prompt build 前调用可选 `recallPrefetcher`，把结果交给同步 promptBuilder。
-不从 `agent_end` 补本轮上下文；代价是依赖 host 实际调用 hook，SDK/host 升级时复核。
+Before prompt construction, OpenClaw invokes the optional `recallPrefetcher`; the synchronous promptBuilder consumes its result.
+Do not try to supply this turn's context from `agent_end`. Cost: actual host hook invocation is required;
+review it when upgrading the SDK/host.
 
-## ADR-012：capture 兼容短 CJK 消息并剥离 think（Accepted）
+## ADR-012: Capture supports short CJK text and strips think blocks (Accepted)
 
-共享 capture policy 使用 CJK 加权长度，在判长与入库前剥离 `<think>`；不再按显式记忆意图关键词给短消息放行，主动保存由 Agent 调用 memory_save。
-避免各宿主重复实现过滤与推理文本回灌；代价是边界消息可能被过滤，修改阈值时验证多语言样本。
+Shared capture policy uses CJK-weighted length and strips `<think>` before length checks and storage.
+Explicit intent keywords no longer admit short messages; agents call memory_save for deliberate saves.
+This avoids duplicated host filters and re-ingestion of reasoning. Cost: boundary-length messages can be filtered;
+validate multilingual samples when changing thresholds.
 
-## ADR-021：分层目录与共享 MemoryRuntime（Accepted）
+## ADR-021: Layered directories and shared MemoryRuntime (Accepted)
 
-采用 adapters → application → pipeline/core/storage/ports/domain，service 不依赖 bridge，storage 不依赖 pipeline。
-旧内部路径不保留 shim，避免两套结构长期共存；代价是内部 import 使用者需要迁移。
-未来稳定 extension API 应单独定义，不能推导为允许破坏现有 public API。
+Use adapters → application → pipeline/core/storage/ports/domain. Service must not depend on bridge, nor storage on pipeline.
+Do not retain shims for old internal paths, avoiding two long-lived layouts. Cost: internal import users must migrate.
+Define any future stable extension API separately; this decision does not authorize breaking existing public APIs.
 
-## ADR-022：checkpoint 裁剪独立于记忆 GC（Accepted，安全条件由 ADR-029/036 补充）
+## ADR-022: Checkpoint pruning is separate from memory GC (Accepted; safety extended by ADR-029/036)
 
-执行态清理与事实 lifecycle 分开，不为每条删除新增 journal，避免清理一张表却撑大另一张。
-代价是需要独立统计与恢复依赖验证；不能把删行、历史裁剪和物理回收视为同一操作。
+Separate execution-state cleanup from fact lifecycle. Do not add a journal row per deletion and grow one table while clearing another.
+Cost: independent statistics and restore-dependency checks. Row deletion, history pruning, and physical reclamation are distinct.
 
-## ADR-023：extract_run 心跳合并（Superseded by ADR-028）
+## ADR-023: Merge extract_run heartbeats (Superseded by ADR-028)
 
-历史方案按 session 合并 quiet journal；现在改写 meta，心跳配置不再控制 journal 写入。
+The historical approach merged quiet journal entries by session. Current code overwrites meta;
+heartbeat configuration no longer controls journal writes.
 
-## ADR-024：SQLite journal target 使用 partial index（Accepted）
+## ADR-024: Partial indexes for SQLite journal targets (Accepted)
 
-target 字段大量为空，使用 `WHERE col IS NOT NULL`，通过 schema 内省幂等迁移。
-不加列或拆表；查询语义不变，代价是旧索引重建需要时间，修改 journal 查询时复核覆盖。
+Targets are usually null. Use `WHERE col IS NOT NULL` and idempotent schema-introspection migration, without adding columns or tables.
+Query semantics stay unchanged. Cost: rebuilding old indexes takes time; revisit coverage when changing journal queries.
 
-## ADR-025：按意图提供空间维护入口（Accepted）
+## ADR-025: Intent-oriented space maintenance APIs (Accepted)
 
-`check_storage` 只读检查，`nudge_vacuum` 轻量回收，`compact_vacuum` 重型整理；按 backend 实现。
-避免调用者依赖 backend 术语；代价是锁、空间与共享表范围不同，普通 PG VACUUM 也不能承诺无锁等待。
+`check_storage` diagnoses read-only, `nudge_vacuum` reclaims lightly, and `compact_vacuum` performs heavy maintenance,
+with backend-specific implementations. Callers need not depend on engine terminology.
+Cost: locking, space, and shared-table scope differ; ordinary PG VACUUM also cannot promise no lock waits.
 
-## ADR-026：raw 默认只作兜底（Accepted）
+## ADR-026: Raw is fallback by default (Accepted)
 
-prompt recall 在 rerank 前执行 `raw_policy=fallback`，有提炼结果时不靠 raw 补满，并排除当前 session/thread 的 raw。
-避免本轮回灌污染 prompt；代价是召回数量可能减少。工具可显式配置 raw policy，修改过滤顺序时复核。
+Before reranking, prompt recall applies `raw_policy=fallback`: durable results prevent raw top-ups,
+and current-session/thread raw is excluded. This avoids echoing the active conversation into prompts,
+at the cost of possibly fewer results. Tools can explicitly select raw policy; review filter order when changing it.
 
-## ADR-027：轻量维护由宿主空闲调度（Accepted）
+## ADR-027: Hosts schedule light maintenance while idle (Accepted)
 
-新 SQLite 文件使用 INCREMENTAL；`run_idle_maintenance()` 按 prune → gc → nudge 执行。
-重型 compact 和 WAL truncate 需要合适空闲窗口与空间检查；库不承诺所有宿主自动调度，接入时单独验证。
+New SQLite files use INCREMENTAL. `run_idle_maintenance()` runs prune → gc → nudge.
+Heavy compaction and WAL truncation need an appropriate idle window and space checks.
+The library does not promise every host schedules them automatically; validate host wiring separately.
 
-## ADR-028：运行摘要与决策 journal 分离（Accepted；替代 ADR-023）
+## ADR-028: Separate runtime summaries from decision journals (Accepted; supersedes ADR-023)
 
-`extract_run` 覆盖 meta 摘要，journal 按 action 留存，GC 返回计数而非逐行 journal。
-避免空转撑大审计表；代价是无法从摘要重放每次空运行，PG retention 缺口见风险清单。
+`extract_run` overwrites a meta summary; journal retention depends on action, and GC returns counts rather than per-row entries.
+This prevents idle activity from inflating the audit table. Cost: summaries cannot replay every empty pass;
+see the risk list for the PG retention gap.
 
-## ADR-029：裁剪前封口父图（Accepted）
+## ADR-029: Seal parent graphs before pruning (Accepted)
 
-保留回合内逐步 checkpoint；裁剪默认 `keep_last=1`，先封口父图 messages，再按安全条件删除祖先/子图。
-进行中、HITL 或封口失败不能按普通结束回合处理；代价是封口和依赖验证成本，恢复语义变化时复核。
+Keep stepwise checkpoints within a turn. Pruning defaults to `keep_last=1`: seal parent-graph messages first,
+then delete ancestors/subgraphs under safety checks. In-progress, HITL, or failed-sealing cases are not ordinary completed turns.
+Cost: sealing and dependency-validation work; review it when changing restore semantics.
 
-## ADR-030：PostgreSQL 普通操作使用短事务（Accepted）
+## ADR-030: Short transactions for ordinary PostgreSQL operations (Accepted)
 
-统一 `_cursor()` 结束普通读写事务，显式 transaction 保留跨操作原子性；bootstrap 有锁超时和 FTS catalog fast path。
-避免 idle transaction 阻塞 DDL；代价是确需长时间的 migration 必须单独规划，不能全局放宽超时。
+End ordinary read/write transactions through `_cursor()`; explicit transactions preserve atomicity across operations.
+Bootstrap uses lock timeouts and an FTS catalog fast path. This avoids idle transactions blocking DDL.
+Cost: genuinely long migrations need separate planning rather than globally relaxed timeouts.
 
-## ADR-031：人工采纳代表用户决定（Accepted）
+## ADR-031: Manual adoption is a user decision (Accepted)
 
-pending 走自动检查；conflict/needs_review 由 approve 处理，duplicate 合并，矛盾 active atom 被 successor 替代。
-写入、candidate 状态、supersede、user journal 在同一事务内；代价是明确覆盖自动判断，不能把它当普通重试。
+Pending candidates run automatic checks. Approval handles conflict/needs_review; duplicates merge,
+and a successor replaces contradictory active atoms. Fact writes, candidate state, supersession, and user journal share one transaction.
+Cost: this explicitly overrides automatic judgment and must not be treated as an ordinary retry.
 
-## ADR-032：PostgreSQL 在 cursor 边界恢复连接（Superseded by ADR-040）
+## ADR-032: Recover PostgreSQL connections at cursor boundaries (Superseded by ADR-040)
 
-transaction 外才允许 reset/reconnect 并恢复 search_path；显式 transaction 内失败即失败。
-避免静默提交半套写入；代价是调用方需重试整个事务。既有 SQLite-only GC 缺口不代表允许静默能力分叉。
+Reset/reconnect and restore search_path only outside transactions; a failed explicit transaction stays failed.
+Avoid silently committing partial work. Cost: callers retry the whole transaction.
+The existing SQLite-only GC gap does not authorize silent backend capability divergence.
 
-## ADR-033：namespace-first GIN（Accepted）
+## ADR-033: Namespace-first GIN (Accepted)
 
-共享 PG schema 尝试 `btree_gin` + `GIN(namespace, tsv)`，扩展安装在 savepoint 中失败则保留普通 GIN。
-保持权限不足时查询正确性；代价是 namespace 性能隔离减弱，需要真实 PG 验证。
+In the shared PG schema, try `btree_gin` plus `GIN(namespace, tsv)`. Attempt extension installation inside a savepoint;
+failure retains ordinary GIN. Queries remain correct without permission to install the extension.
+Cost: weaker namespace performance isolation; use real PG validation.
 
-## ADR-034：人工 correction 只追加 Atom（Accepted）
+## ADR-034: Manual correction appends an atom (Accepted)
 
-successor 保留历史来源，`user_edit` journal 记录修改，不伪造 RawEvent/Candidate。
-两种 backend 均要求 active-only supersede，失败整体回滚；代价是原 quote 只能称为原始来源，不能证明修正内容。
+The successor retains historical provenance and `user_edit` records the correction; do not fabricate a RawEvent/Candidate.
+Both backends require active-only supersession and complete rollback on failure.
+Cost: the original quote is provenance, not evidence proving the corrected assertion.
 
-## ADR-035：Episode 绝对时间统一 aware UTC（Accepted）
+## ADR-035: Aware UTC for absolute Episode times (Accepted)
 
-写入/读取/查询边界统一 UTC，legacy naive 按 UTC 解释，排序额外防御。
-避免混合时间类型且无需先迁移旧值；代价是不能恢复旧值的未知本地时区，未来本地时间需独立字段与版本迁移。
+Normalize write/read/query boundaries to UTC; interpret legacy naive values as UTC and defensively normalize sorting.
+This avoids mixed datetime types without requiring upfront migration.
+Cost: unknown historical local time zones cannot be recovered; future local-time support needs a separate field and versioned migration.
 
-## ADR-036：checkpoint 内容复用与显式迁移（Accepted）
+## ADR-036: Reuse checkpoint content with explicit migration (Accepted)
 
-SQLite 同库 typed blob + 格式 envelope 复用大字段，读时恢复历史值，不读取“最新文件”代替历史快照。
-新写入和存量迁移分开，独立 reader 有自身 decoder/cache；代价是旧 reader 不兼容，降级前需 expand。
-离线迁移、备份和回退见 [Checkpoint 维护](../../CONTRIBUTING.md#checkpoint-维护)。
-
-补充：`db slim` 默认预览，显式 apply/offline 备份后去重和回收，不隐式裁剪历史；高级参数仍用 checkpoints。
-在线瘦身由宿主暂停新 invocation、协调 reader 和恢复，批次使用事务且不追逐无限新增行。
-长 reader 可能延期 WAL 回收，保留备份并报告部分完成，不能自动用备份覆盖后续合法写入。
-
-## ADR-037：统一 Octop 命名，保留磁盘协议（Accepted）
-
-发行包/CLI 为 `octop-memory`，Python 包为 `octop_memory`，宿主插件 ID 为 `octopmemory`。
-环境变量、默认目录、bridge probe 字段与 PostgreSQL schema 同步更名，不提供旧入口别名。
-SQLite checkpoint 编码、`hm_*` 表和 `.hmpkg` 格式属于持久化协议，保留以避免品牌更名破坏历史读取。
-代价是旧安装必须显式迁移配置、目录或 PG schema，操作步骤仅维护在 [集成指南](../integrations.md#更名与已有安装迁移)。
-
-## ADR-038：失败降级只捕获可预期的驱动与 I/O 错误（Accepted）
-
-查询、文件和超时失败使用 `storage/driver_errors.py` 的 `DRIVER_ERRORS`（`sqlite3.Error`、已安装时的 `psycopg.Error`、`OSError`、`TimeoutError`、`RuntimeError`），记 warning 后降级。向量索引使用 `VECTOR_ERRORS`。doctor、抽取入口、bridge、idle maintenance、backfill 与 host 轮询使用 `REPORTABLE_ERRORS`。
-事务回滚和 checkpoint 备份删除用 `try` / `finally`，失败和取消都会回滚。
-这些元组之外的异常向上抛。`AssertionError` 不在降级集合里。
-
-## ADR-039：SQLite 每 backend 一条连接，按操作与事务串行（Accepted）
-
-为避免多 agent 与常驻 worker 的连接数相乘，移除线程本地 SQLite 连接注册表。
-每 backend 使用一条 `check_same_thread=False` 连接和可重入锁，锁覆盖完整 execute/fetch/commit，
-显式事务与关闭也持同一锁；非显式事务中的失败写入回滚后再抛出原错误。
-vacuum、WAL truncate 和 export 的内部 SQL 同样受保护，避免维护与正常写入串入同一事务。
-
-选择单连接而非引入 SQLite 连接池，减少空闲 fd 和生命周期分支。PostgreSQL 的共享池见 ADR-040。
-代价是慢查询和长显式事务会阻塞同 backend 的其他 SQL；LLM 调用不在这些操作锁内，
-不同 backend 以及单独的 checkpoint 连接仍可并行。保留 SQLite/WAL、表、事务原子性与召回契约，
-无需数据迁移。后续若要增加同 backend SQL 并行，必须使用有界连接租约并重新验证事务与关闭行为。
-
-## ADR-040：PostgreSQL 按连接配置共享有界池（Accepted）
-
-每 agent 一条业务连接加独立 checkpoint 池仍会叠加容量：69 个活跃实例至少需要 138 条会话，
-10 分钟空闲释放无法覆盖活跃峰值。改为按进程、规范化 DSN 与驱动选项共享 8 条业务连接和 4 条
-checkpoint/维护连接；namespace 留在 SQL 条件中，不参与池标识。不同会话设置使用独立池，避免串用身份或配置。
-
-业务借用连接覆盖完整 cursor/结果读取/事务，显式事务跨调用保留同一连接和 backend 可重入锁。
-池在 checkout 探测坏连接，归还时提交或回滚，事务中断不重拨后续写。连接的 search_path 由池配置回调恢复。
-原 backend 私有常驻 `_conn`、逐实例空闲 Timer 和重连冷却由 psycopg_pool 的回收、探测及重连退避替代。
-`postgres` extra 显式声明已经用于 checkpoint 的 psycopg-pool，避免另写一套业务池。
-
-LangGraph 按类型要求 ConnectionPool；内部租约适配器继承该类型但不开启自身池，仅将 `connection()`
-委托给共享池，且让 saver.conn 与 Memory._checkpointer_pool 指向同一个幂等租约，兼容宿主两次 close。
-每租约只释放一次引用，关闭等待其在途操作，最后引用关闭真实池。checkpoint setup 按池串行一次，
-失败不发布 saver/租约且立即回收；autovacuum 设置与维护操作也借用池内连接。
-
-每池最多 64 个等待者、30 秒 checkout 超时，`min_size=0`、`max_idle=600`。容量不足必须报错，
-不无限开连接或重放可能已提交的写入。此预算是进程内边界；多进程、不同连接配置及宿主控制面仍需各自计入服务端容量。
-无 schema、持久化编码、召回排序或 namespace 契约变更。真实 PG 回归覆盖 69 agent、事务/隔离、
-饱和与恢复、空闲/坏连接、初始化失败及关闭引用；SQLite 保持同组公共行为断言。
-
-## ADR-041：按来源隔离运行诊断，保护用户知识（Accepted）
-
-运行失败的发生事实不等于可长期使用的知识。octop-harness / Octop 使用 `on_failure="error"` 让模型失败保留为 checkpoint 异常，由宿主单独展示；团队自动失败通知排除采集。仍合成错误回复的宿主必须标记 `payload.octop_runtime_error=true`，memory 在 capture、两类 extractor、promotion 和 raw prompt recall 仅按结构化来源排除。移除“记住”与“已验证”等意图/价值词表；主动保存由 Agent 自行调用 memory_save，手动写入、人工批准/编辑按来源保护。提炼模型判断普通对话的长期价值。⚠️ 召回/写入路径变更：后台采集不再给意图短句特例；存量治理即使 apply 也只软停用全部证据均带错误标记的自动记录。旧版严格重试失败格式仅在 operations 审核清单中使用，缺失或混合来源保留原状态、返回 review_*_ids；不据文字推断来源，不删 raw 或新增 schema。
-
-## ADR-042：手动文档为准，冲突转候选，去重绑定会话快照（Accepted）
-
-USER.md/MEMORY.md 由宿主用户维护，聊天原有统一加载器只在 session 首次加载全文。
-memory 接收当前文件作治理，不负责文件读写或刷新提示词；宿主保存文档后可显式核对。
-普通 `MemoryService.save()` 只通知非阻塞 scheduler，不同步运行模型；
-宿主后台 worker / 维护拍调用 `review_new_memory(max_atoms=20)`，通过 provider 读取当前文档。
-提炼/晋升本身不启动同步对账。⚠️ 召回/写入路径变更：只有同主体/字段/时间范围的高置信互斥事实、
-且模型引用真实完整原文，才在同一 backend 事务内软停用旧 Atom、建立替代事实 Candidate 和 Journal。
-原始证据不删，未审核替代事实不晋升；旧 raw 不再自动兜底，dirty 页面等待重建。
-历史事件、正常排障经验、不同情境及两个手动文档互相矛盾时不强行改判。
-
-重复 Atom 不删，召回只在实际 session snapshot 含同一信息时抑制；不会把新文件版本硬塞入旧会话。
-元数据保存对账版本和审计比较快照；独立小清单参与 recall cache key，避免旧缓存复活。
-模型失败、不确定、伪造证据、版本变化和超限均显式报告；每次最多 100 条新 Atom 可续查。
-已比较的 hash 与未决的 `uncertain` hash 分别保存；旧记录没有未决字典时，无法由 checked 推断结论，
-选择一次有界重审而不猜测完成状态。读取仅计算待审项，不落库；首次对账写入新格式后保留进度。
-代价是旧 complete 报告也可能触发额外比较；显式空未决字典属于有效新格式，不能按假值重复失效。
-采纳检查最后对账版本，宿主附当前文档可拦截未重新对账的变化。使用既有 Service/Bridge/
-retention/promotion/recall 模块及 backend contract，不建新 schema、全文索引或独立加载器。
-SQLite/真实 PG 同组测试验证事务、幂等、证据保留及 prompt 过滤。
-
-## ADR-043：页面生成使用独立变更修订进行条件写回（Accepted）
-
-`summary_version` 只随成功生成与人工编辑变化，不能检测已 dirty 页面上的新事实；时间戳也可能相同。
-新增 storage 管理的 `mutation_version`，正文写入和 dirty 标记时原子递增，不改变 summary_version 的既有含义。
-regenerator 先确保 stub 存在，再读取修订、笔记和 Atom，模型调用在事务外执行。
-写回成功或失败状态时在同条 UPDATE 核对读取修订。冲突不覆盖、不清新 dirty、不累加较新页的失败数；
-失败状态本身不递增修订：失败次数和 dirty 状态不改变生成输入，仍有效的并发结果可以提交，
-而成功写回推进修订后，迟到失败仍会被原来的条件拦截。
-旧生成结果记 `page_regen_failed: stale_snapshot`，由后续显式调用或 dirty 批次重试，不在一次调用中无界重试。
-条件更新失败不能再用无条件 upsert 兜底。人工编辑、重复 dirty、其它生成和低层 upsert 都推进修订；
-调用方传入的 EntityPage 修订不作为 upsert 的赋值来源，导入在目标 store 重新建立修订。
-SQLite/PG schema 2 均增加默认零列并自动迁移已有页面；SQLite 在 BEGIN IMMEDIATE 短事务内检查列并 ALTER，
-序列化不同连接的首次迁移，PG 在初始化事务级 advisory lock 内先检查列是否存在，仅缺列时 ALTER，
-避免 no-op ALTER 对共享页面表申请独占锁。无生产依赖变更。
-Memory 在未指定版本条件时不向 backend 转发新参数，保留旧调用方式；条件写入要求自定义 backend 实现新签名、
-维护修订号并进行原子比较。不捕获 TypeError 再无条件重放，避免将兼容处理变成覆盖缺口。
-范围是遵守现有 dirty 契约的写入，
-不为绕过 dirty 的低层 Atom SQL 增加新治理，也不承诺页面 journal 与正文提交是同一事务。
+SQLite uses same-database typed blobs and a format envelope to reuse large fields. Reads restore historical values,
+not the latest workspace file. Separate new writes from historical migration; independent readers have their own decoder/cache.
+Cost: old readers are incompatible, so expand before downgrade.
+See [checkpoint maintenance](../../CONTRIBUTING.md#checkpoint-maintenance) for offline migration, backups, and rollback.
+
+`db slim` previews by default; explicit apply/offline creates a backup, deduplicates, and reclaims space without implicit history pruning.
+Advanced options remain under checkpoints. For online slimming, the host pauses new invocations, coordinates readers,
+and resumes. Batches are transactional and do not chase an unlimited stream of new rows.
+Long readers can postpone WAL reclamation. Keep backups and report partial completion;
+never overwrite subsequent legitimate writes automatically with a backup.
+
+## ADR-037: Unified Octop naming with stable disk protocols (Accepted)
+
+The distribution/CLI is `octop-memory`, Python package `octop_memory`, and plugin ID `octopmemory`.
+Rename environment variables, default paths, bridge probe fields, and the PG schema together, without old-entry aliases.
+SQLite checkpoint encoding, `hm_*` tables, and `.hmpkg` are persistent protocols and remain stable to protect historical reads.
+Cost: old installations explicitly migrate configuration, directories, or PG schema; maintain those steps only in the
+[integration guide](../integrations.md#renaming-and-migrating-existing-installations).
+
+## ADR-038: Degrade only on expected driver and I/O failures (Accepted)
+
+Queries, files, and timeouts use `storage/driver_errors.py`'s `DRIVER_ERRORS`
+(`sqlite3.Error`, installed `psycopg.Error`, `OSError`, `TimeoutError`, `RuntimeError`), log warnings, and degrade.
+Vector indexes use `VECTOR_ERRORS`. Doctor, extraction boundaries, bridge, idle maintenance, backfill, and host polling use `REPORTABLE_ERRORS`.
+Transaction rollback and checkpoint-backup deletion use `try`/`finally`; failures and cancellation roll back.
+Exceptions outside the relevant tuples propagate. `AssertionError` is not a degradation exception.
+
+## ADR-039: One SQLite connection per backend, serialized operations and transactions (Accepted)
+
+Remove thread-local connection registries so multiple agents and permanent workers do not multiply connections.
+Each backend has one `check_same_thread=False` connection and a reentrant lock covering execute/fetch/commit,
+explicit transactions, and close. Failed writes outside explicit transactions roll back and re-raise the original error.
+Internal vacuum, WAL truncation, and export SQL use the same protection, preventing maintenance from interleaving in normal transactions.
+
+Choose one connection rather than a SQLite pool to reduce idle file descriptors and lifecycle branches.
+PG pooling is covered by ADR-040. Cost: slow queries and long transactions block other SQL on the same backend.
+LLM calls stay outside those operation locks; different backends and the separate checkpoint connection can still run concurrently.
+SQLite/WAL, tables, atomicity, and recall contracts are unchanged, with no data migration.
+Future same-backend SQL concurrency needs bounded leases and renewed transaction/closure validation.
+
+## ADR-040: Bounded PostgreSQL pools shared by connection configuration (Accepted)
+
+One business connection plus a checkpoint pool per agent still compounds capacity: 69 active agents need at least
+138 sessions; ten-minute idle release cannot cover active peaks. Share 8 business and 4 checkpoint/maintenance connections
+per process, normalized DSN, and driver options. Namespace stays in SQL predicates, not pool identity.
+Distinct session settings use separate pools to avoid mixing identity/configuration.
+
+A business lease covers the complete cursor/result/transaction. Explicit transactions retain one connection and the backend's
+reentrant lock across calls. Checkout detects bad connections; return commits or rolls back. Do not reconnect later writes
+inside a broken transaction. Pool configuration restores search_path. psycopg_pool reclamation, liveness checks, and reconnect
+backoff replace the private persistent `_conn`, per-instance idle Timer, and reconnect cooldown.
+The `postgres` extra explicitly includes psycopg-pool, already used by checkpoints, rather than implementing another pool.
+
+LangGraph requires ConnectionPool. An internal lease adapter subclasses that type without opening its own pool,
+delegates `connection()` to the shared pool, and exposes the same idempotent lease through saver.conn and
+Memory._checkpointer_pool to tolerate two host close calls. Each lease releases one reference, waits for its in-flight work,
+and closes the real pool only after the last reference. Checkpoint setup is serialized once per pool;
+failed setup publishes neither saver nor lease and releases resources. Autovacuum settings and maintenance also use pooled connections.
+
+Each pool allows at most 64 waiters and a 30-second checkout timeout, with `min_size=0` and `max_idle=600`.
+Capacity exhaustion errors rather than opening unlimited connections or replaying potentially committed writes.
+This is a per-process boundary; other processes/configurations and the host control plane need separate capacity.
+Schema, encoding, recall order, and namespace contracts are unchanged. Real PG regression covers 69 agents, transactions/isolation,
+saturation/recovery, idle/bad connections, initialization failure, and closure references; SQLite retains shared public-behavior assertions.
+
+## ADR-041: Isolate runtime diagnostics by provenance, protect user knowledge (Accepted)
+
+A runtime failure is not automatically durable knowledge. octop-harness/Octop use `on_failure="error"` to retain model failures
+as checkpoint errors, displayed separately by the host; automatic team-failure notifications are excluded from capture.
+Hosts still synthesizing error replies mark `payload.octop_runtime_error=true`. Capture, Candidate/Episode extractors,
+promotion, and raw prompt recall exclude only structured error provenance. Remove intent/value keyword lists;
+agents decide when to call memory_save. Manual writes, approvals, and edits are protected by provenance;
+the extraction model judges ordinary conversation's long-term value.
+**⚠️ Recall/write path change:** background capture no longer admits short messages through intent exceptions.
+Even apply-mode historical governance only soft-deactivates automatic records whose evidence is entirely marked errors.
+Legacy fixed retry-failure text only produces operations review hints. Missing/mixed provenance keeps state and returns review_*_ids.
+Do not infer provenance from wording, delete raw evidence, or add a schema for this.
+
+## ADR-042: Manual-document priority, conflict candidates, snapshot-bound deduplication (Accepted)
+
+Host users maintain USER.md/MEMORY.md; the existing unified chat loader reads their full text only when a session first loads.
+Memory receives current files for governance, not file writing or prompt refresh. Hosts may explicitly reconcile after saving documents.
+Ordinary `MemoryService.save()` only notifies a nonblocking scheduler and does not call the comparison model synchronously.
+A host worker/maintenance tick calls `review_new_memory(max_atoms=20)` and reads the provider's current documents.
+Extraction/promotion does not start synchronous reconciliation.
+**⚠️ Recall/write path change:** only high-confidence, mutually exclusive facts in the same subject/field/time scope,
+with genuine complete source quotations, can atomically soft-deactivate an old atom, create a replacement Candidate, and journal it.
+Keep original evidence; unreviewed replacements do not promote. Old conflicting raw is excluded from automatic fallback;
+dirty pages wait for regeneration. Do not force changes for historical events, normal troubleshooting knowledge,
+different contexts, or contradictions between the two manual documents themselves.
+
+Keep duplicate atoms; suppress recall only when the actual session snapshot contains the same information.
+Do not inject a new file version into an old session. Metadata stores reconciliation versions and audit snapshots;
+a separate small manifest participates in recall cache keys so old cache entries cannot revive suppressed content.
+Report model failure, uncertainty, fabricated evidence, version changes, and limits explicitly; each call can resume up to 100 new atoms.
+Store compared hashes separately from unresolved `uncertain` hashes. Without the legacy unresolved dictionary, checked progress
+cannot establish a conclusion: perform one bounded re-audit instead of guessing complete. Reads calculate pending work without writes;
+after the first reconciliation writes the new format, retain progress. Cost: even old complete reports may need extra model comparisons.
+An explicit empty unresolved dictionary is valid new-format state and must not be invalidated merely because it is falsy.
+Adoption checks the last reconciliation version; supplying current documents also catches changes not yet reconciled.
+Reuse Service/Bridge/retention/promotion/recall and the existing backend contract, without a new schema, full-text document index,
+or separate loader. Shared SQLite/real-PG tests cover transactions, idempotency, evidence retention, and prompt filtering.
+
+## ADR-043: Conditional page writeback using a separate mutation revision (Accepted)
+
+`summary_version` changes with successful generation/manual edits and cannot detect new facts on an already dirty page;
+timestamps may also match. Storage manages `mutation_version`, atomically incremented on body writes and dirty invalidation,
+without changing summary_version semantics. Regeneration ensures a stub exists, then reads revision, notes, and atoms;
+model calls run outside database transactions.
+Success and failure writebacks compare the snapshot revision in the same UPDATE. A stale result must not overwrite newer content,
+clear new dirty state, or increase a newer page's failure count. Failure bookkeeping does not advance the revision:
+its retry count/dirty state does not change generation input, so an otherwise valid concurrent result can still commit.
+Once a success advances the revision, a late failure is rejected by its original condition.
+Log stale generated results as `page_regen_failed: stale_snapshot`; retry in a later explicit/dirty-batch call, not an unbounded inner loop.
+A failed conditional update must not fall back to unconditional upsert. Manual edits, repeated dirty invalidation,
+other successful generations, and low-level upserts advance the revision. Upsert does not assign the revision supplied in EntityPage;
+imports establish revisions in the destination store.
+Both SQLite/PG schema 2 add a default-zero column and migrate existing pages. SQLite checks/adds the column inside a short
+BEGIN IMMEDIATE transaction, serializing first migrations across connections. PG checks inside an initialization transaction-level
+advisory lock and ALTERs only if missing, avoiding an exclusive lock for no-op DDL. No production dependency is added.
+When no version condition is supplied, Memory keeps the legacy backend call signature. Conditional calls require custom backends
+to implement the new parameter, maintain revisions, and compare atomically. Never catch TypeError and retry without a condition.
+The scope is writers honoring the existing dirty contract; this does not add governance to low-level atom SQL bypassing dirty
+invalidation, or promise that page journals and body commits share a transaction.

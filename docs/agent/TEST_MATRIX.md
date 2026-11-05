@@ -1,117 +1,127 @@
 # TEST_MATRIX.md
 
-按改动范围选择最小验证；提交门禁为 `make all`。代码任务的实际结果写入 [HANDOFF.md](HANDOFF.md)，不维护带日期的测试数基线。
+Select focused validation by change scope; the commit gate is `make all`.
+Record actual code-task results in [HANDOFF](HANDOFF.md), not dated test-count baselines.
 
-## 基础检查
+## Basic checks
 
-从仓库根目录执行。要求 Python 3.12+，先用 `make install` 安装 dev group。
+Run from the repository root with Python 3.12+. Install the dev group through `make install` first.
 
 ```bash
-# 纯文档维护：目录契约、公开文本、本地链接与 import 边界。
+# Documentation: layout contracts, public text, local links, import boundaries.
 uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q
-# 代码改动及提交前完整门禁；format 会修改文件。
+# Code work and pre-commit full gate; format rewrites files.
 make all
 ```
 
-新文档需纳入 `test_agent_docs.py` 的 PUBLIC_FILES/目录约定；需要进入 sdist 的文档同步
-`pyproject.toml` allowlist。目录/链接检查不验证正文行为或标题锚点，仍需对照源码核对。
+Include new documents in `test_agent_docs.py`'s PUBLIC_FILES/directory contracts and, if distributed,
+the `pyproject.toml` sdist allowlist. Maintainer documents use English; user READMEs/integration guides have
+English/Chinese versions. Layout/link tests do not validate behavior or heading anchors; check those against source and navigation separately.
 
-## 按范围选择验证
+## Validation by change scope
 
-| 改动范围 | 最小命令 |
+| Change | Focused commands and assertions |
 |---|---|
-| 包名 / 宿主命名 | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`；`uv build`；在 `plugins/openclaw/octopmemory/` 执行 `npm test`、`npm run typecheck`、`npm run build` |
-| 文档 / import 边界 | `uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q` |
-| 宿主文件 glob / Windows 路径 | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`；PureWindowsPath 用例在任意平台检查 rooted / drive-relative / UNC 拒绝，portable fixture 按 Path.parts 隔离用户目录 |
-| Memory / runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |
-| 召回 | `uv run pytest tests/test_recall_pipeline.py tests/test_recall_multi_source.py tests/test_recall_risk_fixes.py -q` |
-| 提炼 / 分批 / parser | `uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_bridge_extract.py -q`；检查默认批次预算、超大单条保留和批间失败停止 |
-| 持久游标 / 原子提交 / 重试 | `uv run pytest tests/test_extract_cursor_persistence.py tests/test_extract_cursor_failure_retry.py -q -rs`；后一文件含 SQLite/真实 PG 同组断言：首条/第二条候选写失败、游标写失败均回滚，同进程重试、关闭重开重试与正常提交不重复 |
+| Package / host naming | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`; `uv build`; in `plugins/openclaw/octopmemory/`, run `npm test`, `npm run typecheck`, `npm run build` |
+| Documentation / import boundaries | `uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q` |
+| Host-file globs / Windows paths | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`; PureWindowsPath cases reject rooted/drive-relative/UNC paths on any platform; portable fixtures isolate home expansion through Path.parts |
+| Memory / Runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |
+| Recall | `uv run pytest tests/test_recall_pipeline.py tests/test_recall_multi_source.py tests/test_recall_risk_fixes.py -q` |
+| Extraction / batching / parsing | `uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_bridge_extract.py -q`; verify default budgets, preservation of oversized single events, and stopping after a failed batch |
+| Durable cursor / atomic commit / retry | `uv run pytest tests/test_extract_cursor_persistence.py tests/test_extract_cursor_failure_retry.py -q -rs`; the latter shares SQLite/real-PG assertions for first/second candidate write failure, cursor failure, rollback, same-process/reopen retry, and no duplicates after normal commit |
 | Promotion | `uv run pytest tests/test_promotion.py tests/test_promotion_fallback.py tests/test_promotion_llm_hook.py tests/test_promotion_tree_alignment.py -q` |
-| Hermes 配置 / provider 契约 | `uv run pytest tests/test_hermes_adapter.py tests/test_hermes_contract.py tests/test_hermes_install.py -q`；配置转发、capture、prefetch 与 shutdown 单测不代表自动提炼已接线，真实宿主另验 |
-| 运行报错隔离 / 存量治理 | `uv run pytest tests/test_runtime_error_retention.py tests/test_bridge_server.py tests/test_backend_parity.py -q -rs`；真实 PG 验证仅结构化标记过滤、未知来源只列审核清单、任意措辞手动保存、无短句意图例外、raw fallback、晋升、人工保护、幂等和事务回滚 |
-| 手动文档治理 | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`；真实专用 PG 的 `-k ManualDocument` 与 SQLite 同组验证冲突/替代候选、原证据保留、raw fallback、快照去重、幂等与回滚；单测覆盖伪造/不确定证据、过期采纳、缓存失效、分批续查及保存/提炼/晋升不阻塞于审核 |
-| 旧手动审计元数据升级 | `uv run pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`；真实 PG/SQLite 同组验证缺少 uncertain 字段的旧 uncertain/complete 状态只读待审、进度清零后有界续查、重建 Service 后不重复比较、确认后的空未决集合和已无活跃事实的旧库 |
-| Harness 后台审核契约 | 安装 CI 固定提交的真实 octop-harness 后，`uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs`；SQLite/真实 PG 同组验证保存回调、维护拍、冲突软停用及证据、阻塞模型不阻塞 save、20 条批次与续查。真实 Service / Middleware / 后台线程，只替换模型响应 |
-| 宿主失败来源边界 | 在 octop-harness 运行 `pytest tests/test_model_retry_middleware.py tests/test_memory_middleware.py tests/test_teams/test_inbox.py`：真实图 checkpoint error / 恢复、零错误 raw 写入、团队自动通知排除；WebUI / IM / 团队失败展示在 Octop 测试 |
-| 写入 / backend | `uv run pytest tests/test_memory_atom_write.py tests/test_backend_parity.py -q -rs` |
-| EntityPage 并发 / 修订迁移 | `uv run pytest tests/test_core.py tests/test_sqlite.py tests/test_page_regen.py tests/test_entity_page_schema.py tests/test_page_user_notes.py tests/test_page_trigger.py tests/test_backend_parity.py tests/test_postgres.py -q -rs`；设置专用 `TEST_POSTGRES_DSN`，`-k PageRegenerationConcurrency` 同组验证用户编辑/Atom dirty/并发生成/upsert、成功/失败两种完成顺序、同时间戳失效、双连接提交及旧列迁移；`-k 'LegacyPageBackend or ConcurrentPageRevisionMigration or PageRevisionBootstrap'` 验证旧签名、不降级条件、四连接迁移及 PG 读事务下打开已迁移库 |
-| 连接 / 事务 / fd | `uv run pytest tests/test_sqlite.py tests/test_fd_pressure.py tests/test_postgres_pool.py tests/test_backend_parity.py -q -rs`；设置专用 `TEST_POSTGRES_DSN`，确认 PG 用例实际运行 |
-| 向量接口 / 可选 index | `uv run pytest tests/test_vector_chroma.py -q`；使用 mock index 和 `tmp_path` 数据库，不访问默认数据目录 |
-| Checkpoint | `uv run pytest tests/test_checkpoint_compaction.py tests/test_checkpoint_gc_safety.py -q` |
-| 迁移 | `uv run pytest tests/test_migration_export_import.py tests/test_portable_e2e.py tests/test_portable_sources.py -q` |
-| 公共 API 示例 | `uv run python examples/basic_usage.py` |
-| Recall 评测 | `uv run python -m evals.recall.run` |
-| 示例 / 评测静态检查 | `uv run ruff check examples evals` 与 `uv run ruff format --check examples evals` |
+| Hermes configuration / provider contract | `uv run pytest tests/test_hermes_adapter.py tests/test_hermes_contract.py tests/test_hermes_install.py -q`; forwarding/capture/prefetch/shutdown tests do not establish automatic-extraction wiring; validate the real host separately |
+| Runtime-error isolation / historical governance | `uv run pytest tests/test_runtime_error_retention.py tests/test_bridge_server.py tests/test_backend_parity.py -q -rs`; real PG covers structured-only filtering, unknown-source review lists, arbitrary explicit-save wording, absence of intent exceptions, raw fallback, promotion, manual protection, idempotency, rollback |
+| Manual-document governance | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`; dedicated-PG `-k ManualDocument` shares SQLite assertions for conflict/replacement candidates, original evidence, raw fallback, snapshots, idempotency, rollback. Unit cases cover invalid/inconclusive evidence, stale adoption, cache invalidation, continuation, and save/extract/promote not blocking on review |
+| Legacy audit metadata upgrade | `uv run pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`; real PG/SQLite cover read-only pending status for old uncertain/complete records lacking uncertain, bounded re-audit, no repeat after Service reconstruction, confirmed empty unresolved state, and no remaining active atoms |
+| Harness background-review contract | Install the real octop-harness revision pinned by CI, then `uv run --no-sync pytest tests/test_backend_parity.py -k HarnessManualReview -q -rs`; shared SQLite/PG cases cover save callbacks, maintenance ticks, soft-deactivated conflicts/evidence, blocked models not blocking save, 20-atom batches, continuation. Use real Service/Middleware/threads; mock model responses only |
+| Host failure provenance | In octop-harness, run `pytest tests/test_model_retry_middleware.py tests/test_memory_middleware.py tests/test_teams/test_inbox.py`: real graph checkpoint errors/recovery, no error raw writes, exclusion of automatic team notifications. WebUI/IM/team error presentation is tested in Octop |
+| Writes / backend | `uv run pytest tests/test_memory_atom_write.py tests/test_backend_parity.py -q -rs` |
+| EntityPage concurrency / revision migration | `uv run pytest tests/test_core.py tests/test_sqlite.py tests/test_page_regen.py tests/test_entity_page_schema.py tests/test_page_user_notes.py tests/test_page_trigger.py tests/test_backend_parity.py tests/test_postgres.py -q -rs`; set dedicated `TEST_POSTGRES_DSN`. `-k PageRegenerationConcurrency` covers user edits, atom dirtying, concurrent generation/upsert, success/failure orders, equal timestamps, two-connection commits, legacy columns. `-k 'LegacyPageBackend or ConcurrentPageRevisionMigration or PageRevisionBootstrap'` covers old signatures, guarded-call non-degradation, four-connection migration, reopening a migrated PG schema with an active read transaction |
+| Connections / transactions / file descriptors | `uv run pytest tests/test_sqlite.py tests/test_fd_pressure.py tests/test_postgres_pool.py tests/test_backend_parity.py -q -rs`; use dedicated `TEST_POSTGRES_DSN` and confirm PG cases ran |
+| Vector interface / optional index | `uv run pytest tests/test_vector_chroma.py -q`; mock index and tmp_path database, never the default user directory |
+| Checkpoints | `uv run pytest tests/test_checkpoint_compaction.py tests/test_checkpoint_gc_safety.py -q` |
+| Migration | `uv run pytest tests/test_migration_export_import.py tests/test_portable_e2e.py tests/test_portable_sources.py -q` |
+| Public API example | `uv run python examples/basic_usage.py` |
+| Recall evaluation | `uv run python -m evals.recall.run` |
+| Example / evaluation static checks | `uv run ruff check examples evals` and `uv run ruff format --check examples evals` |
 
-## PostgreSQL 与真实宿主
+## PostgreSQL and real host environments
 
-SQLite/PostgreSQL 均为生产 backend。public 读写、持久化编排、contract、schema、transaction、FTS、
-lifecycle 修改必须同步维护两种实现，并以同一组断言运行真实 PostgreSQL：
+SQLite/PostgreSQL are production backends. Public I/O, persistence orchestration, contracts, schema, transactions,
+FTS, and lifecycle changes maintain both implementations and run shared assertions against real PostgreSQL:
 
 ```bash
-# 使用专用测试数据库；以下凭据仅为占位。
+# Dedicated test database; credentials below are placeholders.
 TEST_POSTGRES_DSN='postgresql://user:pass@localhost/octop_memory_test' \
   uv run pytest tests/test_backend_parity.py tests/test_postgres.py \
     tests/test_memory_atom_write.py tests/test_checkpointer.py \
     tests/test_extract_cursor_failure_retry.py -q -rs
 ```
 
-PG skip 不算通过。CI/release 启动专用 PostgreSQL 16，`TEST_POSTGRES_DSN` 已设置但连接失败时直接失败；
-本地未设置时先快速探测，服务不可用才 skip，防止连接池重试让整套测试逐项等待 30 秒。
+PG skips are not acceptance. CI/release starts dedicated PostgreSQL 16. An explicitly configured but unavailable
+`TEST_POSTGRES_DSN` fails. Without the variable, local tests probe quickly and skip only when unavailable,
+avoiding repeated 30-second pool waits across the suite.
 
-CI/release 在基础测试后安装固定提交的 octop-harness，先检查真实中间件可导入，再执行跨包契约用例。
-宿主不是 memory 的生产依赖；本地未安装时该组可 skip，但不能声明通过跨包验收。
-安装命令和固定提交见 [CI workflow](../../.github/workflows/ci.yml) 的 `Test real Harness background review`；
-安装后用 `--no-sync` 保留宿主测试依赖，并检查用例未 skip。
+After base tests, CI/release installs a pinned octop-harness, checks its real middleware import, and runs integration contracts.
+The host is not a production dependency of memory. Missing local host cases may skip but must not be reported as passed.
+See `Test real Harness background review` in the [CI workflow](../../.github/workflows/ci.yml) for installation and revision.
+After installation, use `--no-sync` to retain host test dependencies and confirm cases did not skip.
 
-`test_postgres_pool.py` 验证 69 个实例混合读写和 checkpoint 的总连接数 ≤12，覆盖池满超时/排队上限、
-空闲归零与重连、服务端断开空闲连接、初始化失败重试、维护共用预算以及关闭不影响其它实例。
-空闲测试只缩短测试进程内的回收周期；生产保留 `max_idle=600`。
-关闭测试先断言租约已关闭、引用归零和真实池已关闭，再限时等待远端 `pg_stat_activity` 归零；客户端关闭 socket 不代表远端进程已同步退出。
-backend-specific 能力必须显式拒绝另一 backend 并记录限制。
-测试使用 `tmp_path`，不能写用户真实记忆库；可选依赖和宿主 E2E 的 skip 单独报告。
-`test_fd_pressure.py` 在独立 POSIX 子进程中将 soft NOFILE 设为 1024，验证 69 个临时 Memory
-被 8 个常驻 worker 使用时仍可创建 socket，关闭后 fd 回到基线；不修改 pytest 主进程限额。
-Windows 或 hard limit 不足时会 skip；Linux `/proc` 的旧短线程回归与此测试分开报告。
-若 uv 缓存不可用但虚拟环境工具齐全，可用 `make all RUN='.venv/bin/python -m'`。
+`test_postgres_pool.py` verifies at most 12 total business/checkpoint connections for 69 mixed-use instances,
+queue saturation/timeouts, idle zero/reconnect, server-closed idle connections, initialization retry,
+shared maintenance capacity, and closing one instance without affecting others.
+Idle tests shorten reclamation only in the test process; production keeps `max_idle=600`.
+Closure tests assert closed leases, zero references, and a closed real pool before bounded polling for remote
+`pg_stat_activity` to reach zero; closing a client socket does not imply synchronous server-process exit.
+Backend-specific capabilities must explicitly reject the other backend and document limits.
+Use tmp_path, never real user memory; report optional-dependency and host-E2E skips separately.
+`test_fd_pressure.py` sets soft NOFILE=1024 in a separate POSIX process, exercising 69 temporary Memory instances
+with 8 persistent workers and checking socket creation and return to baseline after close.
+It does not alter pytest's process limit. Windows/insufficient hard limits skip; report the Linux `/proc` regression separately.
+If uv cache is unavailable but the virtual environment is ready, use `make all RUN='.venv/bin/python -m'`.
 
-## 跨仓验证
+## Validation across repositories
 
-以下为受影响消费者的定向入口，在各自仓库根目录运行；按实际改动选择，不要求每个任务重跑所有仓库。
-先读取目标仓库的 AGENTS 并准备其开发环境；对相应仓库的代码提交仍执行该仓完整门禁。
-纯文档整理只核对这些入口和相关文档，不因此操作运行中的 Agent 或真实用户数据。
+Run these representative consumer checks from their own repository roots, selected by actual impact;
+not every task needs all repositories. Read each repository's AGENTS and prepare its development environment first.
+Code commits also run that repository's full gate. Documentation-only maintenance verifies entry points and documents,
+without operating running agents or real user data.
 
-| 改动触点 | 仓库与代表验证命令 |
+| Change | Repository and representative commands |
 |---|---|
-| Service、管理协议与手动文档语义 | memory：`uv run pytest tests/test_service.py tests/test_bridge_extract.py tests/test_bridge_dashboard.py tests/test_manual_documents.py -q -rs`；持久化改动另执行双 backend gate |
-| 回合采集、工具绑定、提炼调度和真实 Service 接线 | Harness：`uv run pytest tests/test_memory_service_integration.py tests/test_memory_middleware.py tests/test_memory_tools.py tests/test_memory_integration.py -q` |
-| 记忆提示、文件保护和会话召回回放 | Harness：`uv run pytest tests/test_strong_memory.py tests/test_memory_recall_replay.py tests/test_memory_tools.py tests/test_filesystem_guard.py -q` |
-| 辅助模型调用、重试与配置序列化 | Harness：`uv run pytest tests/test_memory_core.py tests/test_memory_call_policy.py tests/test_config -q` |
-| Runtime 复用、关闭和维护暂停 | Harness：`uv run pytest tests/test_memory_store.py tests/test_memory_restore_pause.py -q` |
-| 产品配置/API 与存储选择映射 | Octop：`uv run pytest tests/unit/agents/test_agent_manager.py tests/unit/agents/test_memory_backend.py tests/integration/test_memory_api.py -q` |
-| 手动文档编辑权限、停止 Agent 时可用和采纳时的当前文件 | Octop：`uv run pytest tests/unit/api/test_strong_memory.py -q` |
-| 存储、备份恢复、在线瘦身和 PG 统计 | Octop：`uv run pytest tests/unit/agents/test_memory_storage.py tests/unit/agents/test_memory_slim.py tests/integration/test_memory_storage_api.py tests/integration/test_postgres_memory_storage.py -q -rs`；真实专用 PG 的配置依该仓测试说明 |
+| Service, management protocol, manual-document semantics | memory: `uv run pytest tests/test_service.py tests/test_bridge_extract.py tests/test_bridge_dashboard.py tests/test_manual_documents.py -q -rs`; persistence changes also use the dual-backend gate |
+| Turn capture, tool binding, scheduling, real Service wiring | Harness: `uv run pytest tests/test_memory_service_integration.py tests/test_memory_middleware.py tests/test_memory_tools.py tests/test_memory_integration.py -q` |
+| Memory instructions, file protection, session recall replay | Harness: `uv run pytest tests/test_strong_memory.py tests/test_memory_recall_replay.py tests/test_memory_tools.py tests/test_filesystem_guard.py -q` |
+| Auxiliary-model calls, retries, configuration serialization | Harness: `uv run pytest tests/test_memory_core.py tests/test_memory_call_policy.py tests/test_config -q` |
+| Runtime reuse, closure, maintenance pause | Harness: `uv run pytest tests/test_memory_store.py tests/test_memory_restore_pause.py -q` |
+| Product configuration/API and backend selection mapping | Octop: `uv run pytest tests/unit/agents/test_agent_manager.py tests/unit/agents/test_memory_backend.py tests/integration/test_memory_api.py -q` |
+| Manual-edit permissions, stopped-agent access, current files for adoption | Octop: `uv run pytest tests/unit/api/test_strong_memory.py -q` |
+| Storage, backup/restore, online slimming, PG statistics | Octop: `uv run pytest tests/unit/agents/test_memory_storage.py tests/unit/agents/test_memory_slim.py tests/integration/test_memory_storage_api.py tests/integration/test_postgres_memory_storage.py -q -rs`; configure dedicated real PG according to that repository's tests |
 
-Octop 前端记忆组件有同目录 `*.test.tsx`；在 `dashboard/` 运行 `npm test -- src/pages/Agent/Memory`
-或受影响的单个文件，并按该仓规则执行 `npx tsc -b` 及 `make build-frontend`。
-只有前端展示改动时不要求 memory/Harness 新增业务实现。
+Octop memory components have adjacent `*.test.tsx` files. In `dashboard/`, run `npm test -- src/pages/Agent/Memory`
+or the affected individual file, plus `npx tsc -b` and `make build-frontend` according to that repository's rules.
+Display-only work needs no new business implementation in memory/Harness.
 
-跨仓用例需加载真正被修改的版本：记录各仓 revision/依赖解析版本，并核对导入来源；
-宿主环境里的旧版发行包通过，不等于新源码通过。`--no-sync` 仅用于保留已经准备好的联调环境，
-不代替实际安装和版本核对。本仓 CI 的 Harness 固定提交只覆盖所列契约，不自动证明所有后续宿主版本兼容。
-模型响应可 mock，Service/Middleware/配置转发及需要验收的 backend 不应整段替换为 stub。
-联动 schema/持久化时使用真实专用 PG，并覆盖旧数据升级、namespace 隔离及消费者重开/恢复。
+Integration cases must load the changed versions: record each source revision/resolved dependency and check import origins.
+Passing with an old installed host dependency does not validate new source. `--no-sync` preserves an already prepared environment;
+it does not install the intended sources or verify versions. This repository's fixed CI host covers its listed contracts,
+not all future host versions. Model responses may be mocked; do not replace entire Service/Middleware/configuration-forwarding
+or acceptance-critical backend paths with stubs. Schema/persistence integration uses real dedicated PG and covers legacy upgrades,
+namespace isolation, and consumer reopening/restoration.
 
-## 验证边界
+## Validation boundaries
 
-portable 默认发现测试将用户目录展开隔离到 `tmp_path`，覆盖当前 Agent 路径和显式 `extra_paths`。
-portable dry-run 使用临时目标库并比较前后数据；召回降级/page headline 测试也使用临时库，不能访问用户默认库。
+Portable discovery tests isolate home expansion to tmp_path, covering current agent paths and explicit extra_paths.
+Dry runs use temporary destination databases and compare before/after data. Recall degradation/page-headline tests also use temporary stores,
+not the default user database.
 
-文档检查覆盖本地链接、公开内容和目录约定；不能证明全文不存在敏感信息。
-宿主安装、optional dependencies、真实 PostgreSQL 与 recall 质量需分别验证，不能由基础单测替代。
-OpenClaw/Hermes 插件命令和真实宿主 E2E 脚本见 [修改适配器](../integrations.md#修改适配器)；
-未安装宿主或未运行脚本时，不写成 E2E 通过。向量用例当前是 fake/mock，不是 Chroma/Qdrant 服务验收。
-合成评测的历史 `P@5` 标签实际分母为返回的前五条数量，不固定为 5；MRR 使用整个返回列表。
-该小样本偏向实体查询，日期与 ID 每次生成；默认比较 raw_fts 和 full_pipeline，退出码只表示配置的 delta gate。
-它没有接入 `make all` / CI，不能据此声明生产召回质量。只改注释时不调整评测口径或 seed 数据。
+Documentation tests check local links, public text, and layout contracts, not the absence of every possible secret.
+Host installation, optional dependencies, real PG, and recall quality need separate validation.
+See [modifying adapters](../integrations.md#modifying-adapters) for OpenClaw/Hermes plugin checks and real-host E2E scripts.
+Without an installed host/executed script, do not claim E2E acceptance. Vector cases currently use fake/mock clients, not real services.
+The synthetic evaluator's historical `P@5` denominator is the number of returned top-five items, not a fixed five;
+MRR uses the complete returned list. The small corpus favors entity queries; dates/IDs vary per run.
+Defaults compare raw_fts and full_pipeline, and exit status reflects only the configured delta gate.
+Evaluation is outside `make all`/CI and does not establish production recall quality.
+Comment-only maintenance must not alter metric definitions or seed data.
