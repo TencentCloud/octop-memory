@@ -308,3 +308,17 @@ includes source mode, raw policy, session, and manual snapshots, preventing a br
 Cost: unextracted history is no longer automatically surfaced, particularly for Hermes capture-only hooks. Low-value atoms and
 topic mismatch still need separate relevance/value work; do not treat this source restriction as a semantic relevance classifier.
 Review admission/ranking with positive and negative queries before adding model-assisted filtering.
+
+## ADR-045: Caller-selected explicit-save kinds (Accepted; unreleased)
+
+Explicit remember requests bypass automatic extraction; hardcoding every manual Candidate as Fact loses preferences,
+decisions, and tasks. Add optional kind to Memory.store/MemoryService.save and preserve it as candidate_type.
+The host's current conversation model selects Fact/Preference/Decision/Task in its existing tool call; no separate
+classifier, keyword heuristics, schema migration, or historical backfill. Omission keeps Fact for old callers.
+Reject ConflictCandidate direct promotion and non-Fact directory kinds. Keep topic/entity type independent,
+and preserve evidence, user provenance, transactional writes, and nonblocking review scheduling.
+
+Cost: callers must select an appropriate kind, and old hosts still produce Fact. Harness advertises the enum and
+bilingual guidance; unsupported memory versions fail typed saves explicitly without downgrading. Release/adopt the
+library API before consumer releases; local-source tests do not establish release availability. Review classification
+quality using real requests; any offline reclassification of historical records needs a separate preview and scope.

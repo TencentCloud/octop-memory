@@ -30,7 +30,7 @@ Hosts provide identities, decide when to call, and manage background work; the l
 | Stage | Call and contract |
 |---|---|
 | Initialize | `Memory(namespace=..., backend_config={"db_path": ...})`, then `MemoryService(memory, llm=..., config=..., host=...)` |
-| Explicit save | `service.save(content, topic=...)` creates a fact and returns a tree leaf without an LLM |
+| Explicit save | `service.save(content, topic=...)` returns a canonical tree leaf without an LLM. Unreleased/develop adds `kind="Fact"/"Preference"/"Decision"/"Task"`; callers choose it, independent of topic/entity type. Omission retains Fact; v1.0.3 has no kind parameter. |
 | Turn end | `capture_turn(user=..., assistant=..., session_id=..., thread_id=...)` writes L0 according to policy; background execution is the host's responsibility |
 | Extract | `extract(session_id, incremental=True, promote=True, regen_pages=True)` runs synchronously outside the reply path; inspect `failure_reason` and each stage result |
 | Prompt injection | `recall(query, session_id=..., thread_id=..., manual_context=...)`; consume `rendered` or `snippets` |

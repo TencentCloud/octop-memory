@@ -49,6 +49,7 @@ MemoryLevel = Literal["root", "branch", "leaf"]
 _VALID_LEVELS: frozenset[str] = frozenset({"root", "branch", "leaf"})
 _ENTITY_TYPES: frozenset[str] = frozenset({"User", "Person", "Project", "Decision", "Task", "Fact"})
 _ATOM_KINDS: frozenset[str] = frozenset({"Fact", "Decision", "Task", "Preference", "ConflictCandidate"})
+_MANUAL_ATOM_KINDS = _ATOM_KINDS - {"ConflictCandidate"}
 _LEVELS: frozenset[str] = frozenset({"low", "medium", "high"})
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         content: str,
         *,
         topic: str | None = None,
+        kind: CandidateType = "Fact",
         level: MemoryLevel = "leaf",
         parent_id: str | None = None,
         conversation_id: str | None = None,
@@ -155,10 +157,18 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
           dedicated API (not via ``update``, which is intentionally
           immutable for ``level``).
 
-        ``metadata`` defaults to ``{}`` and is organizational only.
+        ``kind`` classifies leaf content as Fact, Preference, Decision or Task;
+        it is independent of topic/entity type and never invokes a model.
+        Omitted kinds retain the legacy Fact default. Organizational nodes
+        accept only the default; ConflictCandidate requires review instead of
+        direct manual promotion. ``metadata`` is organizational only.
         """
+        if kind not in _MANUAL_ATOM_KINDS:
+            raise ValueError(f"kind must be one of {sorted(_MANUAL_ATOM_KINDS)}")
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level {level!r}; must be one of {sorted(_VALID_LEVELS)}")
+        if level != "leaf" and kind != "Fact":
+            raise ValueError("kind only classifies leaf memories")
 
         if level == "root":
             if parent_id is not None:
@@ -176,6 +186,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             return self._store_manual_atom(
                 content,
                 topic=topic,
+                kind=kind,
                 parent_id=parent_id,
                 conversation_id=conversation_id,
                 metadata=metadata,
@@ -1348,6 +1359,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         content: str,
         *,
         topic: str | None,
+        kind: CandidateType,
         parent_id: str | None,
         conversation_id: str | None,
         metadata: dict[str, Any] | None,
@@ -1398,7 +1410,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             candidate = Candidate(
                 id=str(uuid.uuid4()),
                 raw_event_ids=[raw.id],
-                candidate_type="Fact",
+                candidate_type=kind,
                 status="promoted",
                 title=topic or content[:80],
                 assertion=content,
