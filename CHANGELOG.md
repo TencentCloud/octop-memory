@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- `Memory.store()` / `MemoryService.save()` 接受显式 `kind`，保存 Fact、Preference、Decision、Task，修复手动“记住”路径固定写成 Fact 的限制；调用方选择类型，不新增分类模型调用。省略时保留 Fact 默认值，拒绝非法类别与直接晋升 ConflictCandidate；保留原始证据、事务、用户来源与后台审核调度，不重新分类历史内容或增加 schema。
+
 ### 变更
 
 - 每轮自动召回只检索 Atom（含可选向量 Atom），没有匹配时返回空，不再回退注入原始对话或页面摘要；主动工具搜索继续保留多源及 raw 策略。OpenClaw hybrid 预取与 Hermes 同步采用该规则，缓存隔离自动注入和多源搜索，不增加模型调用或删除历史记录。

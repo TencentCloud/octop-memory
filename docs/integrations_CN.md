@@ -27,7 +27,7 @@ Python 宿主优先使用 `MemoryService`；跨语言或隔离进程通过 stdio
 | 阶段 | 调用与契约 |
 |---|---|
 | 初始化 | `Memory(namespace=..., backend_config={"db_path": ...})`，再构造 `MemoryService(memory, llm=..., config=..., host=...)` |
-| 显式保存 | `service.save(content, topic=...)` 建立确定事实并返回 tree leaf，无需 LLM |
+| 显式保存 | `service.save(content, topic=...)` 建立 canonical 记忆并返回 tree leaf，无需 LLM。未发布/develop 新增 `kind="Fact"/"Preference"/"Decision"/"Task"`；调用方选择，与 topic/实体类型分别处理。省略仍为 Fact；v1.0.3 尚无 kind 参数。 |
 | 回合结束 | `capture_turn(user=..., assistant=..., session_id=..., thread_id=...)` 按 policy 写 L0；是否放后台由宿主决定 |
 | 提炼 | `extract(session_id, incremental=True, promote=True, regen_pages=True)`；同步调用，应在回复路径外执行；检查 `failure_reason` 与各阶段结果 |
 | prompt 注入 | `recall(query, session_id=..., thread_id=..., manual_context=...)`，使用返回的 `rendered` 或 `snippets` |

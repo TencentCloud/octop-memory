@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -40,6 +41,14 @@ class TestRecall:
 
 
 class TestGetTree:
+    @pytest.mark.parametrize("level", ["root", "branch"])
+    def test_organizational_nodes_cannot_silently_discard_kind(
+        self, memory: Memory, level: Literal["root", "branch"]
+    ) -> None:
+        with pytest.raises(ValueError, match="kind only classifies leaf"):
+            memory.store("preferences", level=level, kind="Preference")
+        assert memory.get_tree() == []
+
     def test_get_tree_initially_empty(self, memory: Memory) -> None:
         assert memory.get_tree() == []
 

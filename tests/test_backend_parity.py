@@ -48,6 +48,94 @@ from octop_memory.types import (
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
 
 
+class TestManualMemoryKind:
+    @pytest.mark.parametrize("kind", ["Fact", "Preference", "Decision", "Task"])
+    def test_save_preserves_kind_evidence_and_dashboard(self, backend: Any, kind: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.application.dashboard_data import get_atom, list_atoms, stats_atom_kinds
+
+        class NoModel:
+            def call_llm(self, *args: Any, **kwargs: Any) -> str:
+                pytest.fail("Explicit classification must not call a model")
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        service = MemoryService(memory, llm=NoModel())
+        scheduled: list[bool] = []
+        service.set_manual_review_scheduler(lambda: scheduled.append(True))
+        content = "Project Atlas uses PostgreSQL."
+        node = service.save(content, topic="Atlas", kind=kind, metadata={"source": "explicit"})
+        atom = memory.get_atom(node.atom_id)
+        assert atom is not None
+        candidate = memory.get_candidate(atom.candidate_id)
+        assert candidate is not None
+        assert candidate.candidate_type == kind
+        assert candidate.status == "promoted"
+        assert candidate.decided_by == "user"
+        assert candidate.extractor_version == "manual/v1"
+        assert candidate.subject_entity_type == "Fact"
+        assert candidate.assertion == content
+        raw = memory.get_raw(candidate.quote_event_id)
+        assert raw is not None and raw.event_type == "manual"
+        assert raw.content == content
+        assert raw.payload["metadata"] == {"source": "explicit"}
+        assert memory.get(node.id).content == content
+        assert scheduled == [True]
+        assert get_atom(memory, {"atom_id": atom.id})["kind"] == kind
+        assert list_atoms(memory, {"candidate_type": kind})["items"][0]["id"] == atom.id
+        assert stats_atom_kinds(memory, {})["series"] == [{"kind": kind, "count": 1}]
+
+    @pytest.mark.parametrize("kind", ["unknown", "ConflictCandidate", "User", ""])
+    def test_invalid_kind_leaves_no_partial_writes(self, backend: Any, kind: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        scheduled: list[bool] = []
+        service = MemoryService(memory)
+        service.set_manual_review_scheduler(lambda: scheduled.append(True))
+        with pytest.raises(ValueError, match="kind"):
+            service.save("Do not persist invalid kinds", kind=kind)
+        assert memory.list_raw() == []
+        assert memory.list_candidates() == []
+        assert memory.list_atoms() == []
+        assert memory.list_entities() == []
+        assert scheduled == []
+
+    def test_legacy_store_and_save_default_to_fact(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        memory.store("An existing caller uses store")
+        MemoryService(memory).save("An existing caller uses save")
+        assert [c.candidate_type for c in memory.list_candidates()] == ["Fact", "Fact"]
+
+    def test_new_kind_does_not_reclassify_existing_manual_facts(self, backend: Any) -> None:
+        from octop_memory import Memory
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        old = memory.store("The user prefers Chinese replies", topic="preferences")
+        new = memory.store("The user prefers concise replies", topic="preferences", kind="Preference")
+        old_atom = memory.get_atom(old.atom_id)
+        new_atom = memory.get_atom(new.atom_id)
+        assert memory.get_candidate(old_atom.candidate_id).candidate_type == "Fact"
+        assert memory.get_candidate(new_atom.candidate_id).candidate_type == "Preference"
+        assert new_atom.entity_id == old_atom.entity_id
+
+    def test_failed_classified_write_rolls_back_evidence(self, backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_memory import Memory
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+
+        def fail_candidate(candidate: Candidate) -> None:
+            raise OSError("candidate write failed")
+
+        monkeypatch.setattr(memory, "add_candidate", fail_candidate)
+        with pytest.raises(OSError, match="candidate write failed"):
+            memory.store("A preference must not partially persist", kind="Preference")
+        assert memory.list_raw() == []
+        assert memory.list_entities() == []
+        assert memory.list_atoms() == []
+
+
 class TestAtomOnlyRecall:
     """Automatic injection is atom-only; explicit search retains evidence."""
 

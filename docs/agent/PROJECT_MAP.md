@@ -155,6 +155,13 @@ capture → RawEvent → extraction → Candidate → promotion → AtomCard →
 
 Candidates may promote, merge, drop, or enter conflict/needs_review automatically; not every candidate needs a human.
 `Memory.store()` needs no LLM and creates manual RawEvent/Candidate/AtomCard plus a leaf reference.
+`Memory.store(kind=...)` and `MemoryService.save(kind=...)` preserve the caller's Fact/Preference/Decision/Task
+as Candidate.candidate_type; omission remains Fact. The manual path does not infer a kind or call an LLM.
+Topic/entity type remains independent. Non-Fact kinds on directory nodes and ConflictCandidate manual promotion
+are rejected before writes; conflict candidates still require the existing review path. Evidence, transaction,
+user provenance, and asynchronous review scheduling are preserved. Dashboard kind/filter/statistics already
+read the linked candidate. This additive API is unreleased; Harness must load a supporting memory version
+before sending typed saves. Existing stored facts are unchanged; Task storage is not reminder scheduling.
 `root → branch → leaf` is an organization tree; leaf `atom_id` projects the canonical assertion without a second fact copy.
 Manual correction creates a successor, supersedes an active old atom only, and journals `user_edit`, without fabricating conversation evidence.
 Absolute event times use aware UTC.

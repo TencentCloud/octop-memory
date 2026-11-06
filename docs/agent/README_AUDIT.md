@@ -9,6 +9,7 @@ Check these claims and both READMEs when public behavior changes. Maintain curre
 | Candidates / pages | Promotion can process candidates automatically; not all require manual review. Dirty pages regenerate on triggers; mutation_version guards reject stale snapshots. summary_version advances with body generation/editing; Episodes extract independently from raw |
 | Naming | `octop-memory` / `octop_memory` / `octopmemory`; Python agent host is `octop-harness`. Changed default paths and PG schema require the integration migration guide |
 | Quick start | Core needs no optional dependencies; MemoryService.recall returns snippets/rendered; `core.py`, `service.py` |
+| Explicit-save kinds | Unreleased `Memory.store` / `MemoryService.save` accept caller-selected Fact/Preference/Decision/Task without an LLM. Default remains Fact; topic/entity type is independent, directory/conflict kinds reject, historical rows are unchanged. Harness tool/policy and consumer version adoption are separate; Task is not a reminder. |
 | Facts / tree | AtomCard is canonical; leaves reference it; `core.py`, `storage/backends/` |
 | Search scope | Memory.recall projects leaves; Memory.search searches archived messages; automatic prompt recall is atom-only, explicit tool search is multi-source; `core.py`, `pipeline/recall/`, Runtime |
 | Recall policy | Automatic gathering uses atom plus optional vector atom hits, with no raw/page fallback. Tools pass atom_only=False; OpenClaw prefetch passes atomOnly=True. Cache separates modes; current-session raw exclusion remains |
