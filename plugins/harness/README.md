@@ -6,12 +6,24 @@ MCP 接口和 token；这个包负责在 Claude Code / Codex / Cursor / Kiro / D
 
 ## 快速安装（一行）
 
+macOS / Linux：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
   | sh -s -- --url https://<octop-host>/mcp/memory/ --token omcp_…
 ```
 
-脚本用 `uvx`（或 `pipx`）拉起安装器，不会把 token 写进仓库或命令行历史之外的地方。
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token omcp_…
+```
+
+脚本优先用 `uvx`/`pipx`，都没有时用 `python3 -m venv` 建临时环境安装 `octop-memory-harness`，
+token 只在运行时传递，不写进仓库。
+
+要把「一串 token + 一页说明」直接丢给 AI 完成安装，用 [AI-SETUP.md](./AI-SETUP.md)。
 
 ## 手动安装
 
