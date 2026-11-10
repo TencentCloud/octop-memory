@@ -4,7 +4,16 @@
 MCP 接口和 token；这个包负责在 Claude Code / Codex / Cursor / Kiro / DSH 里自动召回、
 会话上报和 MCP 条目注册。
 
-## 安装
+## 快速安装（一行）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
+  | sh -s -- --url https://<octop-host>/mcp/memory/ --token omcp_…
+```
+
+脚本用 `uvx`（或 `pipx`）拉起安装器，不会把 token 写进仓库或命令行历史之外的地方。
+
+## 手动安装
 
 ```bash
 pip install octop-memory-harness
