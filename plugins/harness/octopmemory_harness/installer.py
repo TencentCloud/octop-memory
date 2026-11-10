@@ -74,7 +74,7 @@ shared file is the host-agnostic transport module.
 DSH is deliberately absent: it goes through the native plugin below, so it needs no
 hook scripts and no hook config."""
 
-_DSH_NATIVE_PACKAGE = "dsh-octop-memory@^0.1.2"
+_DSH_NATIVE_PACKAGE = "dsh-octop-memory@^0.1.3"
 """DSH 原生插件按包安装（独立仓库 ArvinQi/dsh-octop-memory），不再随安装器 vendored。"""
 
 _DSH_NATIVE_NAME = "dsh-octop-memory"
@@ -759,10 +759,17 @@ def _replace_native_patch(text, block, row_id=None):
     bounds = _patch_entry_bounds(lines, row_id)
     if bounds is None:
         base = text.rstrip("\\n")
+        last = base.splitlines()[-1].strip() if base.strip() else ""
+        if last == "[]":
+            head = base[: base.rfind("[]")].rstrip("\\n")
+            return (head + "\\n\\n" if head.strip() else "") + block
         return (base + "\\n\\n" if base else "") + block
     start, end = bounds
     tail = "".join(lines[end:])
-    return "".join(lines[:start]) + block + ("\\n" if tail else "") + tail
+    head = "".join(lines[:start])
+    if head.strip().splitlines()[-1].strip() == "[]":
+        head = head[: head.rfind("[]")].rstrip("\\n") + "\\n\\n"
+    return head + block + ("\\n" if tail else "") + tail
 
 
 def _write_dsh_native_patch(profile_dir, config):
@@ -895,11 +902,22 @@ def _install_dsh_native_files():
             done = subprocess.run(command, capture_output=True, text=True)
             if done.returncode != 0:
                 continue
-            source = pathlib.Path(tmp) / "node_modules" / NATIVE_NAME
+            modules = pathlib.Path(tmp) / "node_modules"
+            source = modules / NATIVE_NAME
             if not source.is_dir():
                 continue
             for item in source.iterdir():
                 target = bundle / item.name
+                if item.is_dir():
+                    shutil.copytree(item, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, target)
+            # Dependencies are hoisted next to the package by npm; copy them into
+            # the bundle so ``import '@deepseek-ai/schemastery'`` resolves.
+            for item in modules.iterdir():
+                if item.name == NATIVE_NAME or item.name.startswith("."):
+                    continue
+                target = bundle / "node_modules" / item.name
                 if item.is_dir():
                     shutil.copytree(item, target, dirs_exist_ok=True)
                 else:
@@ -1186,8 +1204,8 @@ HOOK_FILES = {
 }
 # 原生插件（dsh-octop-memory）按包安装：独立仓库发版，安装器不再 vendored 源码。
 NATIVE_NAME = "dsh-octop-memory"
-NATIVE_PACKAGE = "dsh-octop-memory@^0.1.2"
-NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.2"
+NATIVE_PACKAGE = "dsh-octop-memory@^0.1.3"
+NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.3"
 
 for terminal in os.environ["OCTOP_TERMINALS"].split(","):
     terminal = terminal.strip()
