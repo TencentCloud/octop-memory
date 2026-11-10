@@ -350,7 +350,7 @@ def test_prune_memory_does_not_scale_with_repeated_body_bytes(tmp_path):
     conn.close()
 
 
-@pytest.mark.parametrize("unsafe", ["delta", "pending", "subgraph", "cycle"])
+@pytest.mark.parametrize("unsafe", ["delta", "unversioned_delta_write", "pending", "subgraph", "cycle"])
 def test_prune_retains_unknown_dependencies(tmp_path, unsafe):
     path = tmp_path / "old.sqlite"
     seed_old(path, count=5)
@@ -359,6 +359,9 @@ def test_prune_retains_unknown_dependencies(tmp_path, unsafe):
         cfg = {"configurable": {**config()["configurable"], "checkpoint_id": "00000005"}}
         if unsafe == "pending":
             saver.put_writes(cfg, [("__interrupt__", ["approval"])], "task")
+        elif unsafe == "unversioned_delta_write":
+            first = {"configurable": {**config()["configurable"], "checkpoint_id": "00000001"}}
+            saver.put_writes(first, [("custom_channel", ["value"])], "task")
         elif unsafe == "subgraph":
             saver.put(config(ns="tools:sub"), checkpoint(6), {}, {})
         else:
@@ -434,9 +437,10 @@ def test_live_migration_preserves_reader_snapshot_and_concurrent_writer(tmp_path
         reader.close()
     assert changed
     assert phases[0] == "backing_up" and phases[-1] == "compacting"
-    # INSERT OR REPLACE moved row 5 past the high-water mark; the new-format
-    # replacement and appended row 7 are left to the live writer.
-    assert report["stats"]["scanned"] == 5
+    # The replacement keeps its rowid and is already in the compact format.
+    # The appended row remains beyond the migration's high-water mark.
+    assert report["stats"]["scanned"] == 6
+    assert report["stats"]["rewritten"] == 5
     assert report["stats"]["checkpoints_deleted"] == report["stats"]["writes_deleted"] == 0
     with sqlite3.connect(path) as conn:
         tuples = list(CompactSqliteSaver(conn).list(config()))

@@ -24,6 +24,28 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### SQLite checkpoint retention
+
+The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.
+A LangGraph regression reproduces message and custom-channel loss across two delta channels.
+The SQLite planner keeps each retained checkpoint's dependencies and preserves its ID, payload and pending writes.
+Lifecycle pruning plans and applies each thread under one saver transaction. Offline checkpoint maintenance uses
+the same dependency filter after selecting caller-approved candidates. PostgreSQL pruning remains unsupported.
+
+Validation on two local database copies at `keep_last=20` deleted 896 checkpoints and checked 904 survivors.
+DeepAgents message and file state replay matched for each survivor, and the copies had no new dangling links.
+Existing broken links remained present in the input and output. `make all` with dedicated PostgreSQL 16
+passed format, lint, strict mypy and 1,569 tests, with 12 skips. The fix is local and has not been released.
+
+The aligned Harness uses its existing count/age policy, backup and vacuum settings, and passes
+`skip_pending=True` to both preview and pruning. It requires memory 1.0.4. Octop retires the v2 archive by
+migrating its history before starting maintenance. Offline migration still honors the caller's explicit
+`protected_ids` list. Checkpoint upserts keep existing IDs in place.
+
+A rehearsal on a SQLite copy matched all 764 surviving checkpoints. The dry run and actual pass
+removed 745 checkpoints and 1,112 writes. Octop returned identical history and trajectory pages for 52
+threads, preserved the next model input, and copied a 57-message prefix when forking from an old reply.
+
 ### Atom-only automatic recall
 
 - **Status:** [PR #41](https://github.com/TencentCloud/octop-memory/pull/41) merged into develop as e43ca72; not in released v1.0.3. Publishing is outside this delivery. Historical validation below belongs to that PR.

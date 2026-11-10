@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -66,12 +68,18 @@ def _insert_raw_checkpoint(memory: Memory, thread_id: str, checkpoint_id: str, c
     tests, where we need rows that look like they were created at a specific
     past instant without waiting in real time.
     """
-    conn = memory._checkpointer.conn
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    saver = memory._checkpointer
+    conn = saver.conn
+    cp = empty_checkpoint()
+    cp["id"] = checkpoint_id
+    kind, payload = saver.serde.dumps_typed(cp)
     conn.execute(
         "INSERT INTO checkpoints "
         "(thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) "
-        "VALUES (?, ?, ?, NULL, 'json', X'00', '{}')",
-        (thread_id, checkpoint_ns, checkpoint_id),
+        "VALUES (?, ?, ?, NULL, ?, ?, '{}')",
+        (thread_id, checkpoint_ns, checkpoint_id, kind, payload),
     )
     conn.execute(
         "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) "
@@ -82,6 +90,67 @@ def _insert_raw_checkpoint(memory: Memory, thread_id: str, checkpoint_id: str, c
 
 
 class TestKeepLast:
+    def test_retained_graph_checkpoints_restore_all_delta_channels(self, memory: Memory) -> None:
+        from typing import Annotated, TypedDict
+
+        from langchain_core.messages import HumanMessage
+        from langgraph.graph import END, START, StateGraph
+
+        delta_channel = pytest.importorskip("langgraph.channels.delta").DeltaChannel
+        message_reducer = pytest.importorskip("langgraph.graph.message")._messages_delta_reducer
+        state_schema = TypedDict(  # noqa: UP013 - class annotations cannot resolve function-local imports.
+            "State",
+            {
+                "prompt": str,
+                "messages": Annotated[list, delta_channel(message_reducer, snapshot_frequency=3)],
+                "audit": Annotated[list, delta_channel(lambda seed, writes: seed + writes, snapshot_frequency=4)],
+            },
+        )
+
+        graph = (
+            StateGraph(state_schema)
+            .add_node(
+                "record",
+                lambda state: {
+                    "messages": [HumanMessage(content=state["prompt"], id=state["prompt"])],
+                    "audit": state["prompt"],
+                },
+            )
+            .add_edge(START, "record")
+            .add_edge("record", END)
+            .compile(checkpointer=memory._checkpointer)
+        )
+        config = {"configurable": {"thread_id": "graph"}}
+        for i in range(18):
+            graph.invoke({"prompt": f"turn {i}"}, config)
+
+        def states() -> dict[str, Any]:
+            result = {}
+            for checkpoint in list(memory.list(config)):
+                item = graph.get_state(checkpoint.config)
+                result[item.config["configurable"]["checkpoint_id"]] = (
+                    item.values,
+                    item.next,
+                    item.tasks,
+                    item.interrupts,
+                )
+            return result
+
+        before = states()
+        keep_last = 5
+        preview = prune_checkpoints(memory, keep_last=keep_last, thread_id="graph", dry_run=True)
+        assert states() == before
+        stats = prune_checkpoints(memory, keep_last=keep_last, thread_id="graph")
+        after = states()
+
+        assert stats.checkpoints_deleted > 0
+        assert preview.checkpoints_deleted == stats.checkpoints_deleted
+        assert preview.writes_deleted == stats.writes_deleted
+        assert set(list(before)[:keep_last]) <= after.keys()
+        assert next(iter(after)) == next(iter(before))
+        assert after == {cid: before[cid] for cid in after}
+        assert prune_checkpoints(memory, keep_last=keep_last, thread_id="graph").checkpoints_deleted == 0
+
     def test_keeps_only_newest_n_checkpoints(self, memory: Memory) -> None:
         for step in range(5):
             _store_checkpoint(memory, "thread-1", step=step)
@@ -311,41 +380,15 @@ class TestDropSubgraphStreams:
         assert _checkpoint_ids(memory, "thread-d", "tools:dry")
 
 
-def _plain_text(msg: Any) -> str:
-    content = getattr(msg, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text") or ""))
-        return "".join(parts)
-    return str(content)
-
-
-def _reasoning(msg: Any) -> str:
-    kwargs = getattr(msg, "additional_kwargs", None) or {}
-    text = kwargs.get("reasoning_content")
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-    content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") in ("thinking", "reasoning"):
-                thinking = block.get("thinking") or block.get("reasoning") or block.get("text")
-                if isinstance(thinking, str) and thinking.strip():
-                    return thinking.strip()
-    return ""
-
-
 def _parent_messages(memory: Memory, thread_id: str) -> list[Any]:
     tup = memory.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     assert tup is not None
     values = tup.checkpoint.get("channel_values") or {}
-    raw = values.get("messages") or []
+    if "messages" in values:
+        raw = values["messages"]
+    else:
+        history = memory._checkpointer.get_delta_channel_history(config=tup.config, channels=["messages"])
+        raw = history["messages"].get("seed", [])
     assert isinstance(raw, list)
     return raw
 
@@ -353,8 +396,6 @@ def _parent_messages(memory: Memory, thread_id: str) -> list[Any]:
 def _store_delta_parent_chain(
     memory: Memory,
     thread_id: str,
-    *,
-    omit_seed: bool = False,
 ) -> list[Any]:
     """Parent row 0 holds (or omits) messages; row 1 is a delta omit of messages."""
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -381,10 +422,7 @@ def _store_delta_parent_chain(
     config0 = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     base = empty_checkpoint()
     versions = {"messages": "0000000000000001", "skills_metadata": "0000000000000001"}
-    if omit_seed:
-        base["channel_values"] = {"skills_metadata": ["s"]}
-    else:
-        base["channel_values"] = {"messages": messages, "skills_metadata": ["s"]}
+    base["channel_values"] = {"messages": messages, "skills_metadata": ["s"]}
     base["channel_versions"] = dict(versions)
     cp0 = create_checkpoint(base, None, 1)
     saved0 = memory.put(config0, cp0, {"source": "loop", "step": 0}, {})
@@ -396,110 +434,97 @@ def _store_delta_parent_chain(
     return messages
 
 
-class TestSealParentBeforePrune:
-    def test_delta_omit_inlines_messages_and_keeps_tools(self, memory: Memory) -> None:
+class TestRetentionDependencies:
+    def test_scheduled_sqlite_retention_does_not_require_postgres(
+        self, memory: Memory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from octop_memory.application.checkpoint_maintenance import run_checkpoint_retention
+
+        monkeypatch.setitem(sys.modules, "octop_memory.storage.backends.postgres", None)
+        for step in range(3):
+            _store_checkpoint(memory, "sqlite-only", step)
+
+        result = run_checkpoint_retention(memory, keep_last=1)
+
+        assert result is not None
+        assert result.checkpoints_deleted == 2
+
+    def test_delta_omit_keeps_ancestor_and_message_details(self, memory: Memory) -> None:
         expected = _store_delta_parent_chain(memory, "thr-delta")
-        assert "messages" not in (
-            memory.get_tuple({"configurable": {"thread_id": "thr-delta"}}).checkpoint.get("channel_values") or {}
-        )
+        before = _checkpoint_ids(memory, "thr-delta", "")
 
         stats = prune_checkpoints(memory, keep_last=1, thread_id="thr-delta")
 
-        assert stats.parents_sealed == 1
-        assert stats.parent_prunes_skipped == 0
-        assert len(_checkpoint_ids(memory, "thr-delta", "")) == 1
-        got = _parent_messages(memory, "thr-delta")
-        assert [type(m).__name__ for m in got] == [type(m).__name__ for m in expected]
-        assert got[2].content == "result"
-        assert _plain_text(got[-1]) == "done"
-        assert _reasoning(got[1]) == "search first"
-        assert _reasoning(got[-1]) == "enough evidence"
-        values = memory.get_tuple({"configurable": {"thread_id": "thr-delta"}}).checkpoint.get("channel_values")
-        assert values.get("skills_metadata") == ["s"]
+        assert stats.checkpoints_deleted == 0
+        assert _checkpoint_ids(memory, "thr-delta", "") == before
+        assert _parent_messages(memory, "thr-delta") == expected
 
-    def test_unreplayable_delta_skips_ancestor_delete(self, memory: Memory) -> None:
-        _store_delta_parent_chain(memory, "thr-broken", omit_seed=True)
+    def test_missing_ancestor_skips_prune(self, memory: Memory) -> None:
+        _store_delta_parent_chain(memory, "thr-broken")
         before = _checkpoint_ids(memory, "thr-broken", "")
-        assert len(before) == 2
+        conn = memory._checkpointer.conn
+        conn.execute("UPDATE checkpoints SET parent_checkpoint_id = 'missing' WHERE checkpoint_id = ?", (before[-1],))
+        conn.commit()
 
         stats = prune_checkpoints(memory, keep_last=1, thread_id="thr-broken")
 
-        assert stats.parents_sealed == 0
         assert stats.parent_prunes_skipped == 1
         assert stats.checkpoints_deleted == 0
         assert _checkpoint_ids(memory, "thr-broken", "") == before
 
-    def test_dry_run_delta_does_not_write_seal(self, memory: Memory) -> None:
-        _store_delta_parent_chain(memory, "thr-dry")
-        before = _checkpoint_ids(memory, "thr-dry", "")
+    def test_prune_rolls_back_boundary_and_writes_together(self, memory: Memory) -> None:
+        from langgraph.checkpoint.base import create_checkpoint, empty_checkpoint
 
-        stats = prune_checkpoints(memory, keep_last=1, thread_id="thr-dry", dry_run=True)
-
-        assert stats.dry_run is True
-        assert stats.parents_sealed == 1
-        assert _checkpoint_ids(memory, "thr-dry", "") == before
-        values = memory.get_tuple({"configurable": {"thread_id": "thr-dry"}}).checkpoint.get("channel_values")
-        assert "messages" not in (values or {})
-
-    def test_drops_tools_stream_after_seal(self, memory: Memory) -> None:
-        _store_delta_parent_chain(memory, "thr-tools")
-        _insert_raw_checkpoint(memory, "thr-tools", "00000000-0000-6000-8000-000000000001", "tools:x")
-
-        stats = prune_checkpoints(
-            memory,
-            keep_last=1,
-            thread_id="thr-tools",
-            drop_subgraph_streams=True,
-        )
-
-        assert stats.parents_sealed == 1
-        assert _checkpoint_ids(memory, "thr-tools", "tools:x") == []
-        assert stats.streams_dropped == 1
-        got = _parent_messages(memory, "thr-tools")
-        assert _plain_text(got[-1]) == "done"
-        assert got[2].content == "result"
-        assert _reasoning(got[1]) == "search first"
-        assert _reasoning(got[-1]) == "enough evidence"
-
-    def test_seal_drop_then_vacuum_keeps_tools_and_thinking(self, memory: Memory) -> None:
-        """Deleted tools:* pages can be reclaimed without dropping the sealed transcript."""
-        from octop_memory.pipeline.lifecycle.vacuum import nudge_vacuum
-
-        _store_delta_parent_chain(memory, "thr-vac")
-        fat = b"x" * 80_000
+        config = {"configurable": {"thread_id": "rollback"}}
+        first = create_checkpoint(empty_checkpoint(), None, 0)
+        first["channel_values"]["counter"] = 1
+        first_config = memory.put(config, first, {}, {})
+        memory.put_writes(first_config, [("counter", 2)], "task")
+        last = create_checkpoint(first, None, 1)
+        last_config = memory.put(first_config, last, {}, {})
         conn = memory._checkpointer.conn
         conn.execute(
-            "INSERT INTO checkpoints "
-            "(thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) "
-            "VALUES (?, ?, ?, NULL, 'json', ?, '{}')",
-            ("thr-vac", "tools:fat", "00000000-0000-6000-8000-000000000001", fat),
+            "CREATE TEMP TRIGGER fail_prune BEFORE DELETE ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected'); END"
         )
-        conn.commit()
 
-        stats = prune_checkpoints(
-            memory,
-            keep_last=1,
-            thread_id="thr-vac",
-            drop_subgraph_streams=True,
-        )
-        assert stats.parents_sealed == 1
-        assert stats.streams_dropped == 1
-        assert _checkpoint_ids(memory, "thr-vac", "tools:fat") == []
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            prune_checkpoints(memory, keep_last=1)
 
-        freelist = conn.execute("PRAGMA freelist_count").fetchone()[0]
-        assert freelist > 0
+        assert memory.get_tuple(last_config).parent_config == first_config
+        assert memory.get_tuple(first_config).pending_writes == [("task", "counter", 2)]
+        conn.execute("DROP TRIGGER fail_prune")
+        stats = prune_checkpoints(memory, keep_last=1)
+        assert (stats.checkpoints_deleted, stats.writes_deleted) == (1, 1)
+        assert memory.get_tuple(last_config).parent_config is None
 
+    @pytest.mark.parametrize("drop_subgraphs", [False, True])
+    def test_preserves_tools_stream_with_retained_parent_history(self, memory: Memory, drop_subgraphs: bool) -> None:
+        expected = _store_delta_parent_chain(memory, "thr-tools")
+        _insert_raw_checkpoint(memory, "thr-tools", "00000000-0000-6000-8000-000000000001", "tools:x")
+
+        stats = prune_checkpoints(memory, keep_last=1, thread_id="thr-tools", drop_subgraph_streams=drop_subgraphs)
+
+        assert _checkpoint_ids(memory, "thr-tools", "tools:x")
+        assert stats.streams_dropped == 0
+        assert _parent_messages(memory, "thr-tools") == expected
+
+    def test_prune_then_vacuum_keeps_tools_and_thinking(self, memory: Memory) -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        from octop_memory.pipeline.lifecycle.vacuum import nudge_vacuum
+
+        cp = empty_checkpoint()
+        cp["channel_values"] = {"large_value": b"x" * 80_000}
+        memory.put({"configurable": {"thread_id": "thr-vac"}}, cp, {"source": "input", "step": -1}, {})
+        expected = _store_delta_parent_chain(memory, "thr-vac")
+
+        stats = prune_checkpoints(memory, keep_last=1, thread_id="thr-vac")
+        assert stats.checkpoints_deleted == 1
+
+        conn = memory._checkpointer.conn
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] > 0
         vac = nudge_vacuum(memory)
-        got = _parent_messages(memory, "thr-vac")
-        assert [type(m).__name__ for m in got] == [
-            "HumanMessage",
-            "AIMessage",
-            "ToolMessage",
-            "AIMessage",
-        ]
-        assert got[2].content == "result"
-        assert _plain_text(got[-1]) == "done"
-        assert _reasoning(got[1]) == "search first"
-        assert _reasoning(got[-1]) == "enough evidence"
+
+        assert _parent_messages(memory, "thr-vac") == expected
         assert vac.auto_vacuum_enabled is True
         assert vac.pages_reclaimed > 0

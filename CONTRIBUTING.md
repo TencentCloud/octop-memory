@@ -81,7 +81,12 @@ octop-memory --db /path/to/memory.sqlite db checkpoints \
 `--offline` is an operator declaration; it does not stop processes. Backups include committed WAL and need extra disk space.
 `OCTOP_MEMORY_CHECKPOINT_DEDUP=0` stops new reference writes but does not expand existing records; old readers cannot
 read the new format directly. Migration commits in batches and skips converted rows on reruns.
-Retention requires explicit completed threads, external references, and dependency closure.
+The offline migration command requires explicit completed threads and external references before it prunes.
+The separate `thread prune --dry-run` command previews the count or age window and its replay dependencies.
+The window counts graph checkpoints, including intermediate steps within a turn. Retention can keep older checkpoints
+and writes needed by a survivor. Pruning preserves survivor IDs and detaches a parent link only at an independent boundary.
+Threads with subgraphs retain their cross-stream history unless explicit subgraph removal passes the pruning guards.
+Scheduled SQLite maintenance keeps replay dependencies and skips threads with pending work or subgraphs.
 The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
 Long-lived readers may delay WAL reclamation. These format-maintenance operations support SQLite only and explicitly
 reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the memory namespace.
