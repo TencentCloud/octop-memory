@@ -65,7 +65,7 @@
 pip install octop-memory
 ```
 
-当前版本：**1.0.3**。更新内容见[发布说明](CHANGELOG.md)。
+当前版本：**1.0.4**。更新内容见[发布说明](CHANGELOG.md)。
 
 ```python
 from octop_memory import Memory, MemoryService
@@ -89,10 +89,10 @@ print(result.rendered)
 
 ### 可选依赖
 
-**未发布 / develop：** Python 显式保存支持 `kind="Fact"`、`"Preference"`、`"Decision"`、`"Task"`：
+**1.0.4 起：** Python 显式保存支持 `kind="Fact"`、`"Preference"`、`"Decision"`、`"Task"`：
 `MemoryService(memory).save("用户偏好中文回复", kind="Preference")`，`Memory.store()` 接受相同参数。
 调用方直接选择类别，不增加模型调用；省略时仍默认 `Fact`。类别与主题、实体类型分别处理，
-不会重新分类历史事实；保存 Task 不代表创建提醒。已发布的 v1.0.3 尚无该参数。
+不会重新分类历史事实；保存 Task 不代表创建提醒。v1.0.3 及更早版本没有该参数。
 
 | 安装命令 | 用途 |
 |---|---|
