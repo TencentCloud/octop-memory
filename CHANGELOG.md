@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-10
+
 ### 修复
 
 - SQLite checkpoint 裁剪保留每个恢复点依赖的快照、写入和原有 ID。离线维护仍可通过调用方提供的名单保护指定快照。
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 变更
 
 - 每轮自动召回只检索 Atom（含可选向量 Atom），没有匹配时返回空，不再回退注入原始对话或页面摘要；主动工具搜索继续保留多源及 raw 策略。OpenClaw hybrid 预取与 Hermes 同步采用该规则，缓存隔离自动注入和多源搜索，不增加模型调用或删除历史记录。
+- 文档与当前实现对齐：README 链接中英文 Wiki，维护者文档统一为英文，集成指南提供中英文两版。
 
 ## [1.0.3] - 2026-11-04
 
