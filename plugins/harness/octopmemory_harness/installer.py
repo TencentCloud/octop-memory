@@ -74,28 +74,8 @@ shared file is the host-agnostic transport module.
 DSH is deliberately absent: it goes through the native plugin below, so it needs no
 hook scripts and no hook config."""
 
-_DSH_NATIVE_SRC = Path(__file__).with_name("dsh_native_plugin")
-_DSH_NATIVE_FILES: tuple[str, ...] = (
-    "package.json",
-    "index.js",
-    "lib/text.js",
-    "cordis.patch.yml",
-    "locale/zh.json",
-    "locale/en.json",
-    "icon.svg",
-    "README.md",
-)
-"""DSH 原生记忆插件 ``dsh-octop-memory`` 的源码副本（vendored）。
-
-来自插件仓 v0.1.2，逐字节复制、不在这里改动：插件的召回/上报逻辑与 DSH 版本无关，跟着插件仓
-升级即可。安装器只做「抄进 ``~/.dsh/bundles/dsh-octop-memory`` + 登记 profile + 写配置块」。
-
-升级方式：``cp`` 插件仓的对应文件到这个目录（``tests/`` / ``.git`` 不要带），同步本清单与
-``package.json`` 的版本号，再跑 ``tests/unit/agents/test_client_setup.py``。
-
-为什么不装 git URL：``/mcp/memory/setup`` 是 curl | sh 的无鉴权脚本，装 git 依赖要求目标机器
-能访问 git 仓（私有源/代理/凭据各不相同）；vendored 副本跟着 octop 一起发版，安装只需要目录
-（``link:``），离线也能装完整。代价是插件升级要发一次 octop 版本。"""
+_DSH_NATIVE_PACKAGE = "dsh-octop-memory@^0.1.2"
+"""DSH 原生插件按包安装（独立仓库 ArvinQi/dsh-octop-memory），不再随安装器 vendored。"""
 
 _DSH_NATIVE_NAME = "dsh-octop-memory"
 """插件目录名、package.json 包名、cordis.patch.yml 行 id、dsh.profile.bundles 名（同一个）。"""
@@ -889,17 +869,47 @@ def _link_dsh_native_module(profile_dir, bundle):
 
 
 def _install_dsh_native_files():
-    """把 vendored 插件写到 ~/.dsh/bundles/<name>（逐字节还原，不在这里改插件代码）。"""
-    if not NATIVE_FILES:
-        print("  ! 安装器里没有插件源码（dsh_native_plugin 缺失）：跳过 DSH")
-        return None
+    """Install the published plugin package into ~/.dsh/bundles/<name>.
+
+    The plugin lives in its own repository (ArvinQi/dsh-octop-memory) and is published
+    to npm; nothing is vendored here any more. Fall back to the GitHub tag when the
+    registry is unreachable (or the first publish is still staged).
+    """
     bundle = _dsh_bundle_dir()
-    for name, blob in NATIVE_FILES.items():
-        target = bundle / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(blob))
-    print(f"  ✓ DSH 原生插件 {NATIVE_NAME} → {bundle}（{len(NATIVE_FILES)} 个文件）")
-    return bundle
+    bundle.mkdir(parents=True, exist_ok=True)
+    npm = shutil.which("npm")
+    pnpm = shutil.which("pnpm")
+    if not npm and not pnpm:
+        print(f"  ! 没有 npm / pnpm，无法安装 {NATIVE_NAME}；装好后重跑：npm i -g {NATIVE_PACKAGE}")
+        return None
+    import tempfile
+
+    for spec in (NATIVE_PACKAGE, NATIVE_GITHUB):
+        tmp = tempfile.mkdtemp(prefix="octop-dsh-")
+        try:
+            command = (
+                [npm, "install", "--prefix", tmp, "--no-save", "--no-package-lock", spec]
+                if npm
+                else [pnpm, "add", "--dir", tmp, spec]
+            )
+            done = subprocess.run(command, capture_output=True, text=True)
+            if done.returncode != 0:
+                continue
+            source = pathlib.Path(tmp) / "node_modules" / NATIVE_NAME
+            if not source.is_dir():
+                continue
+            for item in source.iterdir():
+                target = bundle / item.name
+                if item.is_dir():
+                    shutil.copytree(item, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, target)
+            print(f"  ✓ DSH 原生插件 {NATIVE_NAME}（{spec}）→ {bundle}")
+            return bundle
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    print(f"  ! 安装 {NATIVE_NAME} 失败（npm registry / GitHub 都不可用）：跳过 DSH 原生插件")
+    return None
 
 
 def _dsh_profile_dirs():
@@ -1174,10 +1184,10 @@ HOOK_FILES = {
     host: json.loads(os.environ["OCTOP_FILES_" + host.upper().replace("-", "_")])
     for host in ("claude-code", "kiro", "codex", "cursor")
 }
-# 原生插件（dsh-octop-memory）的 vendored 源码：{相对路径: base64}，与 hooks 同一套 payload
-# 机制（安装器渲染时注入，避免脚本里再抄一份插件代码）。
-NATIVE_FILES = json.loads(os.environ["OCTOP_FILES_NATIVE"])
+# 原生插件（dsh-octop-memory）按包安装：独立仓库发版，安装器不再 vendored 源码。
 NATIVE_NAME = "dsh-octop-memory"
+NATIVE_PACKAGE = "dsh-octop-memory@^0.1.2"
+NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.2"
 
 for terminal in os.environ["OCTOP_TERMINALS"].split(","):
     terminal = terminal.strip()
@@ -1208,21 +1218,6 @@ def _host_manifest(host: str) -> str:
     """``{relative path: base64}`` for one host: its entries + the shared lib modules."""
     files = (*_LIB_FILES, *HOST_FILES[host])
     payload = {name: _b64((_HOOKS_SRC / name).read_text(encoding="utf-8")) for name in files}
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
-def _dsh_native_manifest() -> str:
-    """``{relative path: base64}`` for the vendored native plugin (``dsh-octop-memory``).
-
-    Tolerant of a checkout that has not vendored the plugin yet: the installer still renders
-    (``/setup`` must never 500), and the DSH step then refuses with a clear message instead
-    of writing a half-empty bundle.
-    """
-    payload: dict[str, str] = {}
-    for name in _DSH_NATIVE_FILES:
-        path = _DSH_NATIVE_SRC / name
-        if path.is_file():
-            payload[name] = _b64(path.read_text(encoding="utf-8"))
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -1550,7 +1545,6 @@ OCTOP_FILES_CLAUDE_CODE='{_host_manifest("claude-code")}' \\
 OCTOP_FILES_KIRO='{_host_manifest("kiro")}' \\
 OCTOP_FILES_CODEX='{_host_manifest("codex")}' \\
 OCTOP_FILES_CURSOR='{_host_manifest("cursor")}' \\
-OCTOP_FILES_NATIVE='{_dsh_native_manifest()}' \\
 python3 - <<'OCTOP_PY'
 {_MERGE_PY}
 OCTOP_PY
@@ -2434,7 +2428,6 @@ __SELF_CHECK_JS__
     OCTOP_FILES_KIRO = __FILES_KIRO_LITERAL__
     OCTOP_FILES_CODEX = __FILES_CODEX_LITERAL__
     OCTOP_FILES_CURSOR = __FILES_CURSOR_LITERAL__
-    OCTOP_FILES_NATIVE = __FILES_NATIVE_LITERAL__
     OCTOP_NODE = $nodeBin
     OCTOP_USE_SYSTEM_CA = [string]$useSystemCa
     OCTOP_HOOK_WRAPPER = 'cmd'
@@ -2513,7 +2506,6 @@ def render_setup_ps1(
         "__FILES_KIRO_LITERAL__": _ps_single_quote(_host_manifest("kiro")),
         "__FILES_CODEX_LITERAL__": _ps_single_quote(_host_manifest("codex")),
         "__FILES_CURSOR_LITERAL__": _ps_single_quote(_host_manifest("cursor")),
-        "__FILES_NATIVE_LITERAL__": _ps_single_quote(_dsh_native_manifest()),
         "__SELF_CHECK_JS__": _PS_SELF_CHECK_JS,
         "__MERGE_PY__": _MERGE_PY,
     }

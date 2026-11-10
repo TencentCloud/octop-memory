@@ -32,7 +32,7 @@ octop-memory-harness install \
 |------|-----------|---------|------|
 | Claude Code | `~/.claude/hooks-events/` | `~/.claude/settings.json` | UserPromptSubmit 召回 + Stop 上报 |
 | Kiro | `~/.kiro/hooks/` | `~/.kiro/hooks/*.json` | 同上 |
-| DSH | — | `~/.dsh/bundles/dsh-octop-memory/` + profile | 原生插件 `dsh-octop-memory`（进程内召回/上报），不装 hook 桥接 |
+| DSH | — | `~/.dsh/bundles/dsh-octop-memory/` + profile | 原生插件 `dsh-octop-memory`（npm 安装，进程内召回/上报），不装 hook 桥接 |
 | Codex | `~/.codex/hooks/` | `~/.codex/config.toml` | 首次使用需在 Codex 里 trust 该 hook |
 | Cursor | `~/.cursor/hooks/` | `~/.cursor/hooks.json` | 同上 |
 
