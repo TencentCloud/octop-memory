@@ -1,5 +1,5 @@
 /**
- * octop-memory-native — DSH 原生「记忆共享」插件（替代 Claude Code hook 桥接）。
+ * dsh-octop-memory — DSH 原生「记忆共享」插件（替代 Claude Code hook 桥接）。
  *
  * 两个接缝都在进程内，不拉起子进程、不依赖 hook 方言：
  *   · 召回：`agent/pre-step`（waterfall）在每轮第一个 step 前查一轮 octop memory，
@@ -32,7 +32,7 @@ function createUserMessage(input) {
 /** 加载探针：确认模块真的被 host 进程 import（排查插件 inactive 用）。 */
 function probe(line) {
   try {
-    fs.appendFileSync('/tmp/octop-memory-native.log', `${new Date().toISOString()} ${line}\n`)
+    fs.appendFileSync('/tmp/dsh-octop-memory.log', `${new Date().toISOString()} ${line}\n`)
   } catch {
     // 探针失败不影响插件
   }
@@ -41,7 +41,7 @@ function probe(line) {
 probe(`module-load pid=${process.pid}`)
 
 /** Loader 诊断用的插件名。 */
-export const name = 'octop-memory-native'
+export const name = 'dsh-octop-memory'
 
 /** 无必需 Service：只用事件接缝，profile 里缺任何可选服务都不影响激活。 */
 export const inject = []
@@ -73,7 +73,7 @@ export const Config = z.object({
   captureMaxChars: z.number().default(8000),
   /** session_id 前缀，与旧 hook 保持一致，避免同会话在服务端变成两条记录。 */
   sessionPrefix: z.string().default('dsh:'),
-  source: z.string().default('dsh:octop-memory-native'),
+  source: z.string().default('dsh:dsh-octop-memory'),
 })
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -134,7 +134,7 @@ function authHeaders(connection) {
 /** 一次 JSON-RPC 调用；永不抛错，返回 `{ ok, detail, error, status }`。 */
 export async function rpc(connection, method, params, timeoutMs, signal) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('octop-memory-native: timeout')), Math.max(1000, timeoutMs))
+  const timer = setTimeout(() => controller.abort(new Error('dsh-octop-memory: timeout')), Math.max(1000, timeoutMs))
   const signals = signal ? [controller.signal, signal] : [controller.signal]
   try {
     const response = await fetch(connection.endpoint, {
@@ -234,7 +234,7 @@ async function captureTurn(connection, config, session, turn, logger) {
   if (assistantText) args.assistant = assistantText
   const result = await rpc(connection, 'tools/call', { name: 'memory_capture', arguments: args }, config.captureTimeoutMs)
   if (!result.ok) {
-    logger?.warn?.(`octop-memory-native: capture turn ${turn} failed http=${result.status} ${result.detail?.error || result.error || ''}`)
+    logger?.warn?.(`dsh-octop-memory: capture turn ${turn} failed http=${result.status} ${result.detail?.error || result.error || ''}`)
     return false
   }
   return true
@@ -248,7 +248,7 @@ export function apply(ctx, config) {
 
   const note = (line) => {
     try {
-      logger?.info?.(`octop-memory-native: ${line}`)
+      logger?.info?.(`dsh-octop-memory: ${line}`)
     } catch {
       // 日志永远不能影响主流程
     }
@@ -310,21 +310,21 @@ export function apply(ctx, config) {
               ],
             }
           } catch (error) {
-            logger?.warn?.(`octop-memory-native: recall failed ${String(error?.message || error)}`)
+            logger?.warn?.(`dsh-octop-memory: recall failed ${String(error?.message || error)}`)
             return decision
           }
         },
         { prepend: true },
       )
       return () => off?.()
-    }, 'octop-memory-native: recall listener')
+    }, 'dsh-octop-memory: recall listener')
   }
 
   ctx.on('agent/created', ({ agent }) => {
     try {
       registerAgent(agent)
     } catch (error) {
-      logger?.warn?.(`octop-memory-native: register agent failed ${String(error?.message || error)}`)
+      logger?.warn?.(`dsh-octop-memory: register agent failed ${String(error?.message || error)}`)
     }
   })
 
@@ -347,10 +347,10 @@ export function apply(ctx, config) {
       if (entry.lastTurn >= turn) return
       entry.lastTurn = turn
       void captureTurn(connection(), config, session, turn, logger).catch((error) => {
-        logger?.warn?.(`octop-memory-native: capture failed ${String(error?.message || error)}`)
+        logger?.warn?.(`dsh-octop-memory: capture failed ${String(error?.message || error)}`)
       })
     } catch (error) {
-      logger?.warn?.(`octop-memory-native: capture dispatch failed ${String(error?.message || error)}`)
+      logger?.warn?.(`dsh-octop-memory: capture dispatch failed ${String(error?.message || error)}`)
     }
   })
 
@@ -368,7 +368,7 @@ export function apply(ctx, config) {
   // octop 安装器 / 补 profile patch 的 config，后者要查 loader。这里明确喊一次。
   if (!configured()) {
     logger?.warn?.(
-      'octop-memory-native: loaded but NOT configured (endpoint / token missing) — recall and capture stay inactive. Run the octop memory setup installer or fill the `octop-memory-native` config block in the profile cordis.patch.yml.',
+      'dsh-octop-memory: loaded but NOT configured (endpoint / token missing) — recall and capture stay inactive. Run the octop memory setup installer or fill the `dsh-octop-memory` config block in the profile cordis.patch.yml.',
     )
   }
 }

@@ -1,8 +1,8 @@
 {
-  "name": "octop-memory-native",
+  "name": "dsh-octop-memory",
   "version": "0.1.2",
-  "private": true,
-  "description": "DSH 原生「记忆共享」插件：对话开始自动召回 octop 共享记忆，轮末自动上报，无需 Claude Code hook 桥接。",
+  "private": false,
+  "description": "DSH (DeepSeek Harness) plugin for octop-memory: recall shared memory before each turn and report each turn afterwards.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -22,5 +22,29 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "license": "MIT",
+  "author": "ArvinQi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArvinQi/dsh-octop-memory.git"
+  },
+  "homepage": "https://github.com/ArvinQi/dsh-octop-memory#readme",
+  "bugs": {
+    "url": "https://github.com/ArvinQi/dsh-octop-memory/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "octop",
+    "memory",
+    "mcp",
+    "plugin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

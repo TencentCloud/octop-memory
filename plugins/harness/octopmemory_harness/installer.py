@@ -31,12 +31,12 @@ terminal                   hook scripts / plugin                      config
 =========================  =========================================  =============================
 Claude Code                ``~/.claude/hooks-events/``                ``~/.claude/settings.json``
 Kiro                       ``~/.kiro/hooks/``                         ``~/.kiro/hooks/*.json``
-DSH                        ``~/.dsh/bundles/octop-memory-native/``    ``~/.dsh/profiles/<name>/``
+DSH                        ``~/.dsh/bundles/dsh-octop-memory/``    ``~/.dsh/profiles/<name>/``
 Codex                      ``~/.codex/hooks/``                        ``~/.codex/config.toml``
 Cursor                     ``~/.cursor/hooks/``                       ``~/.cursor/hooks.json``
 =========================  =========================================  =============================
 
-DSH is wired through the **native plugin** ``octop-memory-native`` (recall/report run
+DSH is wired through the **native plugin** ``dsh-octop-memory`` (recall/report run
 in the DSH process), not through hook bridging: the installer copies the vendored
 plugin, links it into the selected profile's ``node_modules``, registers the
 ``dependencies`` entry + ``dsh.profile.bundles`` name, and writes the
@@ -85,10 +85,10 @@ _DSH_NATIVE_FILES: tuple[str, ...] = (
     "icon.svg",
     "README.md",
 )
-"""DSH 原生记忆插件 ``octop-memory-native`` 的源码副本（vendored）。
+"""DSH 原生记忆插件 ``dsh-octop-memory`` 的源码副本（vendored）。
 
 来自插件仓 v0.1.2，逐字节复制、不在这里改动：插件的召回/上报逻辑与 DSH 版本无关，跟着插件仓
-升级即可。安装器只做「抄进 ``~/.dsh/bundles/octop-memory-native`` + 登记 profile + 写配置块」。
+升级即可。安装器只做「抄进 ``~/.dsh/bundles/dsh-octop-memory`` + 登记 profile + 写配置块」。
 
 升级方式：``cp`` 插件仓的对应文件到这个目录（``tests/`` / ``.git`` 不要带），同步本清单与
 ``package.json`` 的版本号，再跑 ``tests/unit/agents/test_client_setup.py``。
@@ -97,7 +97,7 @@ _DSH_NATIVE_FILES: tuple[str, ...] = (
 能访问 git 仓（私有源/代理/凭据各不相同）；vendored 副本跟着 octop 一起发版，安装只需要目录
 （``link:``），离线也能装完整。代价是插件升级要发一次 octop 版本。"""
 
-_DSH_NATIVE_NAME = "octop-memory-native"
+_DSH_NATIVE_NAME = "dsh-octop-memory"
 """插件目录名、package.json 包名、cordis.patch.yml 行 id、dsh.profile.bundles 名（同一个）。"""
 
 TERMINALS: tuple[str, ...] = ("claude-code", "kiro", "dsh", "codex", "cursor")
@@ -698,7 +698,7 @@ def _dsh_native_patch_block(config):
     按 id 找到已有行、整块替换 config，同 id 已存在时不会重复追加。
     """
     lines = [
-        "# >>> octop-memory-native (octop 安装器写入，整块覆盖) >>>",
+        "# >>> dsh-octop-memory (octop 安装器写入，整块覆盖) >>>",
         "# 召回/上报在 DSH 进程内完成，不依赖 ~/.dsh/hooks 的 hook 桥接。",
         f"# 回滚：删掉本块，并从该 profile package.json 的 dsh.profile.bundles 移除 {NATIVE_NAME}。",
         f"- id: {NATIVE_NAME}",
@@ -727,7 +727,7 @@ def _patch_entry_bounds(lines, row_id):
     """顶层 ``- id: <row_id>`` 条目的 ``[start, end)``，含紧贴其上的注释与结尾 ``# <<< id <<<``。
 
     注释只在「整段提到本插件」或「紧贴且提到本插件」时算进块里——别人的注释块（通常写在
-    自己条目上方）原样保留。结尾标记兼容早期安装器写的 ``# <<< octop-memory-native <<<``。
+    自己条目上方）原样保留。结尾标记兼容早期安装器写的 ``# <<< dsh-octop-memory <<<``。
     """
     entry = None
     for index, line in enumerate(lines):
@@ -1174,10 +1174,10 @@ HOOK_FILES = {
     host: json.loads(os.environ["OCTOP_FILES_" + host.upper().replace("-", "_")])
     for host in ("claude-code", "kiro", "codex", "cursor")
 }
-# 原生插件（octop-memory-native）的 vendored 源码：{相对路径: base64}，与 hooks 同一套 payload
+# 原生插件（dsh-octop-memory）的 vendored 源码：{相对路径: base64}，与 hooks 同一套 payload
 # 机制（安装器渲染时注入，避免脚本里再抄一份插件代码）。
 NATIVE_FILES = json.loads(os.environ["OCTOP_FILES_NATIVE"])
-NATIVE_NAME = "octop-memory-native"
+NATIVE_NAME = "dsh-octop-memory"
 
 for terminal in os.environ["OCTOP_TERMINALS"].split(","):
     terminal = terminal.strip()
@@ -1195,7 +1195,7 @@ for terminal in os.environ["OCTOP_TERMINALS"].split(","):
 print("  · hook 角色：用户提交时召回（CC / Codex 的 UserPromptSubmit，Cursor 的 beforeSubmitPrompt）；")
 print("    回合结束时上报会话 transcript（Stop / Cursor 的 stop）")
 print(f"  · hooks 直连 {HOOK_URL}；客户端 MCP 条目 {ENTRY_URL}（只用 Authorization: Bearer <MCP token>）")
-print("  · DSH 用原生插件 octop-memory-native 在进程内召回/上报（不装 hooks 桥接）")
+print("  · DSH 用原生插件 dsh-octop-memory 在进程内召回/上报（不装 hooks 桥接）")
 print("  · octop memory 接入完成（可重复执行，不会影响其它 MCP/hook 条目）")
 '''.strip()
 
@@ -1212,7 +1212,7 @@ def _host_manifest(host: str) -> str:
 
 
 def _dsh_native_manifest() -> str:
-    """``{relative path: base64}`` for the vendored native plugin (``octop-memory-native``).
+    """``{relative path: base64}`` for the vendored native plugin (``dsh-octop-memory``).
 
     Tolerant of a checkout that has not vendored the plugin yet: the installer still renders
     (``/setup`` must never 500), and the DSH step then refuses with a clear message instead
@@ -1339,7 +1339,7 @@ echo "octop memory 接入 → {mcp_url}"
 echo "检测到："
 [ "$have_claude" = 1 ] && echo "  1) Claude Code　（hook 装到 ~/.claude/hooks-events）"
 [ "$have_kiro" = 1 ] && echo "  2) Kiro　　　　（hook 装到 ~/.kiro/hooks）"
-[ "$have_dsh" = 1 ] && echo "  3) DSH　　　　（装原生插件 octop-memory-native，进程内召回/上报）"
+[ "$have_dsh" = 1 ] && echo "  3) DSH　　　　（装原生插件 dsh-octop-memory，进程内召回/上报）"
 [ "$have_codex" = 1 ] && echo "  4) Codex　　　（hook 装到 ~/.codex/hooks，配置写 ~/.codex/config.toml）"
 [ "$have_cursor" = 1 ] && echo "  5) Cursor　　　（hook 装到 ~/.cursor/hooks，配置写 ~/.cursor/hooks.json）"
 
@@ -1367,7 +1367,7 @@ if [ -z "$TERMINALS" ] && [ "$HAS_TTY" = 1 ]; then
     set --
     [ "$have_claude" = 1 ] && set -- "$@" "claude-code|Claude Code　（hook 装到 ~/.claude/hooks-events）"
     [ "$have_kiro" = 1 ] && set -- "$@" "kiro|Kiro　（hook 装到 ~/.kiro/hooks）"
-    [ "$have_dsh" = 1 ] && set -- "$@" "dsh|DSH　（装原生插件 octop-memory-native）"
+    [ "$have_dsh" = 1 ] && set -- "$@" "dsh|DSH　（装原生插件 dsh-octop-memory）"
     [ "$have_codex" = 1 ] && set -- "$@" "codex|Codex　（hook 装到 ~/.codex/hooks）"
     [ "$have_cursor" = 1 ] && set -- "$@" "cursor|Cursor　（hook 装到 ~/.cursor/hooks）"
     _picked="$(python3 - "$@" 2>/dev/null <<'OCTOP_SELECT'
@@ -1771,12 +1771,12 @@ def undo_kiro():
     _rm_tree(KIRO_DIR, "Kiro hooks 目录")
 
 
-_DSH_NATIVE_NAME = "octop-memory-native"
+_DSH_NATIVE_NAME = "dsh-octop-memory"
 _DSH_LEGACY_BUNDLES = ("dsh-memory-share", "octop-dsh-memory-share")
 
 
 def _dsh_patch_entry(line):
-    """这一行是不是顶层 ``- id: octop-memory-native``（缩进的 insert 行不算）。"""
+    """这一行是不是顶层 ``- id: dsh-octop-memory``（缩进的 insert 行不算）。"""
     if not line.startswith("-"):
         return False
     rest = line[1:].strip()
@@ -1841,16 +1841,16 @@ def _strip_dsh_patch(profile_dir):
     lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
     bounds = _dsh_patch_bounds(lines)
     if bounds is None:
-        print(f"  · {patch} 里没有 octop-memory-native 配置块")
+        print(f"  · {patch} 里没有 dsh-octop-memory 配置块")
         return
     start, end = bounds
     updated = "".join(lines[:start]) + "".join(lines[end:])
     if updated.strip():
         patch.write_text(updated.rstrip("\n") + "\n", encoding="utf-8")
-        print(f"  ✓ 已从 {patch} 去掉 octop-memory-native 配置块（其余内容保留）")
+        print(f"  ✓ 已从 {patch} 去掉 dsh-octop-memory 配置块（其余内容保留）")
     else:
         patch.unlink()
-        print(f"  ✓ 已删除只含 octop-memory-native 配置块的 {patch}")
+        print(f"  ✓ 已删除只含 dsh-octop-memory 配置块的 {patch}")
 
 
 def _strip_dsh_profile(profile_dir):
@@ -2243,7 +2243,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
   $slotHint = @{
     1 = 'Claude Code　（hook 装到 ~/.claude/hooks-events）'
     2 = 'Kiro　（hook 装到 ~/.kiro/hooks）'
-    3 = 'DSH　（装原生插件 octop-memory-native，进程内召回/上报）'
+    3 = 'DSH　（装原生插件 dsh-octop-memory，进程内召回/上报）'
     4 = 'Codex　（hook 装到 ~/.codex/hooks，配置写 ~/.codex/config.toml）'
     5 = 'Cursor　（hook 装到 ~/.cursor/hooks，配置写 ~/.cursor/hooks.json）'
   }

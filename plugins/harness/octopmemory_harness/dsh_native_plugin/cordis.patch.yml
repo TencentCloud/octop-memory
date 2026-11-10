@@ -1,4 +1,4 @@
-# octop-memory-native bundle：在 profile 根部挂一个 Host 插件。
+# dsh-octop-memory bundle：在 profile 根部挂一个 Host 插件。
 #
 # 为什么不塞进 agent preset：插件只吃 `agent/created` / `agent/pre-step` /
 # `session/event` 三个事件接缝，profile 级注册对**所有 preset**生效，也就不需要
@@ -7,8 +7,8 @@
 # token 不写进仓库：由 octop 的 DSH 安装器在 profile 的 cordis.patch.yml 里用同 id
 # 覆盖 config，或直接设环境变量后留空走 fallback 文件。
 - insert:
-    - id: octop-memory-native
-      name: 'octop-memory-native'
+    - id: dsh-octop-memory
+      name: 'dsh-octop-memory'
       config:
         endpoint: ''
         token: ''
@@ -27,4 +27,4 @@
         captureTimeoutMs: 15000
         captureMaxChars: 8000
         sessionPrefix: 'dsh:'
-        source: 'dsh:octop-memory-native'
+        source: 'dsh:dsh-octop-memory'

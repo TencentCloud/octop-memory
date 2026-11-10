@@ -1,4 +1,4 @@
-# octop-memory-native
+# dsh-octop-memory
 
 DSH（DeepSeek Harness）原生「记忆共享」插件：**每轮开始前自动召回 octop 共享记忆并注入上下文，轮末把本轮的对话增量上报回 octop**，全程在 DSH 进程内完成。
 
@@ -17,7 +17,7 @@ DSH（DeepSeek Harness）原生「记忆共享」插件：**每轮开始前自�
 
 ## 接缝
 
-- **召回**：`agent/pre-step`（waterfall，per-agent ctx）。每轮第一个 step、拿到新 user message 后，用关键词扇出查 `memory_search`，命中则以 `createUserMessage({ source: { kind: 'octop-memory-native', form: 'snapshot', sections } })` 注入本轮。做法与内置的 `time-context` 插件同构。
+- **召回**：`agent/pre-step`（waterfall，per-agent ctx）。每轮第一个 step、拿到新 user message 后，用关键词扇出查 `memory_search`，命中则以 `createUserMessage({ source: { kind: 'dsh-octop-memory', form: 'snapshot', sections } })` 注入本轮。做法与内置的 `time-context` 插件同构。
 - **上报**：`session/event` 的 `turn/end`（durable、post-commit）。收集该轮 user/assistant 文本，POST `memory_capture`（text 模式，user/assistant 分字段），按 turn 去重、按 session 幂等。
   上报/召回前都会先剥掉 Harness 自动注入的运行时长文（`Current runtime context…`、`<system-reminder>…`、子会话 delegate 前言），避免把技能清单/工作目录等噪声写进记忆、也避免它们污染召回关键词。
 - 没有新事件类型、不写 session 日志，因此不影响 fork / resume / replay。
@@ -28,10 +28,10 @@ DSH（DeepSeek Harness）原生「记忆共享」插件：**每轮开始前自�
 
 ## 配置
 
-行 id：`octop-memory-native`。可在 profile 的 `cordis.patch.yml` 用同 id 覆盖（octop 的 DSH 安装器会自动写）：
+行 id：`dsh-octop-memory`。可在 profile 的 `cordis.patch.yml` 用同 id 覆盖（octop 的 DSH 安装器会自动写）：
 
 ```yaml
-- id: octop-memory-native
+- id: dsh-octop-memory
   config:
     endpoint: https://<your-octop-host>/mcp/memory/
     token: omcp_xxxxxxxx
@@ -44,7 +44,7 @@ DSH（DeepSeek Harness）原生「记忆共享」插件：**每轮开始前自�
 
 ## 安装
 
-本目录就是插件源码（`src/octop/infra/agents/dsh_native_plugin/`），包名是 `octop-memory-native`。
+本目录就是插件源码（`src/octop/infra/agents/dsh_native_plugin/`），包名是 `dsh-octop-memory`。
 
 ```bash
 # 1) 装成 profile 的 bundle（本地目录用 link:）
@@ -57,13 +57,33 @@ octop 的 DSH 安装器会自动完成上面两步并写入 config。
 
 ## 验证
 
-1. 新会话问一句命中历史记忆的话 → 本轮 request 里能看到 `[octop memory] …` 注入块（`source.kind = octop-memory-native`）；
+1. 新会话问一句命中历史记忆的话 → 本轮 request 里能看到 `[octop memory] …` 注入块（`source.kind = dsh-octop-memory`）；
 2. 轮末在 octop 记忆库（`memory_search` / `memory_raws`）能看到本轮 `session_id = dsh:<sessionId>` 的记录；
-3. 插件日志（host 日志）：`octop-memory-native: recall turn=… hits=… fresh=…`；
-4. **「装了却没生效」先分清是哪一类**：加载探针 `/tmp/octop-memory-native.log` 在每次模块 import / `apply()` 时写一行 pid。
+3. 插件日志（host 日志）：`dsh-octop-memory: recall turn=… hits=… fresh=…`；
+4. **「装了却没生效」先分清是哪一类**：加载探针 `/tmp/dsh-octop-memory.log` 在每次模块 import / `apply()` 时写一行 pid。
    - 日志里**没有**当前 DSH 进程的 pid → 插件没被 loader 导入（查 profile `dsh.profile.bundles`、`cordis.patch.yml` 里有没有 `disabled: true`、版本闸门）；
    - 有 pid 但 host 日志出现 `loaded but NOT configured` → 加载正常、配置缺失（重跑 octop 的 DSH 安装器，或补 profile patch 里的 config 块）。
 
 ## 回滚
 
-从 profile 的 `dsh.profile.bundles` 移除 `octop-memory-native`（或 `dsh plugin --profile desktop remove octop-memory-native`）并重启即可；hooks 方案可随时切回。
+从 profile 的 `dsh.profile.bundles` 移除 `dsh-octop-memory`（或 `dsh plugin --profile desktop remove dsh-octop-memory`）并重启即可；hooks 方案可随时切回。
+
+## 安装
+
+```bash
+npm install dsh-octop-memory
+```
+
+或从 GitHub 直接装：
+
+```bash
+npm install github:ArvinQi/dsh-octop-memory
+```
+
+然后在 DSH profile 的 `cordis.patch.yml` 里按本仓库同名文件挂载（详见上文「配置」）。
+
+## 发布
+
+- 版本号遵循 semver，改 `package.json` 的 `version`
+- 推送 `vX.Y.Z` tag 会触发 `.github/workflows/release.yml`：`npm publish --access public` + 创建 GitHub Release
+- 需要在仓库 Secrets 里配置 `NPM_TOKEN`（npm Automation token，只发布这个包）

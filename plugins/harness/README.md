@@ -32,11 +32,11 @@ octop-memory-harness install \
 |------|-----------|---------|------|
 | Claude Code | `~/.claude/hooks-events/` | `~/.claude/settings.json` | UserPromptSubmit 召回 + Stop 上报 |
 | Kiro | `~/.kiro/hooks/` | `~/.kiro/hooks/*.json` | 同上 |
-| DSH | — | `~/.dsh/bundles/octop-memory-native/` + profile | 原生插件 `octop-memory-native`（进程内召回/上报），不装 hook 桥接 |
+| DSH | — | `~/.dsh/bundles/dsh-octop-memory/` + profile | 原生插件 `dsh-octop-memory`（进程内召回/上报），不装 hook 桥接 |
 | Codex | `~/.codex/hooks/` | `~/.codex/config.toml` | 首次使用需在 Codex 里 trust 该 hook |
 | Cursor | `~/.cursor/hooks/` | `~/.cursor/hooks.json` | 同上 |
 
-DSH 原生插件在独立仓库发布：<https://github.com/ArvinQi/octop-memory-native>。
+DSH 原生插件在独立仓库发布：<https://github.com/ArvinQi/dsh-octop-memory>。
 
 ## 对话记录怎么上报
 
