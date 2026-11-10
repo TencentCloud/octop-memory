@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -436,33 +435,6 @@ def _store_delta_parent_chain(
 
 
 class TestRetentionDependencies:
-    def test_pin_missing_checkpoints_in_lenient_mode(self, memory: Memory) -> None:
-        from octop_memory.application.checkpoint_maintenance import pin_sqlite_checkpoints
-
-        _store_checkpoint(memory, "pinned")
-        anchor = _checkpoint_ids(memory, "pinned", "")[0]
-        _store_checkpoint(memory, "pinned")
-        path = Path(memory.backend._db_path)
-        missing = ("pinned", "missing")
-
-        assert pin_sqlite_checkpoints(path, [missing, ("pinned", anchor), missing], strict=False) == [missing]
-        assert prune_checkpoints(memory, keep_last=1).checkpoints_deleted == 0
-        assert anchor in _checkpoint_ids(memory, "pinned", "")
-
-    def test_strict_pin_batch_rolls_back_on_missing_checkpoint(self, memory: Memory) -> None:
-        from octop_memory.application.checkpoint_maintenance import pin_sqlite_checkpoints
-
-        _store_checkpoint(memory, "pinned")
-        anchor = _checkpoint_ids(memory, "pinned", "")[0]
-        _store_checkpoint(memory, "pinned")
-        path = Path(memory.backend._db_path)
-
-        with pytest.raises(ValueError, match="Cannot pin missing root checkpoint"):
-            pin_sqlite_checkpoints(path, [("pinned", anchor), ("pinned", "missing")])
-
-        assert prune_checkpoints(memory, keep_last=1).checkpoints_deleted == 1
-        assert anchor not in _checkpoint_ids(memory, "pinned", "")
-
     def test_scheduled_sqlite_retention_does_not_require_postgres(
         self, memory: Memory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -476,59 +448,6 @@ class TestRetentionDependencies:
 
         assert result is not None
         assert result.checkpoints_deleted == 2
-
-    def test_preserves_pinned_checkpoint_and_its_ancestors_after_reopen(self, memory: Memory) -> None:
-        from octop_memory.application.checkpoint_maintenance import pin_sqlite_checkpoints
-
-        expected = _store_delta_parent_chain(memory, "pinned")
-        anchor, seed = _checkpoint_ids(memory, "pinned", "")
-        _store_checkpoint(memory, "pinned")
-        _store_checkpoint(memory, "pinned")
-        path = Path(memory.backend._db_path)
-        pin_sqlite_checkpoints(path, [("pinned", anchor)])
-        reopened = Memory(namespace="test", backend_config={"db_path": str(path)})
-        try:
-            preview = prune_checkpoints(reopened, keep_last=1, dry_run=True)
-            applied = prune_checkpoints(reopened, keep_last=1)
-            assert preview.checkpoints_deleted == applied.checkpoints_deleted == 1
-            assert {anchor, seed} <= set(_checkpoint_ids(reopened, "pinned", ""))
-            history = reopened.get_delta_channel_history(
-                config={"configurable": {"thread_id": "pinned", "checkpoint_id": anchor}},
-                channels=["messages"],
-            )
-            assert history["messages"]["seed"] == expected
-        finally:
-            reopened._checkpointer.conn.close()
-            reopened.backend.close()
-
-    def test_pin_lifetime_and_thread_scope(self, memory: Memory) -> None:
-        from octop_memory.application.checkpoint_maintenance import pin_sqlite_checkpoints
-
-        for step in range(4):
-            _store_checkpoint(memory, "pinned", step)
-        latest, lease, permanent, expired = _checkpoint_ids(memory, "pinned", "")
-        path = Path(memory.backend._db_path)
-        config = {"configurable": {"thread_id": "pinned", "checkpoint_id": permanent}}
-        same_id = memory.get_tuple(config).checkpoint
-        other = {"configurable": {"thread_id": "other"}}
-        memory.put(other, same_id, {}, {})
-        _store_checkpoint(memory, "other")
-        now = time.time()
-        pin_sqlite_checkpoints(path, [("pinned", permanent)])
-        pin_sqlite_checkpoints(path, [("pinned", lease)], expires_at=now + 600)
-        pin_sqlite_checkpoints(path, [("pinned", permanent), ("pinned", expired)], expires_at=now - 1)
-
-        # Replacing a checkpoint with the same ID must preserve its pin even
-        # on a connection configured to run recursive DELETE triggers.
-        memory._checkpointer.conn.execute("PRAGMA recursive_triggers=ON")
-        memory.put({"configurable": {"thread_id": "pinned"}}, same_id, {}, {})
-        assert prune_checkpoints(memory, keep_last=1).checkpoints_deleted == 2
-        assert set(_checkpoint_ids(memory, "pinned", "")) == {latest, lease, permanent}
-        assert len(_checkpoint_ids(memory, "other", "")) == 1
-
-        memory.delete_thread("pinned")
-        count = memory._checkpointer.conn.execute("SELECT COUNT(*) FROM hm_checkpoint_pins").fetchone()
-        assert count == (0,)
 
     def test_delta_omit_keeps_ancestor_and_message_details(self, memory: Memory) -> None:
         expected = _store_delta_parent_chain(memory, "thr-delta")

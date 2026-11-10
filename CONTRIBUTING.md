@@ -86,13 +86,7 @@ The separate `thread prune --dry-run` command previews the count or age window a
 The window counts graph checkpoints, including intermediate steps within a turn. Retention can keep older checkpoints
 and writes needed by a survivor. Pruning preserves survivor IDs and detaches a parent link only at an independent boundary.
 Threads with subgraphs retain their cross-stream history unless explicit subgraph removal passes the pruning guards.
-SQLite hosts can call `pin_sqlite_checkpoints` from `octop_memory.application.checkpoint_maintenance` before
-publishing a reference to an existing root checkpoint. Pins survive restart and are honored by lifecycle and offline
-retention. Hosts can set an expiry for temporary references. Explicit checkpoint deletion removes the corresponding pin.
-Hosts reconciling existing references can pass `strict=False` to receive the missing pairs while registering all
-available ones in the same transaction. By default a missing reference rolls back the whole registration.
-Scheduled SQLite maintenance can use `run_checkpoint_retention` from the same module. It keeps active pins
-and skips threads with pending work or subgraph dependencies. Other backends bypass scheduled checkpoint retention.
+Scheduled SQLite maintenance keeps replay dependencies and skips threads with pending work or subgraphs.
 The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
 Long-lived readers may delay WAL reclamation. These format-maintenance operations support SQLite only and explicitly
 reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the memory namespace.

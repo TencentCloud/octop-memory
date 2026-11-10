@@ -263,9 +263,8 @@ LangGraph checkpoints optionally persist execution state; `checkpoint_ns` differ
 SQLite retention selects checkpoints by count or age, then keeps the ancestry and writes needed by each survivor.
 The saver serializes planning and deletion in a single transaction per thread. Only a survivor that can restore
 without its deleted parent loses that link. IDs, payloads and pending writes stay intact.
-Host references registered through `pin_sqlite_checkpoints` live in the same SQLite file as their checkpoints.
-Both retention entry points consult active pins before evaluating replay dependencies.
-Harness uses `run_checkpoint_retention` for scheduled SQLite cleanup, leaving checkpoints with pending head work intact.
+Offline migration honors its caller's explicit `protected_ids` before evaluating replay dependencies.
+Harness uses scheduled SQLite cleanup with `skip_pending=True`, leaving checkpoints with pending head work intact.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;

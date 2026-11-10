@@ -16,7 +16,6 @@ from itertools import batched, islice
 from langgraph.checkpoint.serde.base import SerializerProtocol
 
 from octop_memory.storage.backends.sqlite_checkpoint import FORMAT, CompactSqliteSaver, unpack_envelope
-from octop_memory.storage.backends.sqlite_checkpoint_pins import pinned_checkpoint_ids
 
 
 def _can_replay_channel(name: str) -> bool:
@@ -46,9 +45,7 @@ def retain_checkpoint_dependencies(
     """
     if not candidates:
         return [], []
-    candidate_ids = set(candidates) - pinned_checkpoint_ids(cur, thread)
-    if not candidate_ids:
-        return [], []
+    candidate_ids = set(candidates)
     writes: dict[str, set[str]] = defaultdict(set)
     sends: set[str] = set()
     for cid, channel in cur.execute(

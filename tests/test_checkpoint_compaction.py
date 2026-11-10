@@ -306,11 +306,8 @@ def test_migration_failed_batch_can_resume(tmp_path):
 
 
 def test_prune_preserves_protected_snapshot_and_resume_boundary(tmp_path):
-    from octop_memory.application.checkpoint_maintenance import pin_sqlite_checkpoints
-
     path = tmp_path / "old.sqlite"
     seed_old(path, count=10)
-    pin_sqlite_checkpoints(path, [("t", "00000005")])
     report = maintain_checkpoints(
         path,
         apply=True,
@@ -320,13 +317,12 @@ def test_prune_preserves_protected_snapshot_and_resume_boundary(tmp_path):
         keep_last=2,
         protected_ids=("00000003",),
     )
-    assert report["stats"]["checkpoints_deleted"] == 6
+    assert report["stats"]["checkpoints_deleted"] == 7
     with sqlite3.connect(path) as conn:
         kept = list(CompactSqliteSaver(conn).list(config()))
-        assert [t.checkpoint["id"] for t in kept] == ["00000010", "00000009", "00000005", "00000003"]
+        assert [t.checkpoint["id"] for t in kept] == ["00000010", "00000009", "00000003"]
         assert kept[1].parent_config is None
         assert kept[2].parent_config is None
-        assert kept[3].parent_config is None
 
 
 def test_prune_memory_does_not_scale_with_repeated_body_bytes(tmp_path):
