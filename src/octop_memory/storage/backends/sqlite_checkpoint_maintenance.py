@@ -1,4 +1,4 @@
-"""Offline SQLite checkpoint migration and conservative dependency retention.
+"""SQLite checkpoint migration and conservative dependency retention.
 
 SQL stays in the backend layer. The application owns the maintenance window,
 backup and invocation. No automatic retention is installed by this module.
@@ -6,11 +6,111 @@ backup and invocation. No automatic retention is installed by this module.
 
 from __future__ import annotations
 
+import sqlite3
+from collections import defaultdict
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field
-from itertools import islice
+from itertools import batched, islice
+
+from langgraph.checkpoint.serde.base import SerializerProtocol
 
 from octop_memory.storage.backends.sqlite_checkpoint import FORMAT, CompactSqliteSaver, unpack_envelope
+from octop_memory.storage.backends.sqlite_checkpoint_pins import pinned_checkpoint_ids
+
+
+def _can_replay_channel(name: str) -> bool:
+    # LangGraph uses these names for scheduling and task bookkeeping, not
+    # DeltaChannel data. Consumed branch triggers routinely disappear from
+    # channel_values while remaining in channel_versions.
+    return not name.startswith("branch:to:") and name not in {
+        "__start__",
+        "__pregel_tasks",
+        "__error__",
+        "__interrupt__",
+        "__resume__",
+        "__return__",
+        "__no_writes__",
+    }
+
+
+def retain_checkpoint_dependencies(
+    cur: sqlite3.Cursor, serde: SerializerProtocol, thread: str, candidates: list[str]
+) -> tuple[list[str], list[str]]:
+    """Return deletable IDs and surviving IDs whose parent can be detached.
+
+    A missing channel value can depend on older writes or a stored seed,
+    even when the channel is missing from channel_versions. Follow real
+    parent links and keep the entire path to each required seed. Every
+    ancestor kept for replay must itself remain restorable.
+    """
+    if not candidates:
+        return [], []
+    candidate_ids = set(candidates) - pinned_checkpoint_ids(cur, thread)
+    if not candidate_ids:
+        return [], []
+    writes: dict[str, set[str]] = defaultdict(set)
+    sends: set[str] = set()
+    for cid, channel in cur.execute(
+        "SELECT DISTINCT checkpoint_id, channel FROM writes WHERE thread_id = ? AND checkpoint_ns = ''", (thread,)
+    ):
+        if channel == "__pregel_tasks":
+            sends.add(cid)
+        if _can_replay_channel(channel):
+            writes[cid].add(channel)
+
+    channels_through: dict[str, set[str]] = {}
+    parents: dict[str, str | None] = {}
+    needs_parent: set[str] = set()
+    for cid, parent, kind, payload in cur.execute(
+        "SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
+        (thread,),
+    ):
+        if parent is not None and parent not in parents:
+            raise ValueError("Missing or out-of-order checkpoint ancestor")
+        checkpoint = serde.loads_typed((kind, payload))
+        values = {name for name in checkpoint["channel_values"] if _can_replay_channel(name)}
+        inherited = channels_through[parent] if parent is not None else set()
+        version = checkpoint["v"]
+        # Older readers can reconstruct pending sends from the parent's
+        # writes. An unknown newer format may have additional dependencies.
+        if inherited - values or (version < 4 and parent in sends) or version > 4:
+            needs_parent.add(cid)
+        parents[cid] = parent
+        channels_through[cid] = inherited | values | writes.get(cid, set())
+
+    keep = parents.keys() - candidate_ids
+    for cid in reversed(parents):
+        parent = parents[cid]
+        if parent is not None and cid in keep and cid in needs_parent:
+            keep.add(parent)
+    victims = [cid for cid in candidates if cid not in keep]
+    detach = [cid for cid in keep if parents[cid] is not None and parents[cid] not in keep]
+    return victims, detach
+
+
+def delete_checkpoint_candidates(
+    cur: sqlite3.Cursor, thread: str, victims: list[str], detach: list[str], *, dry_run: bool
+) -> int:
+    """Detach only independent boundaries and remove rows in the caller's transaction."""
+    if not dry_run:
+        cur.executemany(
+            "UPDATE checkpoints SET parent_checkpoint_id = NULL "
+            "WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+            [(thread, cid) for cid in detach],
+        )
+    writes = 0
+    for batch in batched(victims, 500):
+        placeholders = ",".join("?" for _ in batch)
+        where = f"WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id IN ({placeholders})"
+        params = (thread, *batch)
+        if dry_run:
+            writes += cur.execute(f"SELECT COUNT(*) FROM writes {where}", params).fetchone()[0]
+        else:
+            writes += cur.execute(f"DELETE FROM writes {where}", params).rowcount
+            cur.execute(f"DELETE FROM checkpoints {where}", params)
+    return writes
 
 
 @dataclass
@@ -220,31 +320,17 @@ def _prune_thread(
             cid = parent
         resolved.update(seen)
     victims = by_id.keys() - keep
-    if not victims:
-        stats.skipped_threads[thread] = "Retention or delta dependencies protect all checkpoints"
-        return
-    stats.checkpoints_deleted += len(victims)
-    for cid in victims:
-        stats.writes_deleted += saver.conn.execute(
-            "SELECT COUNT(*) FROM writes WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
-            (thread, cid),
-        ).fetchone()[0]
-    if not apply:
-        return
-    for cid in roots:
-        if by_id[cid].parent in victims:
-            saver.conn.execute(
-                "UPDATE checkpoints SET parent_checkpoint_id = NULL "
-                "WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
-                (thread, cid),
-            )
-    for cid in victims:
-        saver.conn.execute(
-            "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?", (thread, cid)
-        )
-        saver.conn.execute(
-            "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?", (thread, cid)
-        )
+    with closing(saver.conn.cursor()) as cur:
+        try:
+            deletable, detach = retain_checkpoint_dependencies(cur, saver.serde, thread, sorted(victims))
+        except ValueError as exc:
+            stats.skipped_threads[thread] = str(exc)
+            return
+        if not deletable:
+            stats.skipped_threads[thread] = "Retention or delta dependencies protect all checkpoints"
+            return
+        stats.checkpoints_deleted += len(deletable)
+        stats.writes_deleted += delete_checkpoint_candidates(cur, thread, deletable, detach, dry_run=not apply)
 
 
 def collect_unused_blobs(saver: CompactSqliteSaver) -> int:

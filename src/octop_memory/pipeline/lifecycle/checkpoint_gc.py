@@ -1,58 +1,9 @@
-"""Checkpoint retention pruning — shrink the LangGraph checkpointer tables.
+"""Prune SQLite checkpoint history while preserving the state of every survivor.
 
-LangGraph's ``SqliteSaver`` has no built-in retention: every graph step
-(every AI turn / tool call) inserts a full-state ``checkpoints`` row (plus
-``writes`` rows) and nothing ever deletes it, short of
-:meth:`Memory.delete_thread` which is all-or-nothing (wipe the *entire*
-thread history). For long-lived threads that are never deleted outright,
-the ``checkpoints``/``writes`` tables grow without bound — this is the
-#1 driver of unbounded ``.sqlite`` file growth (see repo-wide sqlite
-bloat investigation).
-
-This module adds the missing middle ground: per ``(thread_id,
-checkpoint_ns)`` stream, keep only
-
-* the newest ``keep_last`` checkpoints (default **1** — chat history
-  and the next turn read the latest parent snapshot, not a stitch of
-  older copies), and/or
-* checkpoints newer than ``keep_days`` days,
-
-and delete everything else (plus their ``writes`` rows). The two knobs
-are OR'd together — a checkpoint survives if it satisfies *either*
-condition — and the single newest **parent** checkpoint
-(``checkpoint_ns=""``) is always kept, so ``get_thread_state()`` /
-``get_tuple()`` never breaks.
-
-SqliteSaver is a **delta** store: the newest parent row often omits
-``messages`` from ``channel_values`` even when ``channel_versions``
-shows they exist. The transcript is reconstructed by walking the parent
-chain plus ``writes``. Deleting ancestors before inlining that list
-leaves a self-inconsistent survivor (dangling ``parent_checkpoint_id``,
-empty ``messages``) — chat history then falls back to JSONL text.
-
-So this module **seals** the latest parent first: replay ``messages``
-into ``channel_values`` as a new root snapshot, *then* delete older
-rows. If replay yields nothing while the channel is still versioned,
-ancestor deletion is skipped for that thread.
-
-Finished ``tools:*`` (and any other non-empty ``checkpoint_ns``)
-subgraph streams can be dropped entirely **after** the parent is
-sealed. In-flight and HITL-paused threads are skipped unless
-``force_drop_subgraphs`` is set.
-
-SQLite-only (same restriction as :mod:`octop_memory.pipeline.lifecycle.gc`,
-D46-C): checkpoint_id is a UUIDv6 string (see
-``langgraph.checkpoint.base.id.uuid6``) whose lexicographic string order
-matches chronological order (LangGraph's own ``list()`` relies on this
-via ``ORDER BY checkpoint_id DESC``). That means both "keep last N" and
-"keep last X days" can be expressed as plain SQL — no need to
-deserialize any checkpoint blob to find a timestamp.
-
-Unlike :mod:`octop_memory.pipeline.lifecycle.gc`, deletions here are
-NOT journaled: checkpoint/write rows are LangGraph execution-state
-plumbing, not user-facing memory facts, and :meth:`Memory.delete_thread`
-(the existing all-or-nothing path) doesn't journal either — this keeps
-behaviour consistent.
+The retention window keeps the latest checkpoint and any checkpoint matching
+the count or age limit. It also keeps the checkpoints and writes required to
+replay that state. A retained checkpoint's ID, payload and writes stay intact.
+Only an independent boundary can be detached from a deleted ancestor.
 """
 
 from __future__ import annotations
@@ -60,7 +11,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -75,8 +25,7 @@ if TYPE_CHECKING:
 DEFAULT_KEEP_LAST_CHECKPOINTS = 1
 """Default per-stream checkpoint count to retain when the CLI doesn't override it.
 
-Keep the newest **sealed** parent snapshot (``messages`` inlined). Older
-parent rows are delta-chain links, not extra chat turns.
+Older checkpoints required by retained snapshots are kept as well.
 """
 
 
@@ -89,19 +38,11 @@ class CheckpointGcStats:
     streams_dropped: int = 0
     checkpoints_deleted: int = 0
     writes_deleted: int = 0
-    parents_sealed: int = 0
+    parents_sealed: int = 0  # Compatibility with callers that report the old sealing count.
     parent_prunes_skipped: int = 0
     started_at: datetime | None = None
     finished_at: datetime | None = None
     dry_run: bool = False
-
-
-@dataclass(frozen=True)
-class _ParentSealDecision:
-    """Whether ancestors of the latest parent may be deleted."""
-
-    can_prune_ancestors: bool
-    sealed: bool
 
 
 def prune_checkpoints(
@@ -112,41 +53,22 @@ def prune_checkpoints(
     thread_id: str | None = None,
     drop_subgraph_streams: bool = False,
     force_drop_subgraphs: bool = False,
+    skip_pending: bool = False,
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> CheckpointGcStats:
-    """Delete old checkpoints (and their writes) beyond the retention window.
+    """Delete checkpoints outside the retention window and dependency closure.
 
-    Args:
-        memory: The :class:`Memory` instance whose checkpointer to prune.
-            Must be backed by LangGraph's SQLite ``SqliteSaver`` (the
-            only checkpointer octop-memory currently supports pruning
-            for; PostgreSQL is deferred, same as lifecycle GC).
-        keep_last: Always keep the newest N checkpoints per
-            ``(thread_id, checkpoint_ns)`` stream, regardless of age.
-        keep_days: Always keep checkpoints newer than this many days,
-            regardless of rank.
-        thread_id: Restrict pruning to a single thread. ``None`` (default)
-            scans every thread in the checkpointer.
-        drop_subgraph_streams: When True, delete every row in non-empty
-            ``checkpoint_ns`` streams (``tools:*`` subagent / tool graphs)
-            for threads whose parent turn looks finished. In-flight and
-            HITL-paused threads keep their subgraphs (still trimmed by
-            ``keep_last``).
-        force_drop_subgraphs: Skip the finished-parent / subgraph-ahead
-            guards. Tests and ops only.
-        dry_run: Count what would be deleted without modifying anything.
-        now: Override "current time" for ``keep_days`` cutoff computation
-            (tests use this instead of ``datetime.now()``).
+    Retention is SQLite-only. The newest parent checkpoint is always kept.
+    Other checkpoints match the window if they are among the newest
+    ``keep_last`` or at most ``keep_days`` old. Ancestors needed for replay
+    can make the resulting history longer than this window.
 
-    At least one of ``keep_last`` / ``keep_days`` must be given. The two
-    are OR'd: a checkpoint is deleted only if it fails BOTH the rank
-    check and the age check. The single newest parent checkpoint is
-    always kept even if it fails both checks.
-
-    Before deleting parent ancestors, the latest parent is sealed when
-    ``messages`` is versioned but omitted from ``channel_values`` (LangGraph
-    delta). Seal failure skips ancestor deletion for that thread.
+    Threads with subgraphs keep their cross-stream dependencies. An explicit
+    ``drop_subgraph_streams`` can remove subgraphs when the only surviving
+    parent is a completed checkpoint with no pending work. The force flag
+    overrides those subgraph guards. Dry runs use the same plan as deletion.
+    With ``skip_pending``, leave threads with work pending at their head intact.
     """
     if keep_last is None and keep_days is None:
         raise ValueError("prune_checkpoints requires keep_last and/or keep_days")
@@ -155,77 +77,70 @@ def prune_checkpoints(
     if keep_days is not None and keep_days < 0:
         raise ValueError("keep_days must be >= 0")
 
-    conn = _get_checkpointer_conn(memory)
-    stats = CheckpointGcStats(started_at=datetime.now(UTC), dry_run=dry_run)
-    _LOG.info(
-        "prune_checkpoints start keep_last=%s keep_days=%s thread_id=%s drop_subgraph=%s force_drop=%s dry_run=%s",
-        keep_last,
-        keep_days,
-        thread_id,
-        drop_subgraph_streams,
-        force_drop_subgraphs,
-        dry_run,
+    from octop_memory.storage.backends.sqlite_checkpoint_maintenance import (
+        delete_checkpoint_candidates,
+        retain_checkpoint_dependencies,
     )
 
+    conn = _get_checkpointer_conn(memory)
+    saver = memory._checkpointer
+    stats = CheckpointGcStats(started_at=datetime.now(UTC), dry_run=dry_run)
     cutoff_id = None
     if keep_days is not None:
         cutoff_id = _cutoff_checkpoint_id((now or datetime.now(UTC)) - timedelta(days=keep_days))
+    force_drop = drop_subgraph_streams and force_drop_subgraphs
 
-    pairs = _thread_ns_pairs(conn, thread_id=thread_id)
-    stats.streams_scanned = len(pairs)
-    stats.threads_scanned = len({tid for tid, _ns in pairs})
-    drop_ok: dict[str, bool] = {}
-
-    by_thread: dict[str, list[str]] = defaultdict(list)
-    for tid, ns in pairs:
-        by_thread[tid].append(ns)
-
-    for tid, nss in by_thread.items():
-        # Seal parent before touching subgraphs so the finished-turn guard
-        # can see inlined messages, and so we never drop tools:* while the
-        # only remaining transcript is still on a delta chain.
-        nss.sort(key=lambda ns: (bool(ns), ns))
-        skip_parent_victims = False
-        if "" in nss:
-            decision = _ensure_parent_sealed(memory, tid, dry_run=dry_run)
-            if decision.sealed:
-                stats.parents_sealed += 1
-            if not decision.can_prune_ancestors:
-                skip_parent_victims = True
+    with saver.cursor(transaction=False):
+        threads = dict.fromkeys(tid for tid, _ in _thread_ns_pairs(conn, thread_id=thread_id))
+    stats.threads_scanned = len(threads)
+    for tid in threads:
+        # Use the saver lock and a write transaction for the complete plan
+        # and mutation. Another saver cannot extend a chain mid-prune.
+        with saver.cursor(transaction=not dry_run) as cur:
+            streams = _thread_ns_pairs(conn, thread_id=tid)
+            stats.streams_scanned += len(streams)
+            subgraphs = [ns for _, ns in streams if ns]
+            if subgraphs and not drop_subgraph_streams:
                 stats.parent_prunes_skipped += 1
-                _LOG.warning(
-                    "prune_checkpoints: skip parent ancestor delete thread=%s (delta messages could not be sealed)",
-                    tid,
-                )
-        for ns in nss:
-            if drop_subgraph_streams and ns:
-                if tid not in drop_ok:
-                    drop_ok[tid] = force_drop_subgraphs or _safe_to_drop_subgraphs(memory, conn, tid)
-                if drop_ok[tid]:
-                    deleted_cp, deleted_wr = _delete_stream(conn, tid, ns, dry_run=dry_run)
-                    stats.checkpoints_deleted += deleted_cp
-                    stats.writes_deleted += deleted_wr
-                    if deleted_cp or deleted_wr:
-                        stats.streams_dropped += 1
+                continue
+            candidates = _victim_checkpoint_ids(conn, tid, "", keep_last=keep_last, cutoff_id=cutoff_id)
+            try:
+                if skip_pending and candidates:
+                    latest = _latest_root_checkpoint(conn, saver.serde, tid)
+                    if latest is not None and _has_pending_work(conn, tid, *latest):
+                        stats.parent_prunes_skipped += 1
+                        continue
+                victims, detach = retain_checkpoint_dependencies(cur, saver.serde, tid, candidates)
+                if (
+                    subgraphs
+                    and not force_drop
+                    and not _safe_to_drop_subgraphs(conn, saver.serde, tid, deleted_parents=len(victims))
+                ):
+                    stats.parent_prunes_skipped += 1
                     continue
-            if ns == "" and skip_parent_victims:
+            except REPORTABLE_ERRORS:
+                stats.parent_prunes_skipped += 1
+                _LOG.warning("prune_checkpoints: cannot verify ancestry for thread=%s", tid, exc_info=True)
                 continue
-            victims = _victim_checkpoint_ids(conn, tid, ns, keep_last=keep_last, cutoff_id=cutoff_id)
-            if not victims:
-                continue
-            deleted_cp, deleted_wr = _delete_checkpoint_ids(conn, tid, ns, victims, dry_run=dry_run)
-            stats.checkpoints_deleted += deleted_cp
-            stats.writes_deleted += deleted_wr
+
+            stats.writes_deleted += delete_checkpoint_candidates(cur, tid, victims, detach, dry_run=dry_run)
+            stats.checkpoints_deleted += len(victims)
+            for ns in subgraphs:
+                checkpoints, writes = _delete_stream(conn, tid, ns, dry_run=dry_run)
+                stats.checkpoints_deleted += checkpoints
+                stats.writes_deleted += writes
+                stats.streams_dropped += int(bool(checkpoints or writes))
 
     stats.finished_at = datetime.now(UTC)
-    _LOG.info(
+    level = logging.DEBUG if skip_pending and not stats.checkpoints_deleted else logging.INFO
+    _LOG.log(
+        level,
         "prune_checkpoints done streams=%s streams_dropped=%s checkpoints_deleted=%s "
-        "writes_deleted=%s sealed=%s skipped=%s dry_run=%s",
+        "writes_deleted=%s skipped=%s dry_run=%s",
         stats.streams_scanned,
         stats.streams_dropped,
         stats.checkpoints_deleted,
         stats.writes_deleted,
-        stats.parents_sealed,
         stats.parent_prunes_skipped,
         dry_run,
     )
@@ -235,150 +150,6 @@ def prune_checkpoints(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _messages_omitted(checkpoint: dict[str, Any]) -> bool:
-    """True when ``messages`` is versioned on this row but not stored inline."""
-    versions = checkpoint.get("channel_versions") or {}
-    values = checkpoint.get("channel_values") or {}
-    if not isinstance(versions, dict) or not isinstance(values, dict):
-        return False
-    return versions.get("messages") is not None and "messages" not in values
-
-
-def _ensure_parent_sealed(memory: Memory, thread_id: str, *, dry_run: bool) -> _ParentSealDecision:
-    """Inline ``messages`` on the latest parent before ancestors are deleted.
-
-    Returns ``can_prune_ancestors=False`` when the latest parent is a delta
-    omit and replay produced no messages — deleting the chain would drop the
-    transcript. Deserialization failures on fixture/raw rows do not block prune.
-    """
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    try:
-        tup = memory.get_tuple(config)
-    except REPORTABLE_ERRORS:
-        _LOG.warning("prune_checkpoints: get_tuple failed thread=%s", thread_id, exc_info=True)
-        return _ParentSealDecision(can_prune_ancestors=True, sealed=False)
-    if tup is None:
-        return _ParentSealDecision(can_prune_ancestors=True, sealed=False)
-    checkpoint = getattr(tup, "checkpoint", None)
-    if not isinstance(checkpoint, dict) or not _messages_omitted(checkpoint):
-        return _ParentSealDecision(can_prune_ancestors=True, sealed=False)
-    try:
-        messages = _reconstruct_parent_messages(memory, tup)
-    except REPORTABLE_ERRORS:
-        _LOG.warning("prune_checkpoints: message replay failed thread=%s", thread_id, exc_info=True)
-        return _ParentSealDecision(can_prune_ancestors=False, sealed=False)
-    if not messages:
-        return _ParentSealDecision(can_prune_ancestors=False, sealed=False)
-    if dry_run:
-        return _ParentSealDecision(can_prune_ancestors=True, sealed=True)
-    try:
-        _write_sealed_parent(memory, thread_id, tup, messages)
-    except REPORTABLE_ERRORS:
-        _LOG.warning("prune_checkpoints: seal write failed thread=%s", thread_id, exc_info=True)
-        return _ParentSealDecision(can_prune_ancestors=False, sealed=False)
-    return _ParentSealDecision(can_prune_ancestors=True, sealed=True)
-
-
-def _reconstruct_parent_messages(memory: Memory, tup: Any) -> list[Any]:
-    """Replay ``messages`` from the delta chain plus pending writes on *tup*."""
-    messages: list[Any] = []
-    saver = memory._checkpointer
-    config = getattr(tup, "config", None)
-    if not isinstance(config, dict):
-        config = {"configurable": {}}
-    delta_fn = getattr(saver, "get_delta_channel_history", None)
-    if callable(delta_fn):
-        hist = delta_fn(config=config, channels=["messages"])
-        if isinstance(hist, dict):
-            entry = hist.get("messages") or {}
-            if isinstance(entry, dict):
-                seed = entry.get("seed")
-                if isinstance(seed, list):
-                    messages = list(seed)
-                for write in entry.get("writes") or []:
-                    if isinstance(write, tuple) and len(write) >= 3:
-                        messages = _apply_message_write(messages, write[2])
-    if not messages:
-        messages = _walk_parent_message_seed(saver, tup)
-    pending = getattr(tup, "pending_writes", None) or []
-    for item in pending:
-        if isinstance(item, tuple) and len(item) >= 3 and item[1] == "messages":
-            messages = _apply_message_write(messages, item[2])
-    return messages
-
-
-def _walk_parent_message_seed(saver: Any, tup: Any) -> list[Any]:
-    """Fallback: first ancestor that still has ``channel_values['messages']``."""
-    current: Any = tup
-    seen: set[str] = set()
-    while current is not None:
-        cfg = getattr(current, "config", None) or {}
-        cid = ""
-        if isinstance(cfg, dict):
-            cid = str((cfg.get("configurable") or {}).get("checkpoint_id") or "")
-        if cid:
-            if cid in seen:
-                break
-            seen.add(cid)
-        checkpoint = getattr(current, "checkpoint", None)
-        values = checkpoint.get("channel_values") if isinstance(checkpoint, dict) else None
-        if isinstance(values, dict) and "messages" in values:
-            raw = values.get("messages")
-            return list(raw) if isinstance(raw, list) else []
-        parent = getattr(current, "parent_config", None)
-        if not isinstance(parent, dict):
-            break
-        current = saver.get_tuple(parent)
-    return []
-
-
-def _apply_message_write(messages: list[Any], value: Any) -> list[Any]:
-    """Apply one LangGraph ``messages`` channel write.
-
-    An empty write is a no-op. Guarded before ``add_messages`` because that
-    reducer rejects a null right-hand side: the raise would bubble up through
-    ``_reconstruct_parent_messages`` into ``_ensure_parent_sealed``, which
-    fails closed and stops pruning that thread's ancestors forever.
-    """
-    if value is None:
-        return messages
-    try:
-        from langgraph.graph.message import add_messages
-    except ImportError:
-        add_messages = None  # type: ignore[assignment]
-    if add_messages is not None:
-        result = add_messages(messages, value)
-        return list(result) if not isinstance(result, list) else result
-    if isinstance(value, list):
-        return [*messages, *value]
-    return [*messages, value]
-
-
-def _write_sealed_parent(memory: Memory, thread_id: str, tup: Any, messages: list[Any]) -> None:
-    """Insert a new root parent snapshot with ``messages`` inlined."""
-    from copy import deepcopy
-
-    from langgraph.checkpoint.base.id import uuid6
-
-    checkpoint = getattr(tup, "checkpoint", None)
-    if not isinstance(checkpoint, dict):
-        raise TypeError("latest parent checkpoint is not a dict")
-    sealed = deepcopy(checkpoint)
-    values = dict(sealed.get("channel_values") or {})
-    values["messages"] = messages
-    sealed["channel_values"] = values
-    sealed["id"] = str(uuid6())
-    metadata = getattr(tup, "metadata", None)
-    if not isinstance(metadata, dict):
-        metadata = {}
-    memory.put(
-        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-        sealed,
-        metadata,
-        {},
-    )
 
 
 def _delete_stream(
@@ -407,55 +178,63 @@ def _delete_stream(
         "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?",
         (thread_id, checkpoint_ns),
     )
-    conn.commit()
     writes = wr_cur.rowcount if wr_cur.rowcount and wr_cur.rowcount > 0 else 0
     checkpoints = cp_cur.rowcount if cp_cur.rowcount and cp_cur.rowcount > 0 else 0
     return checkpoints, writes
 
 
-def _delete_checkpoint_ids(
-    conn: sqlite3.Connection,
-    thread_id: str,
-    checkpoint_ns: str,
-    victims: list[str],
-    *,
-    dry_run: bool,
-) -> tuple[int, int]:
-    """Delete the given checkpoint ids (and their writes) in one stream."""
-    placeholders = ",".join("?" for _ in victims)
-    if dry_run:
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM writes "
-            f"WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN ({placeholders})",
-            (thread_id, checkpoint_ns, *victims),
-        ).fetchone()
-        return len(victims), (row[0] if row else 0)
-    wr_cur = conn.execute(
-        f"DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN ({placeholders})",
-        (thread_id, checkpoint_ns, *victims),
-    )
-    conn.execute(
-        f"DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN ({placeholders})",
-        (thread_id, checkpoint_ns, *victims),
-    )
-    conn.commit()
-    writes = wr_cur.rowcount if wr_cur.rowcount and wr_cur.rowcount > 0 else 0
-    return len(victims), writes
-
-
-def _safe_to_drop_subgraphs(memory: Memory, conn: sqlite3.Connection, thread_id: str) -> bool:
-    """True when this thread's parent turn looks finished and no subgraph is ahead.
-
-    In-flight / HITL: parent ends on an AI tool-call, or a ``tools:*`` row
-    is newer than the latest parent (subgraph still writing). Those stay.
-    """
+def _safe_to_drop_subgraphs(conn: sqlite3.Connection, serde: Any, thread_id: str, *, deleted_parents: int) -> bool:
+    """Require a single surviving final parent with no work to resume."""
     if _subgraph_newer_than_parent(conn, thread_id):
         return False
-    try:
-        return _parent_turn_finished(memory, thread_id)
-    except REPORTABLE_ERRORS:
-        _LOG.warning("prune_checkpoints: parent-state check failed thread=%s", thread_id, exc_info=True)
+    if (
+        conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''", (thread_id,)
+        ).fetchone()[0]
+        - deleted_parents
+        != 1
+    ):
         return False
+    latest = _latest_root_checkpoint(conn, serde, thread_id)
+    if latest is None or _has_pending_work(conn, thread_id, *latest):
+        return False
+    messages = latest[1]["channel_values"].get("messages")
+    return (
+        isinstance(messages, list)
+        and bool(messages)
+        and _message_is_ai(messages[-1])
+        and not _message_has_tool_calls(messages[-1])
+    )
+
+
+def _latest_root_checkpoint(conn: sqlite3.Connection, serde: Any, thread_id: str) -> tuple[str, dict[str, Any]] | None:
+    row = conn.execute(
+        "SELECT checkpoint_id, type, checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
+        "ORDER BY checkpoint_id DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    cid, kind, payload = row
+    return cid, serde.loads_typed((kind, payload))
+
+
+def _has_pending_work(conn: sqlite3.Connection, thread_id: str, checkpoint_id: str, checkpoint: dict[str, Any]) -> bool:
+    values = checkpoint["channel_values"]
+    if (
+        any(name.startswith("branch:to:") for name in values)
+        or "__start__" in values
+        or values.get("__pregel_tasks")
+        or values.get("__interrupt__")
+        or checkpoint.get("pending_sends")
+    ):
+        return True
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM writes WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ? LIMIT 1",
+            (thread_id, checkpoint_id),
+        ).fetchone()
+    )
 
 
 def _subgraph_newer_than_parent(conn: sqlite3.Connection, thread_id: str) -> bool:
@@ -472,23 +251,6 @@ def _subgraph_newer_than_parent(conn: sqlite3.Connection, thread_id: str) -> boo
         (thread_id, parent_id),
     ).fetchone()
     return newer is not None
-
-
-def _parent_turn_finished(memory: Memory, thread_id: str) -> bool:
-    """True when the latest parent snapshot ends on a final AI reply."""
-    state = memory.get_thread_state(thread_id)
-    if state is None:
-        return False
-    values = state.channel_values or {}
-    if values.get("__interrupt__"):
-        return False
-    messages = values.get("messages") or []
-    if not messages:
-        return False
-    last = messages[-1]
-    if _message_has_tool_calls(last):
-        return False
-    return _message_is_ai(last)
 
 
 def _message_has_tool_calls(msg: object) -> bool:
@@ -516,7 +278,10 @@ def _postgres_memory(memory: Any) -> bool:
     backend = getattr(memory, "_backend", None)
     if backend is None:
         return False
-    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+    try:
+        from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+    except ImportError:
+        return False
 
     return isinstance(backend, PostgresMemoryBackend)
 

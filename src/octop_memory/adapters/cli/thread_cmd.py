@@ -68,7 +68,7 @@ def show_cmd(ctx: click.Context, thread_id: str, limit: int) -> None:
     default=DEFAULT_KEEP_LAST_CHECKPOINTS,
     show_default=True,
     type=int,
-    help="Always keep the newest N checkpoints per thread, regardless of age. "
+    help="Keep the newest N checkpoints per thread plus their replay dependencies, regardless of age. "
     "Pass 0 to disable this check and rely on --keep-days alone.",
 )
 @click.option(
@@ -82,7 +82,7 @@ def show_cmd(ctx: click.Context, thread_id: str, limit: int) -> None:
     "--drop-subgraph-streams",
     is_flag=True,
     default=False,
-    help="Delete finished tools:* / subgraph streams. Skips in-flight and HITL threads.",
+    help="Delete subgraph streams only when a single completed parent can survive without them.",
 )
 @click.option(
     "--force-drop-subgraphs",
@@ -103,10 +103,9 @@ def prune_cmd(
 ) -> None:
     """Shrink the checkpointer's ``checkpoints``/``writes`` tables.
 
-    LangGraph's SqliteSaver never deletes old checkpoints on its own —
-    every graph step keeps a full-state row forever. This trims each
-    thread down to its newest --keep-last parent checkpoint and/or the
-    last --keep-days days, without deleting the thread itself.
+    Retain the newest checkpoints selected by --keep-last and/or --keep-days,
+    together with older checkpoints needed to replay them. The thread itself
+    stays available.
     """
     memory = get_memory(ctx)
     effective_keep_last = keep_last if keep_last > 0 else None

@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-10
+
 ### 修复
 
+- SQLite checkpoint 裁剪保留每个恢复点依赖的快照和写入、原有 ID，以及宿主登记的长期锚点和有效临时引用。
+- SQLite 锚点登记可选择跳过并返回缺失的引用，同一批中存在的 checkpoint 仍会受到保护。
 - `Memory.store()` / `MemoryService.save()` 接受显式 `kind`，保存 Fact、Preference、Decision、Task，修复手动“记住”路径固定写成 Fact 的限制；调用方选择类型，不新增分类模型调用。省略时保留 Fact 默认值，拒绝非法类别与直接晋升 ConflictCandidate；保留原始证据、事务、用户来源与后台审核调度，不重新分类历史内容或增加 schema。
 
 ### 变更

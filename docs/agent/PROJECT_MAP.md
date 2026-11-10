@@ -260,6 +260,12 @@ current session/thread scope excludes that conversation's raw. The legacy `recal
 SQLite isolates namespaces with table prefixes; PostgreSQL uses shared `octop_memory` schema and namespace-first keys.
 Chroma/Qdrant are optional indexes, not replacements for relational data/transactions; real vector-backend validation is still missing.
 LangGraph checkpoints optionally persist execution state; `checkpoint_ns` differs from the memory namespace.
+SQLite retention selects checkpoints by count or age, then keeps the ancestry and writes needed by each survivor.
+The saver serializes planning and deletion in a single transaction per thread. Only a survivor that can restore
+without its deleted parent loses that link. IDs, payloads and pending writes stay intact.
+Host references registered through `pin_sqlite_checkpoints` live in the same SQLite file as their checkpoints.
+Both retention entry points consult active pins before evaluating replay dependencies.
+Harness uses `run_checkpoint_retention` for scheduled SQLite cleanup, leaving checkpoints with pending head work intact.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;
