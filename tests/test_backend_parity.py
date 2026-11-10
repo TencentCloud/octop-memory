@@ -48,6 +48,189 @@ from octop_memory.types import (
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://localhost/octop_memory_test")
 
 
+class TestManualMemoryKind:
+    @pytest.mark.parametrize("kind", ["Fact", "Preference", "Decision", "Task"])
+    def test_save_preserves_kind_evidence_and_dashboard(self, backend: Any, kind: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.application.dashboard_data import get_atom, list_atoms, stats_atom_kinds
+
+        class NoModel:
+            def call_llm(self, *args: Any, **kwargs: Any) -> str:
+                pytest.fail("Explicit classification must not call a model")
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        service = MemoryService(memory, llm=NoModel())
+        scheduled: list[bool] = []
+        service.set_manual_review_scheduler(lambda: scheduled.append(True))
+        content = "Project Atlas uses PostgreSQL."
+        node = service.save(content, topic="Atlas", kind=kind, metadata={"source": "explicit"})
+        atom = memory.get_atom(node.atom_id)
+        assert atom is not None
+        candidate = memory.get_candidate(atom.candidate_id)
+        assert candidate is not None
+        assert candidate.candidate_type == kind
+        assert candidate.status == "promoted"
+        assert candidate.decided_by == "user"
+        assert candidate.extractor_version == "manual/v1"
+        assert candidate.subject_entity_type == "Fact"
+        assert candidate.assertion == content
+        raw = memory.get_raw(candidate.quote_event_id)
+        assert raw is not None and raw.event_type == "manual"
+        assert raw.content == content
+        assert raw.payload["metadata"] == {"source": "explicit"}
+        assert memory.get(node.id).content == content
+        assert scheduled == [True]
+        assert get_atom(memory, {"atom_id": atom.id})["kind"] == kind
+        assert list_atoms(memory, {"candidate_type": kind})["items"][0]["id"] == atom.id
+        assert stats_atom_kinds(memory, {})["series"] == [{"kind": kind, "count": 1}]
+
+    @pytest.mark.parametrize("kind", ["unknown", "ConflictCandidate", "User", ""])
+    def test_invalid_kind_leaves_no_partial_writes(self, backend: Any, kind: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        scheduled: list[bool] = []
+        service = MemoryService(memory)
+        service.set_manual_review_scheduler(lambda: scheduled.append(True))
+        with pytest.raises(ValueError, match="kind"):
+            service.save("Do not persist invalid kinds", kind=kind)
+        assert memory.list_raw() == []
+        assert memory.list_candidates() == []
+        assert memory.list_atoms() == []
+        assert memory.list_entities() == []
+        assert scheduled == []
+
+    def test_legacy_store_and_save_default_to_fact(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        memory.store("An existing caller uses store")
+        MemoryService(memory).save("An existing caller uses save")
+        assert [c.candidate_type for c in memory.list_candidates()] == ["Fact", "Fact"]
+
+    def test_new_kind_does_not_reclassify_existing_manual_facts(self, backend: Any) -> None:
+        from octop_memory import Memory
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+        old = memory.store("The user prefers Chinese replies", topic="preferences")
+        new = memory.store("The user prefers concise replies", topic="preferences", kind="Preference")
+        old_atom = memory.get_atom(old.atom_id)
+        new_atom = memory.get_atom(new.atom_id)
+        assert memory.get_candidate(old_atom.candidate_id).candidate_type == "Fact"
+        assert memory.get_candidate(new_atom.candidate_id).candidate_type == "Preference"
+        assert new_atom.entity_id == old_atom.entity_id
+
+    def test_failed_classified_write_rolls_back_evidence(self, backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_memory import Memory
+
+        memory = Memory(namespace="manual_kind", backend=backend)
+
+        def fail_candidate(candidate: Candidate) -> None:
+            raise OSError("candidate write failed")
+
+        monkeypatch.setattr(memory, "add_candidate", fail_candidate)
+        with pytest.raises(OSError, match="candidate write failed"):
+            memory.store("A preference must not partially persist", kind="Preference")
+        assert memory.list_raw() == []
+        assert memory.list_entities() == []
+        assert memory.list_atoms() == []
+
+
+class TestAtomOnlyRecall:
+    """Automatic injection is atom-only; explicit search retains evidence."""
+
+    def test_raw_is_searchable_but_never_automatically_injected(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="atom_only", backend=backend)
+        raw = memory.add_raw(
+            "Thanks for the casual conversation about darkmode.",
+            event_type="user_message",
+            session_id="old-session",
+        )
+        service = MemoryService(memory, config={"recall": {"raw_policy": "always"}})
+        assert service.recall("darkmode", thread_id="new-thread").snippets == []
+        assert service.recall("darkmode", thread_id="new-thread").rendered == ""
+        assert memory.get_raw(raw.id) is not None
+        hits = service.search("darkmode")["hits"]
+        assert [hit["source_id"] for hit in hits] == [raw.id]
+        assert hits[0]["layer"] == "raw"
+
+    def test_automatic_recall_keeps_atom_without_raw_topup(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="atom_only", backend=backend)
+        memory.store("The user prefers darkmode for the editor.", topic="preferences")
+        memory.add_raw("A casual darkmode chat ended with thanks.", event_type="user_message")
+        result = MemoryService(memory).recall("darkmode")
+        assert [snippet.text for snippet in result.snippets] == ["The user prefers darkmode for the editor."]
+        assert all(snippet.layer == "atom" for snippet in result.snippets)
+
+    def test_page_without_atom_is_not_an_automatic_fallback(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="atom_only", backend=backend)
+        entity = _make_entity(canonical_name="Atlas")
+        memory.add_entity(entity)
+        memory.add_alias(
+            Alias(
+                alias="atlas",
+                entity_id=entity.id,
+                entity_type="Project",
+                created_by="test",
+                created_at=entity.created_at,
+            )
+        )
+        backend.upsert_entity_page(_make_page(entity_id=entity.id, headline="Atlas project summary", dirty=False))
+        assert MemoryService(memory).recall("Atlas").snippets == []
+        assert MemoryService(memory).search("Atlas")["hits"]
+
+    @pytest.mark.parametrize("tool_first", [True, False])
+    def test_cache_separates_automatic_and_explicit_sources(self, backend: Any, tool_first: bool) -> None:
+        from octop_memory import Memory
+        from octop_memory.pipeline.recall import recall_for_prompt
+        from octop_memory.pipeline.recall.cache import RecallCache
+
+        memory = Memory(namespace="atom_only", backend=backend)
+        memory.store("The user prefers darkmode for the editor.", topic="preferences")
+        memory.add_raw("A casual darkmode chat ended with thanks.", event_type="user_message", session_id="old")
+        cache = RecallCache()
+        for atom_only in [False, True] if tool_first else [True, False]:
+            result = recall_for_prompt(
+                memory, "darkmode", thread_id="current", cache=cache, raw_policy="always", atom_only=atom_only
+            )
+            assert result.snippets
+            assert ("raw" in {s.layer for s in result.snippets}) is not atom_only
+        assert cache.stats()["size"] == 2
+
+    def test_bridge_auto_mode_preserves_explicit_tool_search(self, backend: Any, tmp_path: Path) -> None:
+        from octop_memory import Memory
+        from octop_memory.adapters.bridge.handlers import Bridge
+        from octop_memory.application.host_files import HostFilesIndex
+
+        memory = Memory(namespace="atom_only", backend=backend)
+        memory.add_raw("A casual darkmode chat ended with thanks.", event_type="user_message")
+        (tmp_path / "MEMORY.md").write_text("A darkmode host-file discussion.", encoding="utf-8")
+        index = HostFilesIndex(db_path=tmp_path / "files.sqlite", namespace="auto_mode")
+        try:
+            index.scan_once(tmp_path)
+            bridge = Bridge(memory, host_files=index)
+            for atom_only in [True, False]:
+                response = bridge.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "memory_search",
+                        "params": {"query": "darkmode", "atomOnly": atom_only},
+                    }
+                )
+                assert bool(response["result"]["hits"]) is not atom_only
+                if not atom_only:
+                    assert any(hit["layer"] == "host_file" for hit in response["result"]["hits"])
+        finally:
+            index.stop()
+
+
 class TestHarnessManualReview:
     """Exercise the real host/service contract, including its background worker.
 
@@ -302,7 +485,7 @@ class TestManualDocumentGovernanceParity:
         assert first["conflicts"] == 1
         assert memory.get_atom(old.id).deprecated_at is not None
         assert memory.get_raw(old.quote_event_id) is not None
-        assert not recall_for_prompt(memory, "English", raw_policy="always").snippets
+        assert not recall_for_prompt(memory, "English", raw_policy="always", atom_only=False).snippets
         assert service.reconcile_manual_documents(docs)["conflicts"] == 1
         candidate = memory.list_candidates(status="conflict")[0]
         assert candidate.payload["demoted_atom_id"] == old.id
@@ -402,7 +585,7 @@ class TestRuntimeErrorRetentionParity:
                 payload={"role": "assistant", "octop_runtime_error": True},
             )
         )
-        assert not recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+        assert not recall_for_prompt(memory, "token_expired", raw_policy="always", atom_only=False).snippets
         assert memory.get_raw("raw-1") is not None
 
     @pytest.mark.parametrize("protection", ["none", "user_source", "manual", "approved", "lesson", "edited", "missing"])
@@ -475,7 +658,7 @@ class TestRuntimeErrorRetentionParity:
         assert audit_runtime_errors(memory, apply=True).atoms_deprecated == 0
         if expected:
             assert memory.get_entity_page("ent-1").dirty
-            assert not recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+            assert not recall_for_prompt(memory, "token_expired", raw_policy="always", atom_only=False).snippets
             assert memory.list_journal(action="deprecate")[0].actor == "rule"
 
     def test_pending_error_rejected_but_manual_save_stays(self, backend: Any) -> None:

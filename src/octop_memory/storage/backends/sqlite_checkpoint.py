@@ -211,9 +211,12 @@ class CompactSqliteSaver(SqliteSaver):
                 [(digest, *item) for digest, item in blobs.items()],
             )
             cur.execute(
-                "INSERT OR REPLACE INTO checkpoints "
+                "INSERT INTO checkpoints "
                 "(thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET "
+                "parent_checkpoint_id = excluded.parent_checkpoint_id, type = excluded.type, "
+                "checkpoint = excluded.checkpoint, metadata = excluded.metadata",
                 (str(cfg["thread_id"]), ns, checkpoint["id"], cfg.get("checkpoint_id"), kind, value, meta),
             )
         return {"configurable": {"thread_id": cfg["thread_id"], "checkpoint_ns": ns, "checkpoint_id": checkpoint["id"]}}

@@ -31,7 +31,7 @@ from octop_memory.application.runtime import MemoryRuntime
 from octop_memory.core import Memory
 from octop_memory.pipeline.recall import DEFAULT_RECALL_LIMIT, RecallResult, recall_for_prompt
 from octop_memory.ports.llm import LLMClient
-from octop_memory.types import MemoryNode
+from octop_memory.types import CandidateType, MemoryNode
 
 logger = logging.getLogger("octop_memory")
 
@@ -93,7 +93,11 @@ class MemoryService:
         limit: int = DEFAULT_RECALL_LIMIT,
         manual_context: dict[str, str] | None = None,
     ) -> RecallResult:
-        """Recall relevant memories as prompt-injectable text.
+        """Recall canonical atoms as prompt-injectable text.
+
+        Automatic recall never falls back to raw conversations or page
+        summaries. Use :meth:`search` for explicit multi-source retrieval;
+        its ``recall.raw_policy`` does not widen automatic injection.
 
         Returns a :class:`RecallResult`; use ``.rendered`` for a ready-to-inject
         markdown block or ``.snippets`` to format your own. No model required.
@@ -189,6 +193,7 @@ class MemoryService:
         content: str,
         *,
         topic: str | None = None,
+        kind: CandidateType = "Fact",
         metadata: dict[str, Any] | None = None,
     ) -> MemoryNode:
         """Explicitly save a durable memory.
@@ -198,8 +203,10 @@ class MemoryService:
         enter the canonical atom/tree path instead of being kept only as raw
         transcript events. Comparison with USER.md and MEMORY.md is not done
         here; a registered scheduler is notified so the host can review later.
+        ``kind`` is supplied by the caller (Fact/Preference/Decision/Task),
+        defaults to Fact for compatibility, and adds no classification call.
         """
-        node = self._memory.store(content, topic=topic, metadata=metadata)
+        node = self._memory.store(content, topic=topic, kind=kind, metadata=metadata)
         scheduler = self._manual_review_scheduler
         if scheduler is not None:
             try:

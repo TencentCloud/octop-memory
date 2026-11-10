@@ -29,5 +29,7 @@
 
 ## Checklist
 
+- [ ] PR title is in English (unless another language was explicitly requested)
 - [ ] Updated `CHANGELOG.md` (if user-facing)
 - [ ] README / docs / HANDOFF updated (if needed)
+- [ ] GitHub Wiki synchronized for `docs/` issue/status/risk/plan changes; pending work clearly distinguished from released behavior

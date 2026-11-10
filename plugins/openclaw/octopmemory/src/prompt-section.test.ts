@@ -79,9 +79,9 @@ describe("prompt section recall modes", () => {
           snippet: "Billing retries use exponential backoff and stop after the third attempt.",
         },
         {
-          path: "raw/2026-06-16/evt_1.md",
-          layer: "raw",
-          snippet: "A much longer raw transcript that should be omitted by the budget once the first result is rendered.",
+          path: "atom/another_fact.md",
+          layer: "atom",
+          snippet: "Another fact that should be omitted by the budget once the first result is rendered.",
         },
       ],
     }).join("\n");
@@ -91,5 +91,15 @@ describe("prompt section recall modes", () => {
     assert.match(text, /Billing retries use exponential backoff/);
     assert.match(text, /Source: atom\/atm_billing\.md/);
     assert.match(text, /additional memories omitted by recall\.max_prompt_chars budget/);
+  });
+
+  it("never injects raw or page summaries supplied by the host", () => {
+    const build = makePromptSectionBuilder({ mode: "hybrid" });
+    const text = build({ ...baseCtx, recallResults: [
+      { path: "raw/chat.md", layer: "raw", snippet: "Old casual chat." },
+      { path: "page/project.md", layer: "atom", snippet: "Page summary." },
+      { path: "MEMORY.md", layer: "host_file", snippet: "Host document." },
+    ] }).join("\n");
+    assert.doesNotMatch(text, /Old casual chat|Page summary|Host document|Relevant memories:/);
   });
 });

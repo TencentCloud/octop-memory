@@ -44,7 +44,7 @@ export function makeHybridRecallPrefetcher(
       return [];
     }
     if (Array.isArray(ctx.recallResults) && ctx.recallResults.length > 0) {
-      return ctx.recallResults;
+      return ctx.recallResults.filter(isAtomResult);
     }
 
     const query = buildRecallQuery(ctx);
@@ -59,13 +59,18 @@ export function makeHybridRecallPrefetcher(
         maxResults: cfg.recall.default_max_results,
         corpus: cfg.recall.default_corpus,
         thread_id: ctx.threadId || ctx.sessionId || null,
+        atomOnly: true,
       })) as MemorySearchResponse;
-      return normalizeRecallResults(response);
+      return normalizeRecallResults(response).filter(isAtomResult);
     } catch (err) {
       logger?.warn?.("[octopmemory] hybrid auto-recall prefetch failed:", err);
       return [];
     }
   };
+}
+
+export function isAtomResult(result: MemoryPromptRecallResult): boolean {
+  return result.path?.startsWith("atom/") === true && result.layer !== "raw";
 }
 
 export function buildRecallQuery(ctx: MemoryPromptBuilderCtx): string | null {

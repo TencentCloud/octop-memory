@@ -66,7 +66,7 @@ def test_marked_runtime_failure_never_reaches_either_extraction_prompt(extractor
 
 def test_marked_raw_failure_cannot_return_via_fallback(memory: Memory) -> None:
     memory.add_raw_batch([failure_event(marked=True)])
-    assert not recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+    assert not recall_for_prompt(memory, "token_expired", raw_policy="always", atom_only=False).snippets
     assert not recall_multi_source(memory, "token_expired", sources=("raw",)).snippets
     assert memory.get_raw("failure") is not None  # Evidence is still inspectable.
 
@@ -75,7 +75,7 @@ def test_marked_raw_failure_cannot_return_via_fallback(memory: Memory) -> None:
 def test_user_error_reports_and_explicit_memory_requests_are_kept(memory: Memory, content: str) -> None:
     event = replace(failure_event(), event_type="user_message", content=content)
     memory.add_raw_batch([event])
-    assert recall_for_prompt(memory, "401", raw_policy="always").snippets
+    assert recall_for_prompt(memory, "401", raw_policy="always", atom_only=False).snippets
 
 
 def test_normal_troubleshooting_lesson_is_not_a_runtime_failure(memory: Memory) -> None:
@@ -89,7 +89,7 @@ def test_legacy_error_quote_followed_by_verified_fix_is_kept(memory: Memory) -> 
     lesson = FAILURE + "\n\n已验证的修复方法：刷新凭据后重新请求，验证成功。"
     service = MemoryService(memory, config={"capture": {"min_message_chars": 0}})
     assert service.capture_turn(assistant=lesson)["accepted"] == 1
-    assert recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+    assert recall_for_prompt(memory, "token_expired", raw_policy="always", atom_only=False).snippets
 
 
 @pytest.mark.parametrize("store_content", [True, False])
@@ -129,7 +129,7 @@ def test_unmarked_legacy_text_is_retained_without_value_keyword_checks(memory: M
     content = FAILURE + suffix
     service = MemoryService(memory, config={"capture": {"min_message_chars": 0}})
     assert service.capture_turn(assistant=content)["accepted"] == 1
-    assert recall_for_prompt(memory, "token_expired", raw_policy="always").snippets
+    assert recall_for_prompt(memory, "token_expired", raw_policy="always", atom_only=False).snippets
 
 
 @pytest.mark.parametrize("extractor_type", [CandidateExtractor, EpisodeExtractor])

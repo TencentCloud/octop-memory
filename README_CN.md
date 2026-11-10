@@ -21,7 +21,8 @@
   <a href="#外部-agent-适配">宿主接入</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#代码架构">架构</a> ·
-  <a href="CONTRIBUTING.md">参与贡献</a>
+  <a href="CONTRIBUTING.md">参与贡献</a> ·
+  <a href="https://github.com/TencentCloud/octop-memory/wiki">Wiki 指南</a>
 </p>
 
 <p align="center">
@@ -56,7 +57,7 @@
 | 🔖 | **让会话可以继续** | 可选 LangGraph checkpoint 保存执行状态，与长期记忆并存，支持 SQLite 和 PostgreSQL。 |
 
 需要 **Python 3.12+**。自动抽取、promotion 检查和页面生成使用注入的 `LLMClient`；安装包本身不会自动配置模型。
-宿主配置见[集成指南](docs/integrations.md)，已有安装升级请先阅读[更名迁移说明](docs/integrations.md#更名与已有安装迁移)。
+宿主配置见[集成指南](docs/integrations_CN.md)，已有安装升级请先阅读[更名迁移说明](docs/integrations_CN.md#更名与已有安装迁移)。
 
 ## 快速开始
 
@@ -64,7 +65,7 @@
 pip install octop-memory
 ```
 
-当前版本：**1.0.3**。更新内容见[发布说明](CHANGELOG.md)。
+当前版本：**1.0.4**。更新内容见[发布说明](CHANGELOG.md)。
 
 ```python
 from octop_memory import Memory, MemoryService
@@ -87,6 +88,11 @@ print(result.rendered)
 示例创建本地数据库；最小 FTS 验证使用原文中出现的词。`Memory.search()` 检索归档 conversation messages，与事实召回是不同入口。
 
 ### 可选依赖
+
+**1.0.4 起：** Python 显式保存支持 `kind="Fact"`、`"Preference"`、`"Decision"`、`"Task"`：
+`MemoryService(memory).save("用户偏好中文回复", kind="Preference")`，`Memory.store()` 接受相同参数。
+调用方直接选择类别，不增加模型调用；省略时仍默认 `Fact`。类别与主题、实体类型分别处理，
+不会重新分类历史事实；保存 Task 不代表创建提醒。v1.0.3 及更早版本没有该参数。
 
 | 安装命令 | 用途 |
 |---|---|
@@ -129,7 +135,7 @@ octop-memory --help
 | `db`、`gc`、`consolidate` | 存储维护和 lifecycle |
 | `config`、`openclaw`、`backfill` | 配置、宿主接入、历史抽取 |
 
-参数以 `<command> --help` 为准。`db slim FILE` 默认只读预览 SQLite checkpoint 去重；添加 `--apply --offline` 后先备份再执行，不删除历史。迁移或降级 reader 前阅读 [checkpoint 兼容性与维护](CONTRIBUTING.md#checkpoint-维护)。
+参数以 `<command> --help` 为准。`db slim FILE` 默认只读预览 SQLite checkpoint 去重；添加 `--apply --offline` 后先备份再执行，不删除历史。迁移或降级 reader 前阅读 [checkpoint 兼容性与维护](CONTRIBUTING.md#checkpoint-maintenance)。
 
 dashboard 当前仅供源码 checkout 配合 `[dashboard]` 依赖运行，其模块未进入 wheel。仅从 PyPI 安装 `octop-memory[dashboard]` 不会获得 dashboard 命令。
 
@@ -144,7 +150,7 @@ dashboard 当前仅供源码 checkout 配合 `[dashboard]` 依赖运行，其模
 | JSON-RPC bridge | 跨语言或独立进程 | stdio `octopmemory-bridge` |
 | 宿主插件 | 需要对接指定 Agent 的生命周期和工具接口 | `plugins/<host>/`；已有 OpenClaw、Hermes |
 
-安装、配置、profile、排错和新增适配的边界统一见[集成指南](docs/integrations.md)。
+安装、配置、profile、排错和新增适配的边界统一见[集成指南](docs/integrations_CN.md)。
 
 跨宿主迁移使用 `octop-memory portable list-sources / pack / adopt / doctor`。导出的 `.hmpkg` 包含记忆数据，不应提交到源码仓库。
 
@@ -196,7 +202,7 @@ Candidate 是候选，不代表每条都要人工审批。promotion 会按价值
 而是在标记 dirty 后由 runtime/CLI/host 触发再生成；Episode 与事实提炼是并列流程。
 `Memory.store()` 的手工写入无需模型，直接建立 RawEvent/Candidate/AtomCard 和 leaf 引用。
 
-prompt 召回默认路由 `atom`、`raw`；解析到 entity 时加入 `page_headline`，配置 vector index 后加入 `vector`。默认 raw fallback 策略在命中已提炼记忆时排除 raw；传入当前 session/thread 时排除本会话原始事件。
+自动 prompt 召回只使用 `atom` 事实，可选向量检索也只返回 Atom。没有匹配的 Atom 时返回空，不再回退注入原始对话或页面摘要。主动 `MemoryService.search()` / `memory_search` 保留多源检索及可配置的 raw 策略；底层调用方可用 `recall_for_prompt(..., atom_only=False)` 显式启用该行为，仍排除当前会话的 raw。
 
 系统生成的运行报错不自动进入长期记忆，也不通过历史 raw 兜底召回。octop-harness / Octop 将模型异常保留为 checkpoint 失败任务，由宿主单独显示错误；团队自动失败通知排除采集。仍生成合成报错的宿主必须使用 `payload.octop_runtime_error=true` 标记；在线链路只按结构化来源排除，不判断“记住”“已验证”等文字。Agent 自行决定调用 `memory_save`，手工保存与人工批准由来源记录保护。后台采集保留原长度策略，不再有记忆意图关键词例外；主动保存不受此长度限制。原始诊断证据仍可按 ID 检查。`operations.retention.audit_runtime_errors(memory)` 默认仅预览，显式 `apply=True` 也仅软停用全部证据均有错误标记的自动 Atom。旧版固定报错格式只生成 `review_atom_ids` / `review_candidate_ids` 审核清单；证据缺失或混合来源也保留待审，不自动改变这些记录的状态。
 

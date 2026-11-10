@@ -1,92 +1,78 @@
 # HANDOFF.md
 
-代码相关任务的文本澄清与接续入口。使用 Issue / PR 编号或简短标题识别任务，不以日期建流水账。
-有 Issue / PR 时链接正文，只在这里保留状态、关键结论和下一步；未开 Issue 时直接使用下方模板。
-已完成记录压缩或替换，稳定知识移入对应文档，历史由 Git / Issue / PR 保存。
+Clarification and continuation entry point for code work. Identify work by Issue/PR number or a short title, not a dated log.
+Link an existing Issue/PR and retain only status, key conclusions, and next steps here; otherwise use the template below.
+Compress or replace completed records, move durable knowledge to its owning document, and keep history in Git/Issues/PRs.
 
-## 任务模板
+## Current state
 
-- **任务 / 状态 / 链接**：待澄清 → 可实现 → 进行中 → 待验证 → 完成；阻塞时写明原因。
-- **问题与场景**：bug 的实际/预期行为及最小复现；新需求的使用者、场景和期望结果。
-- **范围与验收**：要做/不做、可验证条件、兼容性及数据影响。
-- **待澄清 / 假设**：哪些已确认，哪些影响实现；不能把未回答的问题记成确认。
-- **方案与关键文件**：最小实现、受影响调用链；重要取舍链接 DECISIONS。
-- **验证**：确切命令、实际结果、失败/skip/未覆盖，必要时附脱敏证据。
-- **接续**：当前进度、未解决风险、下一步；受影响文档是否同步。
+The current code baseline is **1.0.3**, as declared in `pyproject.toml`. The following work is merged and no longer
+awaiting review or release. Inclusion in the baseline does not mean the current environment has revalidated
+PostgreSQL, real hosts, or release artifacts.
 
-## 当前任务
+| Merged work | History | Durable knowledge and follow-up boundaries |
+|---|---|---|
+| Batched extraction, restart-persistent cursor, atomic candidate/cursor commit | [#25](https://github.com/TencentCloud/octop-memory/issues/25), [PR #29](https://github.com/TencentCloud/octop-memory/pull/29) | [Extraction and durable progress](PROJECT_MAP.md#extraction-and-durable-progress); rollback, retry, and restart checks in [TEST_MATRIX](TEST_MATRIX.md) |
+| Background manual-document review, public entry point, conservative legacy-audit upgrade | [PR #31](https://github.com/TencentCloud/octop-memory/pull/31), [PR #32](https://github.com/TencentCloud/octop-memory/pull/32), [PR #33](https://github.com/TencentCloud/octop-memory/pull/33) | [Manual document governance](PROJECT_MAP.md#manual-document-governance), ADR-042; hosts still register a scheduler/provider and need a version exposing public background review |
+| EntityPage conditional writeback and concurrent revision migration | [PR #24](https://github.com/TencentCloud/octop-memory/pull/24) | ADR-043, [page regeneration](PROJECT_MAP.md#page-regeneration); every writer and custom backend must maintain revision semantics |
+| Windows host globs, Hermes model configuration, installation instructions | [PR #26](https://github.com/TencentCloud/octop-memory/pull/26), [PR #15](https://github.com/TencentCloud/octop-memory/pull/15), [PR #16](https://github.com/TencentCloud/octop-memory/pull/16) | [Host files](PROJECT_MAP.md#host-files-and-migration), [integration guide](../integrations.md); real-host installation/lifecycle need separate checks |
 
-### 手动文档审计旧进度升级（PR #33）
+Earlier connection-capacity fixes, structured-error isolation, manual-document priority, and naming cleanup
+are part of the current implementation. See [PROJECT_MAP](PROJECT_MAP.md), ADR-037 through ADR-042, and
+[CHANGELOG](../../CHANGELOG.md). Historical test counts and private reproduction scenarios are not acceptance
+baselines for new work; consult their original PR/Git records.
 
-- **状态 / 链接**：修复、双后端验证及完整门禁通过，待 PR CI / 维护者复审；[PR #33](https://github.com/TencentCloud/octop-memory/pull/33)。
-- **问题与验收**：旧 develop 可写出 checked 已推进、status=uncertain 但没有 uncertain 字典的记录；新代码把字段缺失当空未决集合，读状态或再次对账误报 complete。旧 uncertain/complete 记录需保守重审，读取保持只读，按既有批次续查，新格式确认完成后不重复调用模型。
-- **⚠️ 召回/写入路径变更**：`operations/retention.py` 的审计读写仅在元数据含 uncertain 字典时信任 checked；缺字段时将活跃事实列为待审，首次有界对账写入新格式。事实、证据和已有冲突候选沿用原处理，数据表 schema 与公共 API 不变。
-- **验证**：`pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`，真实 SQLite/PostgreSQL 16，修复前 10 failed / 2 passed，修复后 12 passed；覆盖只读、旧两类状态、2+1 分批、重建 Service、空未决集合及无活跃事实。Python 3.12 下设置专用 TEST_POSTGRES_DSN 执行 `make all`，format/lint/strict mypy 通过，1565 passed / 12 skipped，PG 未 skip；其中 8 项 Harness 在真实 1.0.6 源码环境另行验证为 8 passed，其余 skip 为 dashboard extra、两个 Hermes checkout E2E 和 Linux /proc。
-- **接续**：PROJECT_MAP、TEST_MATRIX、DECISIONS、KNOWN_RISKS 与 CHANGELOG 已同步；README_AUDIT 的现有宿主契约保持一致。旧格式首次有额外比较成本，新格式按既有进度续查；仍需 PR CI / 维护者复审。
+## Continuing work
 
-### 提炼分批 + 游标持久化（#25）
+### SQLite checkpoint retention
 
-- **状态 / 链接**：实现与定向验证完成，待审阅；[octop-memory#25](https://github.com/TencentCloud/octop-memory/issues/25)。
-- **问题与场景**：`CandidateExtractor.extract` 把整个 session 的事件序列化进单次 LLM 调用（`_serialize_events_for_prompt` 无条数/字符上限），长会话积压（实测 prompt 约 8.9 万 token）直接触发「长度截断/超时」，记忆库停止增长；且「已提炼」游标只存内存，重启后整段重跑。
-- **范围与验收**：只在 `pipeline/extractor` 与 `application/runtime` 内改动，不改 schema / 公共 API。提炼按默认单批 ≤100 条且 ≤20,000 字符分批（`DEFAULT_MAX_EVENTS_PER_BATCH` / `DEFAULT_MAX_CHARS_PER_BATCH`，构造函数可覆盖），沿用 `retention.py` 的既有做法；单条超预算的事件仍自成一批，不丢事件。批间候选、warnings、cap_warning、llm_calls 合并；任一批失败即停并整体报 `failure_reason`（事件不标记、下次重试）。游标改为写入 `{ns}_meta` 的 `extracted_ids/v1/<session>`（复用 `get_meta`/`set_meta`），LRU 仍在但重启后从 meta 恢复，不再全量重跑；增量路径以 `strict=True` 持久化，游标写失败使整个事务回滚、候选写入一并撤销，事件留待重试，而非被默默跳过。
-- **验证**：`uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_runtime_error_retention.py tests/test_bridge_extract.py tests/test_extract_cursor_persistence.py -q` → **112 passed**（含重启后 `events_extracted==0`、重启后新增事件仍被提炼两项）；`uv run ruff check` / `ruff format --check` / `uv run mypy --strict src` 均通过（111 files）。
-- **接续**：逐批提交（失败时不回滚已成功批次）为后续项，本 PR 未改动。游标用 meta JSON 而非 `raw_events.extracted_at` 列，避免 SQLite/PostgreSQL 迁移；若维护者偏好列式游标可另行替换。
-### EntityPage 再生成的旧快照覆盖
+The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.
+A LangGraph regression reproduces message and custom-channel loss across two delta channels.
+The SQLite planner keeps each retained checkpoint's dependencies and preserves its ID, payload and pending writes.
+Lifecycle pruning plans and applies each thread under one saver transaction. Offline checkpoint maintenance uses
+the same dependency filter after selecting caller-approved candidates. PostgreSQL pruning remains unsupported.
 
-- **状态 / 场景**：[PR #24](https://github.com/TencentCloud/octop-memory/pull/24) 的原始实现与专项回归通过；维护者同步当前 `develop`，保留两侧文档，合并前完整门禁与 CI 在 PR 中记录。原实现可能在生成期间覆盖用户编辑、丢失事实 dirty 标记，或由迟到失败污染新页。
-- **范围与验收**：SQLite/PostgreSQL 同步增加 mutation_version，正文写入和 dirty 失效递增，失败计数不推进；生成成功/失败写回均在同条 SQL 核对读取版本。summary_version 含义保留，模型调用无长事务；旧快照拒绝写入、不伪造成功 journal，后续显式重试可成功。
-- **方案 / 假设**：事实变化使用既有 mark_entity_page_dirty 调用链；绕过该调用链的低层 Atom 写入不新增自动治理。已有页面自动补零版本列；低层 apply 方法新增可选条件参数，旧调用保持原行为。
-- **验证**：原实现 12 项交错用例失败；后续兼容/并发迁移先 3 failed / 2 passed，专项审查新增五项先全部失败。当前 `PageRegenerationConcurrency / PageRevisionBootstrap / LegacyPageBackend / ConcurrentPageRevisionMigration` 共 28 passed，真实 PG 无 skip。Ubuntu / Python 3.12.3 / 专用 PostgreSQL 16.15 执行 `make all RUN='<venv-python> -m'`，format/lint/strict mypy 通过，1533 passed / 3 skipped。跳过为 dashboard extra 和两个 Hermes checkout E2E；Windows 相关定向回归与文档/架构检查均通过。
-- **兼容 / 迁移**：普通调用保留旧 backend 签名；显式条件不支持时保留错误，不降级重放。SQLite BEGIN IMMEDIATE 保护检查/加列，PG 初始化锁内先查列、仅缺列时 ALTER；schema 标记 2，旧页正文和 summary_version 保留。第三方 backend 和所有写入进程仍须维护新契约，见 KNOWN_RISKS。
-- **接续**：PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT / CHANGELOG 已同步。以当前合并结果的完整门禁及 Python 3.12/3.13 CI 为合并依据，不以旧基线验证替代。先前 Windows 三项基线失败不纳入本修复，无门禁绕过。
-### Windows 宿主文件 glob 与 portable 测试隔离
+Validation on two local database copies at `keep_last=20` deleted 896 checkpoints and checked 904 survivors.
+DeepAgents message and file state replay matched for each survivor, and the copies had no new dangling links.
+Existing broken links remained present in the input and output. `make all` with dedicated PostgreSQL 16
+passed format, lint, strict mypy and 1,569 tests, with 12 skips. The fix is local and has not been released.
 
-- **状态 / 问题**：`/tmp/*.md` 在 Windows 有 root 而无 drive，`is_absolute()` 为 false，进入 `Path.glob` 后抛错；`C:topics/*.md` 同样不是安全相对 glob。portable 测试 fixture 假定 `str(Path)` 使用 `/`，Windows 上未隔离默认用户目录。
-- **方案 / 范围**：`application/host_files.py` 用 `Path.anchor` 拒绝带锚点模式；以 PureWindowsPath 在任意平台覆盖 rooted、drive-relative、absolute、UNC。fixture 按 `Path.parts` 展开 `~`，只修改测试隔离，不改变迁移扫描逻辑或数据。
-- **⚠️ 召回/写入路径变更**：仅影响 host Markdown 文件 allowlist：不安全模式在 glob 前跳过，安全相对模式照常索引；source、排序、记忆写入与双 backend contract 不变。
-- **验证**：修改前相关测试 6 failed / 19 passed；修改后 25 passed。`make all` format/lint/strict mypy 通过，1348 passed / 165 skipped；skip 包含不可用的真实 PostgreSQL、Hermes checkout、dashboard extra 与平台特定环境，不表示这些场景验收通过。
-- **接续**：PROJECT_MAP、TEST_MATRIX 和 CHANGELOG 已同步；待维护者审阅，无数据迁移。
+The aligned Harness uses its existing count/age policy, backup and vacuum settings, and passes
+`skip_pending=True` to both preview and pruning. It requires memory 1.0.4. Octop retires the v2 archive by
+migrating its history before starting maintenance. Offline migration still honors the caller's explicit
+`protected_ids` list. Checkpoint upserts keep existing IDs in place.
 
-### 后台手动文档审核公共入口（Octop #2358）
+A rehearsal on a SQLite copy matched all 764 surviving checkpoints. The dry run and actual pass
+removed 745 checkpoints and 1,112 writes. Octop returned identical history and trajectory pages for 52
+threads, preserved the next model input, and copied a 57-message prefix when forking from an old reply.
 
-- **状态 / 链接**：实现与本地验证完成，待审阅；[Octop #2358](https://github.com/TencentCloud/Octop/issues/2358)，接续 memory #31 / harness #110。
-- **问题与验收**：宿主检查 `MemoryService.review_new_memory` 时方法不存在，保存回调和维护拍均静默跳过审核。补公开转发，真实宿主两条路径须生成冲突候选并保留证据；阻塞模型时 save 须已返回；每批最多 20 条并可续查。
-- **范围**：`service.py` 公共入口、公共 API 与真实 Harness 跨包测试、CI/release 及相关说明。复用原 Runtime，不改 schema、语义审核规则、召回排序或后台调度。
-- **验证**：公共接口与跨包回归修复前 15 failed；修复后 `pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs` 247 passed。真实 Harness 固定提交 `84c1953`，`-k HarnessManualReview` 8 passed / 0 skipped，包含 SQLite 和专用 PostgreSQL。设置专用 `TEST_POSTGRES_DSN` 后 `make all RUN='.venv/bin/python -m'` 格式/lint/strict mypy 通过，1520 passed / 4 skipped；跨包测试只替换模型响应，未调用真实模型。
-- **接续**：发布包含本接口的 memory 版本后，宿主需提高最低依赖；旧版 1.0.2 不具备该公共入口。PROJECT_MAP / TEST_MATRIX / README 同步此契约。
+### Atom-only automatic recall
 
-### 手动档案与普通记忆协同（PR #20 / harness #76 / Octop #2103）
+- **Status:** [PR #41](https://github.com/TencentCloud/octop-memory/pull/41) merged into develop as e43ca72; not in released v1.0.3. Publishing is outside this delivery. Historical validation below belongs to that PR.
+- **Problem:** Raw-only matches can inject ordinary conversation; page summaries also bypass canonical-atom selection.
+- **Scope and acceptance:** Automatic Service/pipeline/Hermes/OpenClaw prefetch uses canonical atoms only, including optional vector atom hits. No matching atoms returns empty. Explicit tools retain multi-source/raw access; no model calls, schema changes, extraction changes, or historical deletion.
+- **Recall/write path change:** Source selection for automatic prompt injection changes; existing promoted facts and writes are unchanged. Cache separates source modes.
+- **Key files:** `pipeline/recall/__init__.py`, `application/runtime.py`, OpenClaw prefetch/prompt builder; ADR-044 and PROJECT_MAP document source boundaries.
+- **Validation:** `make all RUN='.venv/bin/python -m'` with dedicated PostgreSQL 16: format/lint/strict mypy pass, 1608 tests pass, 12 optional host cases skip. Focused Service/recall/retention/manual/Hermes/bridge/backend tests: 402 pass, 8 optional Harness cases skip. `pytest tests/test_backend_parity.py -k AtomOnlyRecall -q -rs` runs all 12 SQLite/real-PG cases without skips, including host-file exclusion. OpenClaw `npm test` passes 69 cases; `npm run typecheck` and `npm run build` pass.
+- **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
+- **Continuation:** PR #41 awaits a future release/adoption; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
 
-- **状态 / 场景**：三个仓库实现、验证和配套宿主提交已完成。用户明确要求 USER.md 与 MEMORY.md 只由用户修改；冲突时手动文档优先，通知用户并降级到 Candidate 更新 octop-memory。
-- **范围与验收**：复用既有 retention/runtime/promotion/recall 模块，无新 source 模块或 schema；原文引用校验，软停用冲突旧 Atom，替代事实候选保留两侧证据；重复 Atom 仅按实际聊天快照抑制召回；无模型/不确定不强制停用。低层 Memory.store 仍是原始存储 API；宿主通过 Service provider 或显式核对启用治理。
-- **方案**：见 ADR-042 / PROJECT_MAP。完整文档只保存对账元数据，不全文导入/索引；小型召回清单参与 cache key，阻止旧 raw/dirty headline 回流。候选采纳校验对账版本，Octop 同时提交当前文件，拦截保存后尚未核对的版本变化。单次 100 条未核对 Atom 可续查。
-- **验证**：`TEST_POSTGRES_DSN='dbname=octop_memory_retention_test' make all RUN='.venv/bin/python -m'` format/lint/strict mypy 通过，1483 passed / 4 skipped；真实 PG 均运行。专用 PG 与 SQLite 手动文档同组用例 8 passed；新增单测覆盖模型缺失/伪造/不确定、事务回滚、旧版本采纳、save/自动晋升、分批续查和 recall cache 隔离。四项 skip 为已有可选环境，非 PG。
-- **配套 / 接续**：harness 的文件工具写保护覆盖 USER.md/MEMORY.md，规则回归 AGENTS.md/BOOTSTRAP.md，原生统一 session 快照不变；Octop 复用强记忆编辑器新增用户档案、核对提示与候选跳转，支持停止 Agent。既有用户模板不会自动覆盖；外部宿主及旧版本候选处理边界见 KNOWN_RISKS。
+### Explicit remember classification
 
-### Octop #2060：多 agent 文件描述符与 PostgreSQL 连接容量
+- **Status:** Validated on `fix/manual-memory-kind` in memory and Harness; pending PR review against develop. Unreleased.
+- **Problem / acceptance:** Explicit remember saves hardcoded Fact even for preferences, decisions and tasks. Add optional caller-selected kind, preserve all four types through the real tool/Service/store chain and dashboard filtering/statistics without an extra classifier call. Legacy omission remains Fact; no historical reclassification, schema migration, reminder scheduling, or changes to extraction/recall algorithms.
+- **⚠️ Recall/write path change:** Manual L0 evidence → Candidate.candidate_type → canonical Atom; type is independent of entity/topic. Invalid/conflict kinds reject before writes. Preserve user protection, rollback and asynchronous review callbacks. See ADR-045.
+- **Key files / consumers:** `core.py`, `service.py`, dual-backend tests; companion Harness `builtin/tools/memory_tools.py` and `memory/policy.py`. Octop already reads Candidate type for display; no UI/schema edits. Install/release the memory API before adopting typed saves in a released host; old libraries explicitly reject typed tool saves and retain legacy Fact saves.
+- **Validation:** New regressions failed before implementation (8 SQLite write failures and 10 tool/policy failures). Focused real-source Harness tests: 83 passed; dedicated SQLite/PostgreSQL `-k ManualMemoryKind`: 22 passed, no skips. `TEST_POSTGRES_DSN=<dedicated-test-db> make all RUN='.venv/bin/python -m'`: memory 1640 passed, 4 environment/optional cases skipped, strict mypy/ruff clean. Harness `make all RUN='.venv/bin/python -m'`: 1989 passed, 28 optional/environment skips, mypy/ruff clean. Both environments load changed memory source based on e43ca72 and changed Harness source based on 33b6d02, not an old installed library. No classification or PostgreSQL cases skip; actual conversation-model type-choice quality is not independently evaluated by these deterministic tests.
+- **Continuation:** Create linked English-title PRs into develop, synchronize bilingual GitHub Wiki development status and the workbench. Supporting dependency version is deferred until the library release exists; do not publish either package in this task.
 
-- **状态 / 链接**：SQLite 与 PG 实现、本仓和宿主验证完成，待审阅及发布；[Octop#2060](https://github.com/TencentCloud/Octop/issues/2060)、[memory PR#19](https://github.com/TencentCloud/octop-memory/pull/19)。
-- **问题与场景**：SQLite 按线程缓存连接，常驻 worker 接触多个 agent 后保留“线程 × agent”条连接；69 个实例可耗尽 1024 fd，旧 close 还会打断在途事务。PG 每 agent 一条业务连接加独立 checkpoint 池，69 个活跃实例达到 138 条会话；真实 PG `max_connections=100` 时第 31 个 checkpoint 超时，空闲回收挡不住活跃峰值。
-- **范围与验收**：SQLite 每 backend 一条连接，完整 SQL/事务共用可重入锁，close 等待且不重开。PG 同一进程与连接配置共享业务 8 条、checkpoint/维护 4 条预算，显式事务保留一条连接；checkout 有界等待，关闭一实例不影响其它实例，最后引用关闭池。SQLite checkpoint 仍独立；schema、召回 source/排序和 public API 不变。
-- **方案与关键文件**：`storage/backends/sqlite.py` 的操作锁与失败回滚；内部 vacuum/WAL truncate/export 遵守锁。`postgres_pool.py` 管理共享池、引用租约与初始化串行；`postgres.py` 借用连接，`core.py` 失败时释放 checkpoint 租约，导出与 PG 维护进入池预算。取舍见 ADR-039/040。
-- **验证**：使用专用 `TEST_POSTGRES_DSN` 执行 `make all RUN='uv run --offline --no-sync'`，format、lint、strict mypy 均通过，pytest 为 1420 passed / 4 skipped；真实 PG 用例均运行。跳过项为 Linux `/proc`、两项 Hermes checkout E2E 和 dashboard extra。新增真实 PG 容量、排队/超时恢复、坏连接探测、空闲回收、初始化失败、跨 agent 事务与幂等关闭断言替代旧连接私有字段 mock。Octop 加载新源码的定向联调 95 passed，包含 6 项真实 PG 维护测试。
-- **宿主容量复现**：SQLite 69 个真实 MemoryRuntime 在 soft NOFILE=1024 下，4/8 worker 访问及 30 次重建维持 348 fd，全部关闭回到 3。PG 在服务端 100 连接、进程 1024 fd 限制下，69 个真实 MemoryRuntime 创建/全部 checkpoint 预热分别仅占 1/2 条会话，8 worker 混合访问峰值 12；30 次重建不增长，关闭一个实例后其它实例仍可用，全部关闭会话归零且 fd 回到 3。
-- **接续**：CI/release 已配置专用 PG，显式测试 DSN 不可用时失败。无数据迁移；慢 SQL/长事务会占用池，饱和明确报错。预算按进程与连接配置计数，宿主控制面另计。发布后 Octop 需更新 memory 依赖才能消费修复。PROJECT_MAP、DECISIONS、TEST_MATRIX、KNOWN_RISKS 与中英文 README 已同步。
 
-### 系统运行报错的记忆隔离（PR #20）
+## Task template
 
-- **状态 / 用户决策**：最小实现与完整验证完成。主动记忆由 Agent 自行调用 memory_save；删除记忆意图和排障价值关键词，在线报错仅按结构化来源排除，存量来源不明保留待人工审核。
-- **范围与验收**：只改 `domain/retention.py`、`application/runtime.py`、`operations/retention.py` 三个既有源码模块。移除短消息意图例外，不改变长度阈值；memory_save 的手工保存不受后台采集长度限制。capture / 两类 extractor / promotion / raw recall 复用仅结构化来源规则。没有新模块、schema、前端或 retry 策略变更。
-- **治理边界**：自动停用须全部引用证据均为结构化错误；人工保存/批准/编辑由来源保护。旧版严格报错信封仅在存量 operations 生成审核提示；缺失/混合来源返回 `review_atom_ids` / `review_candidate_ids`，即使 apply 也不改变这些记录的状态，不自动新增 UI 待办。不删除原始证据。见 ADR-012/041、KNOWN_RISKS。
-- **验证**：先用新增用例复现旧行为（6 failed / 3 passed），修改后定向 154 passed / 1 optional skip；SQLite/真实专用 PostgreSQL 同组治理 28 passed（PG 未 skip），覆盖未知来源保留、结构化停用、无意图词保存、原证据、幂等与事务回滚。配套 harness 记忆工具/中间件/重试检查 60 passed。`TEST_POSTGRES_DSN='dbname=octop_memory_retention_test' make all RUN='.venv/bin/python -m'` format/lint/strict mypy 通过，1504 passed / 4 optional skips，真实 PG 全部执行；文档/架构检查 41 passed。
-- **接续**：现有工作区文档和手动记忆协同保持原行为；PROJECT_MAP / DECISIONS / TEST_MATRIX / KNOWN_RISKS / README_AUDIT 与中英文 README 已同步。不会自动回滚已有人工决策或运行生产数据治理。
-
-### Octop 命名收尾
-
-- **状态**：命名清理完成；真实 PostgreSQL、Hermes checkout 和 dashboard 可选环境未验。
-- **问题与场景**：发行包已更名，宿主示例、评测数据、迁移说明和 portable 扫描路径仍有旧项目名称。
-- **范围与验收**：源码、测试、评测及文档统一使用 `octop-memory` / `octop-harness`；全仓检查两者旧名称及分隔符变体无残留。保留现有 README 改动，不改持久化编码、表名或包格式，不搬移用户数据库。
-- **方案与关键文件**：更新 `service.py` 的宿主说明、portable `models.py` 的 Agent 扫描路径、CLI help 和迁移指南；测试使用临时目录验证默认发现和显式扫描旧位置。删除旧包目录中未使用的生成版本文件；修正 portable dry-run / recall 测试的默认用户库访问，补全 `_PKG_ERRORS` 的类型标注以通过 strict mypy，异常捕获范围不变。
-- **影响**：portable 改为发现 `~/.octop-harness/*/memory.sqlite`；旧位置需显式提供 `extra_paths` 或先迁移目录。主召回 source/排序、事实写入与双 backend 数据契约不变。
-- **验证**：相关测试 183 项通过；fixture 修复后的 portable/recall 子集 32 项通过。`PYTEST_ADDOPTS=-rs make all RUN='.venv/bin/python -m'` 通过 format、lint、strict mypy，pytest 为 1268 passed / 132 skipped（129 项 PostgreSQL 不可用、2 项缺少 Hermes checkout、1 项缺少 dashboard extra），不代表这些环境通过验收。`uv build --offline` 构建 wheel/sdist 成功；源码文件名、内容及构建包的旧名称检查无残留。OpenClaw 的 `npm test` 启动器因沙箱 IPC 限制失败，改用 `node --import tsx --test src/*.test.ts` 后 67 项通过，`npm run typecheck` / `npm run build` 通过。`ruff check evals examples` 和 routing 数据集 JSON 解析通过。
-- **接续**：PROJECT_MAP / TEST_MATRIX / README_AUDIT 与集成指南已同步，KNOWN_RISKS 移除已修复的测试默认库访问项。需要环境验收时，配置专用 `TEST_POSTGRES_DSN`、Hermes checkout 与 dashboard extra，再运行 TEST_MATRIX 对应命令；本次未更改 backend SQL、事务或持久化协议。
+- **Task / status / links:** Needs clarification → Ready → In progress → Awaiting validation → Complete; name any blocker.
+- **Problem and scenario:** Actual/expected bug behavior and minimal reproduction, or users, scenario, and desired result.
+- **Scope and acceptance:** Included/excluded work, verifiable criteria, compatibility, and data effects.
+- **Questions / assumptions:** Separate confirmed facts from unresolved issues; never record an unanswered question as confirmed.
+- **Approach and key files:** Minimal implementation, affected call chain, and links to DECISIONS for important tradeoffs.
+- **Validation:** Exact commands, actual results, failures/skips/uncovered cases, and sanitized evidence when needed.
+- **Continuation:** Current progress, unresolved risks, next steps, and whether affected documents are aligned.

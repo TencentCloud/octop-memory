@@ -82,7 +82,7 @@ def test_conflict_is_quarantined_and_replacement_is_a_review_candidate(memory: M
     assert candidate.assertion == docs["USER.md"]
     assert candidate.payload["manual_document"] == "USER.md"
     assert candidate.payload["demoted_atom_id"] == old.id
-    assert not recall_for_prompt(memory, "English", raw_policy="always").snippets
+    assert not recall_for_prompt(memory, "English", raw_policy="always", atom_only=False).snippets
     again = service.reconcile_manual_documents(docs)
     assert again["conflicts"] == 1 and llm.calls == 1
     assert len(memory.list_candidates(status="conflict")) == 1
@@ -308,9 +308,13 @@ def test_audit_invalidates_previously_cached_raw_recall(memory: Memory) -> None:
 
     memory.store("The user prefers English replies.")
     cache = RecallCache()
-    assert recall_for_prompt(memory, "English", thread_id="t", raw_policy="always", cache=cache).snippets
+    assert recall_for_prompt(
+        memory, "English", thread_id="t", raw_policy="always", atom_only=False, cache=cache
+    ).snippets
     MemoryService(memory, llm=ManualLLM()).reconcile_manual_documents({"USER.md": "The user prefers Chinese replies."})
-    assert not recall_for_prompt(memory, "English", thread_id="t", raw_policy="always", cache=cache).snippets
+    assert not recall_for_prompt(
+        memory, "English", thread_id="t", raw_policy="always", atom_only=False, cache=cache
+    ).snippets
 
 
 def test_recall_cache_distinguishes_context_even_before_the_first_audit(memory: Memory) -> None:

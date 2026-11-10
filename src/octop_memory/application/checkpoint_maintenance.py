@@ -3,7 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from octop_memory.core import Memory
+    from octop_memory.pipeline.lifecycle.checkpoint_gc import CheckpointGcStats
+
+__all__ = ["maintain_checkpoints", "run_checkpoint_retention", "slim_live_checkpoints"]
+
+
+def run_checkpoint_retention(memory: Memory, *, keep_last: int) -> CheckpointGcStats | None:
+    """Run dependency-aware host retention on completed SQLite threads.
+
+    Return None for other backends, whose checkpoint stores are outside this maintenance.
+    """
+    from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
+
+    if not isinstance(getattr(memory, "backend", None), SqliteMemoryBackend):
+        return None
+
+    from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
+
+    return prune_checkpoints(memory, keep_last=keep_last, skip_pending=True)
 
 
 def maintain_checkpoints(db_path: Path, *, backend: str = "sqlite", **options: Any) -> dict[str, Any]:

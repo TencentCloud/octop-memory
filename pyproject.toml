@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "octop-memory"
-version = "1.0.3"
+version = "1.0.4"
 description = "Pluggable memory system with hierarchical recall, FTS search, and multiple backend support."
 readme = "README.md"
 license = { text = "MIT" }
@@ -105,7 +105,9 @@ include = [
     "/AGENTS.md",
     "/CONTRIBUTING.md",
     "/SECURITY.md",
+    "/docs/README.md",
     "/docs/integrations.md",
+    "/docs/integrations_CN.md",
     "/docs/agent/*.md",
     "/assets/images/banner.jpeg",
 ]

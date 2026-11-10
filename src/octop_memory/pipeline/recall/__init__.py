@@ -1,12 +1,13 @@
-"""Recall path: query → atom (primary) + raw fallback → prompt-injectable text.
+"""Automatic atom recall and explicit multi-source search.
 
-The L2 atom layer is the **primary** recall source, with raw events kept as a
-**fallback** for things that haven't been promoted yet. The output is a single
+``recall_for_prompt`` defaults to canonical atoms only, including optional
+vector atom hits. Explicit tool search sets ``atom_only=False`` to enable
+multi-source routing with raw fallback. The output is a single
 ``RecallResult`` with each snippet tagged by the layer it came from, so adapters
 can render or trace per-layer. A single-source raw FTS recall is still available
 via ``sources=("raw",)``.
 
-Order of operations (default ``sources=("atom","raw")``):
+The legacy ``recall_multi_source`` helper keeps its existing behavior:
 1. FTS5 search atoms; collect up to ``limit`` snippets, ranked by
    importance + BM25.
 2. If atoms returned fewer than ``limit`` snippets, top up with raw
@@ -307,7 +308,7 @@ exposed as a constant so dogfood scripts can reference it."""
 RawPolicy = Literal["fallback", "never", "always"]
 """How raw transcript participates in ``recall_for_prompt``.
 
-``fallback`` (default, auto-inject): keep raw only when no durable
+Only applies when ``atom_only=False``. ``fallback`` (default): keep raw only when no durable
 (atom / page / episode) candidate exists. ``never`` drops raw always.
 ``always`` keeps raw mixed in — used by ``memory_search`` when the
 runtime config asks for it. The eval baseline ``recall_multi_source``
@@ -332,9 +333,15 @@ def recall_for_prompt(
     cache: object | None = None,
     now: datetime | None = None,
     raw_policy: str = "fallback",
+    atom_only: bool = True,
     manual_context: dict[str, str] | None = None,
 ) -> RecallResult:
-    """Full recall pipeline.
+    """Recall canonical atoms for automatic prompt injection.
+
+    ``atom_only=True`` restricts gathering to atoms (including optional
+    vector atom hits). No raw, page, or episode fallback runs when there
+    are no matching atoms. Explicit search callers use ``atom_only=False``
+    to retain multi-source routing and the supplied ``raw_policy``.
 
     Stages:
 
@@ -376,6 +383,7 @@ def recall_for_prompt(
             cache=cache,
             now=now,
             raw_policy=raw_policy,
+            atom_only=atom_only,
             manual_context=manual_context,
         )
     except DRIVER_ERRORS:
@@ -398,6 +406,7 @@ def _recall_for_prompt_impl(
     cache: object | None,
     now: datetime | None,
     raw_policy: str,
+    atom_only: bool,
     manual_context: dict[str, str] | None,
 ) -> RecallResult:
     from datetime import UTC
@@ -423,10 +432,19 @@ def _recall_for_prompt_impl(
     typed_cache: RecallCache | None = cache if isinstance(cache, RecallCache) else None
     manual_policy = memory.get_meta(MANUAL_DOCUMENTS_RECALL_KEY)
     cache_thread = thread_id
-    if thread_id is not None and (manual_policy or manual_context):
-        cache_revision = (manual_policy or "") + json.dumps(manual_context, sort_keys=True)
+    if thread_id is not None:
+        cache_revision = json.dumps(
+            {
+                "atom_only": atom_only,
+                "raw_policy": raw_policy,
+                "session_id": session_id or thread_id,
+                "manual_policy": manual_policy,
+                "manual_context": manual_context,
+            },
+            sort_keys=True,
+        )
         suffix = hashlib.sha256(cache_revision.encode()).hexdigest()
-        cache_thread = f"{thread_id}:manual:{suffix}"
+        cache_thread = f"{thread_id}:recall:{suffix}"
     if typed_cache is not None and cache_thread is not None:
         hit = typed_cache.get(thread_id=cache_thread, query=query)
         if hit is not None:
@@ -437,8 +455,9 @@ def _recall_for_prompt_impl(
     # 2-3. Parse + route -----------------------------------------------
     parsed = parse_query(query, now=pin)
     decision = route(memory, parsed, thread_id=thread_id)
+    sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
 
-    if not decision.sources:
+    if not sources:
         return RecallResult(snippets=[], rendered="")
 
     # 4. Push query mentions -------------------------------------------
@@ -457,7 +476,7 @@ def _recall_for_prompt_impl(
     candidates = gather_candidates(
         memory,
         parsed,
-        sources=decision.sources,
+        sources=sources,
         per_source_limit=max(limit * 4, 10),
         sw=sw,
         entity_anchor_ids=decision.resolved_entity_ids,

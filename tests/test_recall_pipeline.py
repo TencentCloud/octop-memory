@@ -224,12 +224,13 @@ class TestStrictInjectRaw:
             limit=10,
             now=_NOW,
             raw_policy="always",
+            atom_only=False,
         )
         layers = {s.layer for s in result.snippets}
         assert "atom" in layers
         assert "raw" in layers
 
-    def test_raw_fallback_uses_other_session_when_no_atoms(self, tmp_path: Path) -> None:
+    def test_auto_recall_returns_empty_when_only_raw_matches(self, tmp_path: Path) -> None:
         backend = SqliteMemoryBackend(namespace="raw-only", db_path=tmp_path / "raw.sqlite")
         mem = Memory(namespace="raw-only", backend=backend)
         _add_raw(
@@ -240,6 +241,10 @@ class TestStrictInjectRaw:
             thread_id="thr-old",
         )
         result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", limit=5, now=_NOW)
+        assert result.snippets == []
+        assert result.rendered == ""
+        # Explicit search can still retrieve the original evidence.
+        result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", now=_NOW, atom_only=False)
         assert [s.source_id for s in result.snippets] == ["raw-older"]
         assert result.snippets[0].layer == "raw"
 
@@ -253,7 +258,7 @@ class TestStrictInjectRaw:
             session_id="s-now",
             thread_id="thr-now",
         )
-        result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", limit=5, now=_NOW)
+        result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", limit=5, now=_NOW, atom_only=False)
         assert result.snippets == []
         assert result.rendered == ""
 
@@ -267,7 +272,7 @@ class TestStrictInjectRaw:
             session_id="thr-now",
             thread_id=None,
         )
-        result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", limit=5, now=_NOW)
+        result = recall_for_prompt(mem, "darkmode theme", thread_id="thr-now", limit=5, now=_NOW, atom_only=False)
         assert result.snippets == []
 
     def test_skips_raw_from_same_session_other_thread(self, tmp_path: Path) -> None:
@@ -285,6 +290,7 @@ class TestStrictInjectRaw:
             "darkmode theme",
             thread_id="thr-now",
             session_id="sess-now",
+            atom_only=False,
             limit=5,
             now=_NOW,
         )

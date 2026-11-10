@@ -100,6 +100,7 @@ describe("makeHybridRecallPrefetcher", () => {
         maxResults: 5,
         corpus: "all",
         thread_id: "thread-123",
+        atomOnly: true,
       },
     });
     assert.equal(results[0]?.path, "atom/atm_billing.md");
@@ -131,6 +132,23 @@ describe("makeHybridRecallPrefetcher", () => {
 
     assert.deepEqual(await prefetch({ availableTools: new Set(), citationsMode: "auto" }), []);
     assert.equal(calls.length, 0);
+  });
+
+  it("excludes raw, page and host-file results from automatic injection", async () => {
+    const cfg = resolveEffectiveConfig({ recall: { mode: "hybrid" } });
+    const { bridge } = makeBridge({ hits: [
+      { path: "raw/chat.md", layer: "raw", snippet: "Old conversation." },
+      { path: "page/project.md", layer: "page", snippet: "Project summary." },
+      { path: "MEMORY.md", layer: "host_file", snippet: "Host document." },
+      { path: "atom/fact.md", layer: "atom", snippet: "Canonical fact." },
+    ] });
+    const prefetch = makeHybridRecallPrefetcher(cfg, async () => bridge);
+    assert.deepEqual((await prefetch(baseCtx)).map(result => result.path), ["atom/fact.md"]);
+    const existing = [
+      { path: "raw/chat.md", layer: "raw", snippet: "Old conversation." },
+      { path: "atom/fact.md", layer: "atom", snippet: "Canonical fact." },
+    ];
+    assert.deepEqual(await prefetch({ ...baseCtx, recallResults: existing }), [existing[1]]);
   });
 
   it("warns and falls back to empty results when bridge fails", async () => {

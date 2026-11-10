@@ -1,33 +1,93 @@
 # KNOWN_RISKS.md
 
-只记录仍影响维护的风险：触发条件、影响、应对与验证。修复后删除失效描述或保留简短 Resolved 条目和对应 PR。
+Keep risks that still affect maintenance: triggers, effects, mitigations, and validation.
+Remove obsolete descriptions after a fix, or retain a short Resolved note with its PR.
 
-- EntityPage 的修订校验依赖所有写入者维护 mutation_version。升级需同步更新使用该库的写入进程；旧版本进程或直接 SQL 绕过修订/dirty 调用链时不提供同样保证。未指定版本条件的旧页接口保留原 backend 调用方式；自定义 backend 使用自动再生成须实现新增条件参数与修订维护，不能忽略条件或将错误降级成无条件重放。旧结果被拒绝后不立即重试，dirty 页由宿主后续触发；clean 页上的较新用户编辑/生成结果保持 clean。
-- 后台手动文档审核需要宿主注册非阻塞 scheduler，并在 worker / 维护拍调用公共 `MemoryService.review_new_memory`。仅升级宿主而保留旧 memory 1.0.2 会缺少该入口并跳过审核；发布本修复后宿主应提高最低依赖。该公开方法同步执行一批模型调用，不能直接放回用户保存路径。
+## Writes, extraction, and review
 
-- 手动文档语义对账依赖辅助模型；只接受原文引用、明确主体/范围和高置信结果，不确定/失败不强制停用。单次最多 100 条未核对 Atom、100,000 文档字符，宿主需呈现 partial/uncertain/unavailable 状态并支持续查。外部宿主未注册 provider 时，仅显式对账生效。外部文件并发写依赖宿主 freshness callback；采纳需传当前文档，底层 worker 至少校验最后对账版本。旧版本候选保留审计但不可直接采纳，需拒绝并核对新版。冲突 raw 整条从自动 fallback 排除，其中混合的其它事实仍可经有效 Atom/直接证据读取；不批量删除历史 Episode。见 ADR-042。
-- 审计元数据缺少 `uncertain` 字典的旧库需一次保守重审，包含旧报告为 complete 的情况；历史进度无法区分已验证与仅比较，因此会有额外模型成本。状态读取只列为待审，对账仍遵守现有批次上限；新格式写入后按正常进度续查，不每轮清零。
+- The 20,000-character extraction budget estimates content plus overhead; it is not a strict prompt/token limit.
+  An oversized event still forms its own batch and can exceed model limits. Runtime reads at most 10,000 session
+  raw events per call, not necessarily all history. Any model-batch failure prevents all candidate/cursor commits
+  for that pass, so retries can repeat model cost. Promotion, pages, and Episodes run after that commit;
+  the cursor is not an all-stages-success marker. See extraction checks in TEST_MATRIX.
+- Low-level `extract_session(..., persist=True)` persists returned partial candidates without checking the overall
+  `failure_reason` and does not maintain the Runtime cursor. Hosts needing incremental rollback semantics use
+  Service/Bridge extract; direct extractor callers inspect the result before persisting it.
+- EntityPage revision protection depends on every writer maintaining mutation_version. Upgrade all writing processes;
+  old processes or direct SQL bypassing revisions/dirty invalidation do not have the same guarantee.
+  Legacy page APIs without a version condition retain their old backend call form. Custom backends used for automatic
+  regeneration must implement conditional parameters and revision maintenance; never ignore a guard or retry unconditionally.
+  Rejected stale results are not immediately retried. Hosts later trigger dirty pages; newer clean user/generated pages stay clean.
+- Background manual-document review requires a nonblocking host scheduler/provider and a worker/maintenance call to
+  `MemoryService.review_new_memory`. The entry point is available from 1.0.3; a host upgrade retaining memory 1.0.2
+  lacks it and skips review. Raise the host's minimum dependency. The method synchronously calls the model and must
+  not return to the user-facing save path.
+- Semantic reconciliation needs an auxiliary model. Only exact source quotations, explicit subject/scope, and high-confidence
+  conclusions can deactivate facts; failures/uncertainty do not. Calls inspect at most 100 unchecked atoms and 100,000 document
+  characters. Hosts must expose partial/uncertain/unavailable states and continuation. Without a provider, external hosts only
+  reconcile explicitly. Concurrent file updates require a host freshness callback. Adoption should supply current documents;
+  the lower-level worker at least checks the last reconciliation version. Old-version candidates remain auditable but cannot be
+  adopted directly: reject and reconcile the new version. Conflicting raw events are excluded wholesale from automatic fallback;
+  other mixed facts remain reachable through valid atoms/direct evidence reads. Historical Episodes are not bulk-deleted. See ADR-042.
+- Legacy audit metadata without an `uncertain` dictionary needs one conservative re-audit, including records previously reported
+  complete. Old progress cannot distinguish comparison from verification, so additional model cost is expected.
+  Status reads only calculate pending work; reconciliation remains bounded and resumes normally after writing the new format.
+- Unmarked synthetic errors cannot reliably be distinguished from ordinary chat, so online paths retain them; not all historical
+  errors are isolated. Main octop-harness/Octop paths raise exceptions; custom hosts synthesizing replies must mark
+  `payload.octop_runtime_error=true`. Legacy fixed error text only produces review hints. Missing/mixed evidence yields read-only
+  review_*_ids, not new UI tasks or automatic deactivation. Manual saves/approval/edits are protected by provenance, not wording. See ADR-041.
 
-- PG 共享池预算仅覆盖同一进程、同一连接配置；多进程、不同配置和宿主控制面要额外预留服务端连接。长事务会占用业务池，饱和时有界等待后报错，不会无限扩容。CI/release 已使用专用 PG；本地未配置测试服务的 skip 仍不算 PG 验收。
+## Storage and maintenance
 
-- 未带结构化标记的合成报错无法可靠区别于正常对话，在线链路保留，不能声称已隔离所有旧报错。octop-harness / Octop 主路径已抛出异常；自定义宿主仍合成错误时必须传 `payload.octop_runtime_error=true`。旧版固定报错格式仅用于存量审核提示；缺失/混合来源的 review_*_ids 是只读清单，不是新增 UI 待办或自动停用，需人工核对。手工保存/批准/编辑不按措辞推断。见 ADR-041。
+- Shared PG pool budgets apply only within one process and connection configuration. Reserve additional server capacity for
+  other processes, configurations, and host control-plane connections. Long transactions occupy the business pool;
+  saturation waits for a bounded time, then errors rather than growing indefinitely. CI/release uses dedicated PG;
+  a local environment skipping unavailable services is not PG acceptance.
+- `run_gc()` retention currently supports SQLite only; PG returns empty statistics. This is an existing capability gap.
+  Row deletion, checkpoint retention, and physical reclamation are different operations; none proves a host schedules them automatically.
+- Checkpoint pruning and content deduplication/expansion support SQLite only. PG explicitly rejects these paths and uses its original
+  saver. Do not equate PG vacuum with checkpoint retention; see [checkpoint maintenance](../../CONTRIBUTING.md#checkpoint-maintenance).
+- Without PostgreSQL `btree_gin`, indexes fall back to plain GIN. Namespace filtering stays correct but performance isolation weakens.
+  Shared checkpoint maintenance needs database-wide scope checks; even ordinary VACUUM cannot promise no lock waits.
+- Some SQLite runtimes report `attempt to write a readonly database` during read-only FTS checks.
+  Verify engine compatibility rather than skipping integrity checks.
 
-- `run_gc()` retention 当前仅 SQLite 实现，PG 返回空统计，是待修复的既有能力缺口。
-  删除行、checkpoint retention 和物理空间回收是不同操作；不能据此推断宿主已自动调度。
-- PostgreSQL 的 `btree_gin` 不可用时退回普通 GIN，namespace 过滤正确性保留，性能隔离减弱。
-  共享 checkpoint 表维护需 database 级范围判断；普通 VACUUM 也不能承诺无锁等待。
-- recall 墙钟预算可能受机器负载影响；超时失败需区分调度抖动与实际召回回归。
-- dashboard 直接访问 SQLite 且不在 wheel 内。可选依赖版本、大库迁移耗时和真实 host hook 需要单独验证。
-- 部分 SQLite 运行时的只读 FTS 检查可能报 `attempt to write a readonly database`；先验证引擎兼容性，不跳过完整性检查。
-- Hermes 的安装解释器、`.pth` 位置和 standalone 与 installer 分发方式需要分别验收；OpenClaw hybrid 依赖真实 host 调用 prefetch。
-- 合成 recall eval 的标签、时间与小样本限制见 TEST_MATRIX，尚不能作为正式质量门禁。
-- 驱动、I/O 和 payload 错误会降级。其它异常会抛回调用方。未列入 `VECTOR_ERRORS` 的向量客户端错误不会被吞掉。见 ADR-038。
-- `scripts/memory-slim --online` 依赖同级 Octop checkout，且脚本优先使用其虚拟环境。
-  独立用户使用 `octop-memory db slim`。在线维护仍需宿主协调。
-- `deploy-openclaw.sh` 会安装依赖、更新 checkout、替换插件目录。`--setup-dry-run` 只预览配置步骤。
-  部署和真实宿主 E2E 需在专用环境另验。
+## Host integration and distribution
 
-## 已有安装的迁移
+- Hermes `llm`/`extraction` configuration only forwards capabilities to Runtime. Current `sync_turn()`, `on_memory_write()`, and
+  `on_pre_compress()` only capture; they do not extract automatically. Additional host scheduling must call extract explicitly.
+  Configuring a model alone does not generate atoms. Shutdown joins each thread for at most 5 seconds and does not close the
+  Memory backend; inspect slow tasks and resource release separately. See the [provider](../../plugins/hermes/octopmemory/__init__.py)
+  and [integration guide](../integrations.md#hermes).
+- `HostFilesIndex` remains a SQLite sidecar with PG memory. Scanning files is not semantic document review.
+  `MemoryService.recall()` and Hermes prefetch call prompt recall directly, without automatically applying all Runtime
+  tool-search configuration or host-file sources.
+- Hermes/Python Runtime does not expand profile policies. Setting `profile="privacy"` alone does not tighten capture/redaction.
+  Set policies explicitly and inspect stats. OpenClaw's TS profile table applies only to that plugin.
+- The dashboard accesses SQLite directly and is absent from the wheel. Optional-dependency versions, large migrations,
+  and real host hooks require separate validation.
+- Validate Hermes installation interpreters, `.pth` locations, and standalone versus installer distributions separately.
+  OpenClaw hybrid recall depends on a real host invoking prefetch.
+- `scripts/memory-slim --online` depends on an adjacent Octop checkout and prefers its virtual environment.
+  Standalone users use `octop-memory db slim`; online maintenance still requires host coordination.
+- `deploy-openclaw.sh` installs dependencies, updates the checkout, and replaces plugin directories.
+  `--setup-dry-run` previews configuration steps only. Deployment and real-host E2E require dedicated environments.
 
-源码使用当前发行包、插件 ID、环境变量、默认目录和 PG schema。旧安装不会自动迁移。
-步骤见 [集成指南](../integrations.md#更名与已有安装迁移)，存储协议取舍见 ADR-037。
+## Retrieval quality and validation
+
+- Atom-only injection removes raw/page fallback, not low-value or off-topic atoms already promoted. Relevance admission,
+  independent durable-value checks, and negative-query evaluation remain follow-up work. No additional model call is introduced.
+- Hermes captures raw without automatic extraction; its prefetch stays empty until canonical atoms exist through save or promotion.
+- Machine load affects recall wall-clock budgets. Distinguish scheduling jitter from actual retrieval regressions when investigating timeouts.
+- Chroma/Qdrant adapters currently have fake/mock coverage, not real vector-backend acceptance.
+  Installing an extra does not initialize/inject an index or enable vector recall.
+- Synthetic recall evaluation is not a production quality gate; see its labels, time sensitivity, and sample limitations in
+  [TEST_MATRIX](TEST_MATRIX.md#validation-boundaries).
+- Driver, I/O, and payload errors degrade according to each entry point's exception tuples; other exceptions propagate.
+  Vector-client exceptions absent from `VECTOR_ERRORS` are not swallowed. See ADR-038.
+
+## Existing installation migration
+
+Source uses current distribution/plugin names, environment variables, default directories, and PG schema.
+Existing installations do not migrate automatically. Follow the
+[integration guide](../integrations.md#renaming-and-migrating-existing-installations); persistent-format choices are in ADR-037.
