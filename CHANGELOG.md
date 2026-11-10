@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.4] - 2026-11-10
-
 ### 修复
 
 - SQLite checkpoint 裁剪保留每个恢复点依赖的快照、写入和原有 ID。离线维护仍可通过调用方提供的名单保护指定快照。
