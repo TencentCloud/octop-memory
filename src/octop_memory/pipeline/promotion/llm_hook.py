@@ -101,6 +101,41 @@ assertion B: {b!r}
 OUTPUT (JSON only):
 """
 
+_CLASSIFY_PAIR_PROMPT = """\
+You classify the relationship between two short factual claims about the
+same subject. A is the NEWER claim (just extracted); B is older.
+
+Output JSON ONLY: {{"relation": "contradiction" | "update" | "unrelated" | null}}
+
+Definitions — apply in this order:
+
+1. "unrelated" — A and B are not about the same attribute of the same
+   subject. Sharing a topic or words is NOT enough.
+     "gateway port is 8791" vs "the memory store lives in ~/.hermes"
+       → unrelated
+2. "update" — they state DIFFERENT VALUES for the same attribute, so the
+   newer state replaces the older. This includes A declaring the change
+   (改用 / 改为 / 已 / 现在 / 不再 / 替换 / 更新为 / no longer / switched),
+   and also plain value changes where neither side declares anything.
+     "环比重由九张卡" vs "环比重由九张卡改为十张卡"   → update
+     "T6 未验证" vs "T6 已实测通过"                    → update
+     "端口用 8791" vs "端口不用 8791，改用 8790"        → update
+     "卡片 2 张" vs "卡片 12 张"                        → update
+3. "contradiction" — A is the DIRECT NEGATION of B: the same proposition,
+   one side denying the other, with NO change declared and NO differing
+   value supplied. Exactly one of them can be true and neither is
+   evidently older.
+     "provider 现在是 OctopMemory" vs "provider 现在不是 OctopMemory"
+       → contradiction
+     "该字段有值" vs "该字段没有值"                     → contradiction
+4. Uncertain → null. Do not guess.
+
+A (newer): {a!r}
+B (older): {b!r}
+
+OUTPUT (JSON only):
+"""
+
 
 # ---------------------------------------------------------------------------
 # Hook implementation
@@ -190,6 +225,40 @@ class ModelEscalationHook:
         return None
 
     # ---- check 5 (conflict, grey zone) -----------------------------------
+
+    # ---- check 5 (conflict / update, grey zone) -------------------------
+
+    def classify_pair(
+        self,
+        *,
+        candidate_assertion: str,
+        existing_assertion: str,
+    ) -> str | None:
+        """Classify a polarity-flip suspect as contradiction / update / unrelated.
+
+        Returns one of ``"contradiction"``, ``"update"``, ``"unrelated"``,
+        or ``None`` when uncertain / the model is unavailable.
+
+        ``check_conflict`` uses this instead of :meth:`is_contradiction` so a
+        chronological value change (九张 → 十张) is promoted-and-superseded
+        rather than parked for human review; only a same-time denial stays a
+        conflict. ``is_contradiction`` is kept for host hooks that only
+        implement the two-way contract.
+        """
+        prompt = _CLASSIFY_PAIR_PROMPT.format(
+            a=candidate_assertion,
+            b=existing_assertion,
+        )
+        raw = self._safe_complete(prompt, response_format="json")
+        if raw is None:
+            return None
+        parsed = self._safe_json_object(raw)
+        if parsed is None:
+            return None
+        v = parsed.get("relation")
+        if v in ("contradiction", "update", "unrelated"):
+            return str(v)
+        return None
 
     def is_contradiction(
         self,

@@ -249,13 +249,30 @@ class PromotionWorker:
         if outcome is not None:
             return self._apply_merge(candidate, outcome)
 
-        # ---- check 5: conflict --------------------------------------
+        # ---- check 5: conflict / chronological update ---------------
+        conflict_calls: list[int] = []
         outcome = check_conflict(
             candidate,
             entity_id=entity_id,
             atom_lookup=self._memory,
             llm_hook=self._llm_hook,
+            calls=conflict_calls,
         )
+        if outcome is not None and outcome.supersede_atom_id:
+            # Value changed over time (same attribute, newer value): write
+            # the new atom and retire the old one in the same transaction —
+            # the same path the dashboard approve action uses — instead of
+            # parking the candidate for human review.
+            # entity_outcome IS the check-5 outcome here and already
+            # carries llm_calls == the check-5 hook calls, so passing
+            # extra_llm_calls=sum(conflict_calls) would double-count it.
+            return self._apply_promote(
+                candidate,
+                entity_id=entity_id,
+                entity_outcome=outcome,
+                supersede_atom_id=outcome.supersede_atom_id,
+                extra_llm_calls=0,
+            )
         if outcome is not None:
             return self._apply_conflict(candidate, outcome)
 
@@ -264,6 +281,7 @@ class PromotionWorker:
             candidate,
             entity_id=entity_id,
             entity_outcome=entity_outcome,
+            extra_llm_calls=sum(conflict_calls),
         )
 
     def _approve_one(self, candidate: Candidate) -> CandidateDecision:
@@ -301,18 +319,20 @@ class PromotionWorker:
         if duplicate is not None:
             return self._apply_merge(candidate, duplicate, actor="user")
 
+        conflict_calls: list[int] = []
         conflict = check_conflict(
             candidate,
             entity_id=entity_id,
             atom_lookup=self._memory,
             llm_hook=self._llm_hook,
+            calls=conflict_calls,
         )
         approved = PromotionOutcome(
             kind="promote",
             reason="user-approved via dashboard",
             entity_id=entity_id,
             matched_atom_id=conflict.matched_atom_id if conflict is not None else None,
-            llm_calls=entity_outcome.llm_calls,
+            llm_calls=entity_outcome.llm_calls + sum(conflict_calls),
         )
         return self._apply_promote(
             candidate,
@@ -422,6 +442,7 @@ class PromotionWorker:
         entity_outcome: PromotionOutcome,
         actor: Literal["user", "auto", "rule"] = "auto",
         supersede_atom_id: str | None = None,
+        extra_llm_calls: int = 0,
     ) -> CandidateDecision:
         now = self._clock.now(UTC)
         # Use the earliest timestamp among raw_event_ids as occurred_at, so
@@ -520,7 +541,7 @@ class PromotionWorker:
             kind="promote",
             reason=entity_outcome.reason,
             entity_id=entity_id,
-            llm_calls=entity_outcome.llm_calls,
+            llm_calls=entity_outcome.llm_calls + extra_llm_calls,
         )
         return CandidateDecision(
             candidate_id=candidate.id,

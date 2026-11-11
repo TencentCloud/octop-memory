@@ -18,6 +18,7 @@ without touching the orchestration loop.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -101,6 +102,11 @@ class PromotionOutcome:
     # the atom (kind="promote" with no existing entity match).
     new_entity_canonical_name: str | None = None
     new_entity_type: str | None = None
+    # When set on a ``promote`` outcome, the worker replaces this atom with
+    # the newly written one (chronological update: same subject, newer
+    # value). Mirrors the ``supersede_atom_id`` the dashboard-approve path
+    # already passes to ``_apply_promote``.
+    supersede_atom_id: str | None = None
     # Number of LLM escalations consumed by this candidate (for budget
     # tracking + telemetry). Pure-rule path always returns 0.
     llm_calls: int = 0
@@ -119,11 +125,15 @@ class LLMEscalationHook(Protocol):
     NOT raise into the promotion loop — they should swallow
     ``LLMClientError`` and return ``None``.
 
-    Per design §8.3.2 each candidate is allotted **at most 1** LLM
-    escalation across the whole 5-check pipeline. Hooks are therefore
+    Per design §8.3.2 a candidate is normally allotted **at most 1**
+    LLM escalation across the 5-check pipeline; hooks are therefore
     designed so a single call can answer the question (e.g.
     ``resolve_entity_match`` is given the WHOLE candidate set in one
-    shot, not one-pair-at-a-time).
+    shot, not one-pair-at-a-time). Check 5 is the deliberate exception:
+    its rule prefilter is loose by construction, so it escalates per
+    suspect pair — but hard-capped at ``_MAX_CONTRADICTION_CHECKS`` per
+    candidate (see ``check_conflict``), a small constant rather than the
+    200-atom ``list_atoms`` cap.
     """
 
     def resolve_entity_match(
@@ -166,8 +176,27 @@ class LLMEscalationHook(Protocol):
     ) -> bool | None:
         """Do these two assertions contradict each other?
 
-        Used by check 5 grey zone (token overlap with same polarity but
-        suspicious phrasing). Worker only invokes this once per candidate.
+        Two-state fallback used by check 5 only when the hook does NOT
+        implement ``classify_pair``. Called per suspect pair, hard-capped
+        at ``_MAX_CONTRADICTION_CHECKS`` per candidate (not once).
+        """
+        ...
+
+    def classify_pair(
+        self,
+        *,
+        candidate_assertion: str,
+        existing_assertion: str,
+    ) -> str | None:
+        """Classify the relation between two same-subject assertions.
+
+        Preferred over ``is_contradiction`` in check 5 when implemented.
+        Returns one of ``"contradiction"`` (same proposition, directly
+        negated), ``"update"`` (same attribute, newer value) or
+        ``"unrelated"`` (different attribute), or ``None`` when unsure.
+
+        Called per suspect pair, hard-capped at
+        ``_MAX_CONTRADICTION_CHECKS`` per candidate.
         """
         ...
 
@@ -511,12 +540,24 @@ def check_duplicate(
 # ---------------------------------------------------------------------------
 
 
+_MAX_CONTRADICTION_CHECKS = 3
+"""Upper bound on semantic-confirmation calls per candidate in check 5.
+
+The rule prefilter can hand us many suspect atoms (``list_atoms`` caps at
+200), but the design budget (§8.3.2) assumes a handful of escalations per
+candidate. Measured on this host: every conflicting candidate had exactly
+one suspect, so this bound is not reached in practice; it exists so the
+worst case is a small constant instead of 200.
+"""
+
+
 def check_conflict(
     candidate: Candidate,
     *,
     entity_id: str,
     atom_lookup: AtomLookup,
     llm_hook: LLMEscalationHook | None = None,
+    calls: list[int] | None = None,
 ) -> PromotionOutcome | None:
     """Detect direct contradiction against existing atoms.
 
@@ -528,10 +569,29 @@ def check_conflict(
     on polarity match (a possible paraphrased duplicate that check 4
     did not catch) this check returns no conflict.
 
-    We deliberately do NOT extract structured triples here; this worker
-    keeps conflict detection deterministic and rule-based.
+    We deliberately do NOT extract structured triples here, and the rule
+    is deliberately cheap — which is exactly why it is only a
+    *prefilter*. On a polarity flip we hand the pair to the host LLM
+    (``llm_hook.is_contradiction``) and let it decide:
+
+    - ``False`` → not a contradiction; keep scanning (a later atom may
+      still contradict, and if none does the candidate promotes
+      normally). This is the fix for the Chinese false-positive storm:
+      ``不/没/未`` appear inside ordinary words (不当值 / 未配置 / 不用),
+      and 3-character token overlap is satisfied by any two assertions
+      that merely name the same entity (the name itself is often ≥3
+      chars).
+    - ``True`` or ``None`` (LLM unavailable / unsure) → park as
+      ``conflict`` for human review, per the hook protocol's "None means
+      let the tentative rule answer stand".
+
+    Without a hook the rule alone decides, exactly as before.
+
+    ``calls`` (optional out-param): if a list is supplied, the number of
+    hook calls made for this candidate is appended to it. The worker uses
+    that to fold check-5 cost into ``PromotionOutcome.llm_calls`` even on
+    the promote path (where no outcome is returned from here).
     """
-    del llm_hook  # Semantic contradiction escalation is not used here.
     new_neg = _has_negation(candidate.assertion)
 
     existing = atom_lookup.list_atoms(
@@ -539,21 +599,69 @@ def check_conflict(
         include_deprecated=False,
         limit=200,
     )
+    hook_calls = 0
     for atom in existing:
         if not _shares_meaningful_overlap(candidate.assertion, atom.assertion):
             continue
         old_neg = _has_negation(atom.assertion)
-        if new_neg != old_neg:
-            return PromotionOutcome(
-                kind="conflict",
-                reason=(
-                    f"polarity flip vs atom {atom.id}: "
-                    f"{'NEG' if new_neg else 'POS'} now, "
-                    f"{'NEG' if old_neg else 'POS'} previously"
-                ),
-                entity_id=entity_id,
-                matched_atom_id=atom.id,
-            )
+        if new_neg == old_neg:
+            continue
+        confirm = getattr(llm_hook, "is_contradiction", None) if llm_hook is not None else None
+        classify = getattr(llm_hook, "classify_pair", None) if llm_hook is not None else None
+        if (confirm is not None or classify is not None) and hook_calls < _MAX_CONTRADICTION_CHECKS:
+            # Bound: at most ``_MAX_CONTRADICTION_CHECKS`` confirmations per
+            # candidate. Past the cap we stop asking and fail closed (park
+            # as conflict) — the prefilter is deliberately loose, so an
+            # unbounded loop here would be a cost/latency hazard.
+            hook_calls += 1
+            verdict: object
+            try:
+                if classify is not None:
+                    verdict = classify(
+                        candidate_assertion=candidate.assertion,
+                        existing_assertion=atom.assertion,
+                    )
+                else:
+                    verdict = confirm(
+                        candidate_assertion=candidate.assertion,
+                        existing_assertion=atom.assertion,
+                    )
+            except Exception:  # noqa: BLE001 - host hook must never break promotion
+                verdict = None
+            if verdict is False or verdict == "unrelated":
+                continue
+            if verdict == "update":
+                # Chronological update: same subject, newer value. Promote
+                # the new assertion and retire the one it replaces, instead
+                # of parking the candidate for human review.
+                if calls is not None:
+                    calls.append(hook_calls)
+                return PromotionOutcome(
+                    kind="promote",
+                    reason=(
+                        f"supersedes atom {atom.id}: value changed "
+                        f"({atom.assertion[:60]!r} -> {candidate.assertion[:60]!r})"
+                    ),
+                    entity_id=entity_id,
+                    matched_atom_id=atom.id,
+                    supersede_atom_id=atom.id,
+                    llm_calls=hook_calls,
+                )
+        if calls is not None:
+            calls.append(hook_calls)
+        return PromotionOutcome(
+            kind="conflict",
+            reason=(
+                f"polarity flip vs atom {atom.id}: "
+                f"{'NEG' if new_neg else 'POS'} now, "
+                f"{'NEG' if old_neg else 'POS'} previously"
+            ),
+            entity_id=entity_id,
+            matched_atom_id=atom.id,
+            llm_calls=hook_calls,
+        )
+    if calls is not None:
+        calls.append(hook_calls)
     return None
 
 
@@ -632,15 +740,16 @@ def _content_tokens(text: str) -> set[str]:
     coarse-filtering inside check 5.
     """
     norm = normalize_alias(text)
+    # Split on ANY punctuation, not just whitespace: ``normalize_alias`` has
+    # already folded full-width forms to ASCII, and the previous
+    # ``split() + strip()`` glued adjacent tokens together
+    # ("8791,改用 8790" → one token "8791,改用"), which silently destroyed
+    # the overlap signal for exactly the sentences this prefilter exists to
+    # catch.
     tokens: set[str] = set()
-    # ASCII words on whitespace
-    for w in norm.split():
-        if not w:
-            continue
-        # Strip trailing/leading punctuation but keep in-word ones
-        cleaned = w.strip(".,;:!?\"'()[]{}<>")
-        if cleaned and cleaned not in _STOP_WORDS_EN:
-            tokens.add(cleaned)
+    for w in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", norm):
+        if w and w not in _STOP_WORDS_EN:
+            tokens.add(w)
     # Each CJK ideograph as a token (rough but workable for this purpose)
     for ch in norm:
         if "\u4e00" <= ch <= "\u9fff" and ch not in _STOP_WORDS_CN:
