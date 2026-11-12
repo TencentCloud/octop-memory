@@ -38,6 +38,10 @@ _TABLES = ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
 type _Cursor = Cursor[tuple[Any, ...]]
 
 
+class _UnsafeMessageSnapshot(ValueError):
+    """A native blob version cannot be shared safely by retained branches."""
+
+
 @contextmanager
 def _connection(backend: PostgresMemoryBackend) -> Iterator[Connection[dict[str, Any]]]:
     # Share LangGraph's connection budget without initializing DDL or retaining
@@ -152,31 +156,39 @@ def _replay_messages(reader: PostgresSaver, thread: str, cid: str, channel: Delt
 def _prepare_snapshots(
     cur: _Cursor, reader: PostgresSaver, thread: str, plan: CheckpointPrunePlan, channel: DeltaChannel[list[Any]]
 ) -> list[tuple[str, str, bytes]]:
+    retained = {
+        cid: (version, inline)
+        for cid, version, inline in cur.execute(
+            "SELECT checkpoint_id, checkpoint->'channel_versions'->'messages', "
+            "(checkpoint->'channel_values') ? 'messages' FROM checkpoints "
+            "WHERE thread_id = %s AND checkpoint_ns = '' AND checkpoint_id <> ALL(%s)",
+            (thread, plan.victims),
+        ).fetchall()
+    }
     snapshots = []
     for cid in plan.message_snapshot_ids:
-        row = cur.execute(
-            "SELECT checkpoint->'channel_versions'->>'messages' FROM checkpoints "
-            "WHERE thread_id = %s AND checkpoint_ns = '' AND checkpoint_id = %s",
-            (thread, cid),
-        ).fetchone()
-        if row is None or row[0] is None:
+        version = retained[cid][0]
+        if version is None:
             raise ValueError("Missing PostgreSQL message snapshot version")
-        version = row[0]
+        if isinstance(version, int) and any(
+            other is None or (isinstance(other, int) and other < version) for other, _ in retained.values()
+        ):
+            # Legacy Memory checkpoints increment integer versions. A fork
+            # from a lower surviving version can write this exact version
+            # later, even when there is no conflicting peer in the DB yet.
+            raise _UnsafeMessageSnapshot("A retained branch can reuse this integer message version")
         seed = _replay_messages(reader, thread, cid, channel)
         # A native blob is shared by all rows with the same channel version.
         # Verify their state before filling that blob and preserve the version.
-        peers = cur.execute(
-            "SELECT checkpoint_id, (checkpoint->'channel_values') ? 'messages' FROM checkpoints "
-            "WHERE thread_id = %s AND checkpoint_ns = '' "
-            "AND checkpoint->'channel_versions'->>'messages' = %s AND checkpoint_id <> ALL(%s) "
-            "AND checkpoint_id <> %s",
-            (thread, version, plan.victims, cid),
-        ).fetchall()
-        for peer, inline in peers:
-            if inline or _replay_messages(reader, thread, peer, channel) != seed:
-                raise ValueError("PostgreSQL checkpoints share a message version with different states")
+        for peer, (other, inline) in retained.items():
+            if (
+                peer != cid
+                and str(other) == str(version)
+                and (inline or _replay_messages(reader, thread, peer, channel) != seed)
+            ):
+                raise _UnsafeMessageSnapshot("PostgreSQL checkpoints share a message version with different states")
         kind, blob = reader.serde.dumps_typed(seed)
-        snapshots.append((version, kind, blob))
+        snapshots.append((str(version), kind, blob))
     return snapshots
 
 
@@ -283,11 +295,14 @@ def _prune_thread(
                 ).fetchone()
             ):
                 return skipped
-        snapshots = (
-            _prepare_snapshots(cur, reader, thread, plan, messages_channel)
-            if messages_channel is not None and plan.message_snapshot_ids
-            else []
-        )
+        snapshots = []
+        if messages_channel is not None and plan.message_snapshot_ids:
+            try:
+                snapshots = _prepare_snapshots(cur, reader, thread, plan, messages_channel)
+            except _UnsafeMessageSnapshot:
+                # Preserve the ambiguous branch and still prune unrelated,
+                # independently restorable ancestors of this thread.
+                plan = _plan(cur, thread, candidates, snapshot_messages=False)
     except REPORTABLE_ERRORS:
         _LOG.warning("prune_checkpoints: cannot verify ancestry for thread=%s", thread, exc_info=True)
         return skipped

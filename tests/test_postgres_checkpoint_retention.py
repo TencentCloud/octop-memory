@@ -137,3 +137,38 @@ def test_defers_when_a_writer_holds_a_checkpoint_table(store, postgres_dsn):
         assert result.checkpoints_deleted == 0
         assert result.parent_prunes_skipped == 1
     assert prune_checkpoints(memory, thread_id=thread, keep_last=1).checkpoints_deleted == 2
+
+
+def test_pruning_leaves_shared_integer_versions_available_to_a_retained_branch(store):
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.serde.types import _DeltaSnapshot
+    from langgraph.pregel._checkpoint import channels_from_checkpoint
+
+    memory, thread = store
+    delta = pytest.importorskip("langgraph.channels.delta").DeltaChannel
+    reducer = pytest.importorskip("langgraph.graph.message")._messages_delta_reducer
+    channel = delta(reducer, list)
+    earlier = HumanMessage(content="original", id="a")
+    branch = HumanMessage(content="branch", id="b")
+    followup = HumanMessage(content="followup", id="c")
+
+    def put(parent, version, messages=None):
+        cp = empty_checkpoint()
+        cp["v"] = 4
+        cp["channel_versions"]["messages"] = version
+        if messages is not None:
+            cp["channel_values"]["messages"] = _DeltaSnapshot(messages)
+        return memory.put(parent, cp, {}, {"messages": version})
+
+    base = put(_config(thread), 1, [earlier])
+    put(base, 3)
+    alternate = put(base, 2, [branch])
+    result = prune_checkpoints(memory, thread_id=thread, keep_last=2, messages_channel=channel)
+    assert result.checkpoints_deleted == 0
+    assert memory.get_tuple(base) is not None
+    memory.put_writes(alternate, [("messages", [followup])], "next")
+    target = put(alternate, memory.get_next_version(2, None))
+    saved = memory.get_tuple(target)
+    channels, _ = channels_from_checkpoint({"messages": channel}, saved.checkpoint, saver=memory, config=target)
+    assert channels["messages"].get() == [branch, followup]

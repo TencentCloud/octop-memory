@@ -271,7 +271,8 @@ metadata and writes. The planner keeps dependencies for other channels and unrec
 PostgreSQL stores the message seed in the native versioned blob table and holds a transaction-level writer
 reservation while applying a thread's plan. Consistent PG replay handles a reader that fetched the retained
 boundary before it was detached. PostgreSQL releases blob versions only when every surviving checkpoint
-in that namespace has stopped referencing them.
+in that namespace has stopped referencing them. Retained branches that can reuse an integer message
+version keep their replay ancestry.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;
