@@ -121,6 +121,7 @@ class PostgresMemoryBackend:
             with self._connection():
                 self._init_schema()
                 self._migrate_legacy_schema()
+                self._migrate_pre_rename_schema()
         except BaseException:
             self.close()
             raise
@@ -709,6 +710,41 @@ class PostgresMemoryBackend:
             self._rename_legacy_schema(cur)
         self._conn.commit()
         logger.info("migrated legacy memory schema %r into shared tables (%d rows)", ns, copied)
+
+    def _migrate_pre_rename_schema(self) -> None:
+        """Copy this namespace from the pre-1.0 ``harness_memory`` schema if still empty.
+
+        A failure is logged and rolled back rather than raised: the rows stay
+        in the old schema, and the store must still open.
+        """
+        from octop_memory.storage.backends import postgres_legacy
+
+        if self._ns in {SHARED_SCHEMA, postgres_legacy.LEGACY_SCHEMA}:
+            self._conn.commit()
+            return
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+                postgres_legacy.auto_migrate(cur, self._ns, _TABLES)
+            self._conn.commit()
+        except psycopg.Error:
+            self._conn.rollback()
+            logger.exception("could not migrate namespace %r from the pre-1.0 schema", self._ns)
+
+    def legacy_schema_status(self) -> dict[str, Any]:
+        """Rows of this namespace still in the pre-1.0 schema. See :mod:`postgres_legacy`."""
+        from octop_memory.storage.backends import postgres_legacy
+
+        with self._cursor() as cur:
+            return postgres_legacy.status(cur, self._ns, _TABLES)
+
+    def merge_legacy_schema(self, *, dry_run: bool) -> dict[str, Any]:
+        """Merge this namespace's pre-1.0 rows into its current tables in one transaction."""
+        from octop_memory.storage.backends import postgres_legacy
+
+        with self.transaction(), self._cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+            return postgres_legacy.merge(cur, self._ns, _TABLES, dry_run=dry_run)
 
     def _rename_legacy_schema(self, cur: Any) -> None:
         # PG identifiers cap at 63 bytes; keep room for the suffix.

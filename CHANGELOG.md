@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- PostgreSQL：找回 1.0 改名前写入的长期记忆。0.9.6 至 0.9.11 把共享表放在 `harness_memory` schema，1.0.0 改用 `octop_memory` 时没有迁移数据，升级后旧记忆读不到（checkpoint 在 `public`，不受影响）。现在打开某个 namespace 时，如果它在当前 schema 里还没有任何数据，就自动把旧行和 `{ns}:` 开头的 meta 键复制过来；如果已经有新数据，则不自动合并，由宿主通过新增的 `Memory.legacy_schema_status()` 查看、`Memory.merge_legacy_schema(dry_run=...)` 确认后合并（主键或唯一键冲突的行跳过，在一个事务里完成）。两种方式都会写入迁移标记，清空记忆后不会再把旧数据迁回来；`harness_memory` 本身不改动。SQLite 不涉及：状态返回 `supported: False`，合并直接拒绝。
+
 ## [1.0.4] - 2026-11-10
 
 ### 修复

@@ -47,6 +47,9 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
   Row deletion, checkpoint retention, and physical reclamation are different operations; none proves a host schedules them automatically.
 - Checkpoint pruning and content deduplication/expansion support SQLite only. PG explicitly rejects these paths and uses its original
   saver. Do not equate PG vacuum with checkpoint retention; see [checkpoint maintenance](../../CONTRIBUTING.md#checkpoint-maintenance).
+- Memory written by 0.9.6 to 0.9.11 sits in PG schema `harness_memory`. A namespace still empty in `octop_memory` is copied on open;
+  one that already has new rows is only merged through `Memory.merge_legacy_schema()`, which skips rows whose keys exist and can leave
+  similar entities or branches twice. The old schema is never changed or dropped. SQLite never used it and rejects the merge.
 - Without PostgreSQL `btree_gin`, indexes fall back to plain GIN. Namespace filtering stays correct but performance isolation weakens.
   Shared checkpoint maintenance needs database-wide scope checks; even ordinary VACUUM cannot promise no lock waits.
 - Some SQLite runtimes report `attempt to write a readonly database` during read-only FTS checks.
