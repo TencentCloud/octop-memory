@@ -42,7 +42,7 @@ MARKER_KEY = "legacy_schema_migrated"
 
 # Two-key advisory locks live apart from single-bigint ones (DDL lock, others).
 _LOCK_CLASS = 0x686D  # "hm"
-_LOCK_TIMEOUT = "5s"
+LOCK_TIMEOUT = "5s"
 _BLOCKED_SAMPLE = 20
 
 _warned: set[str] = set()
@@ -71,12 +71,12 @@ def legacy_present(cur: Any) -> bool:
 def lock_namespace(cur: Any, ns: str) -> None:
     """Serialize copy, merge and purge of ``ns`` until the transaction ends.
 
-    Waits at most ``_LOCK_TIMEOUT`` for the lock, then restores the caller's
+    Waits at most ``LOCK_TIMEOUT`` for the lock, then restores the caller's
     ``lock_timeout`` so an enclosing transaction keeps its own setting.
     """
     cur.execute("SELECT current_setting('lock_timeout') AS v")
     previous = str(cur.fetchone()["v"])
-    cur.execute("SELECT set_config('lock_timeout', %s, true)", (_LOCK_TIMEOUT,))
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_TIMEOUT,))
     cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (_LOCK_CLASS, ns))
     cur.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
 
@@ -162,10 +162,12 @@ def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool, bool]:
     """Primary/unique constraint columns (namespace excluded), whether counts are exact,
     and whether a deferrable one exists.
 
-    Counting matches ``ON CONFLICT DO NOTHING`` only for plain constraints that
-    include ``namespace``. Any other unique index (partial, expression,
-    ``NULLS NOT DISTINCT``, not namespace-scoped) makes the preview an
-    estimate. ``ON CONFLICT`` rejects deferrable unique constraints outright.
+    Counting matches ``ON CONFLICT DO NOTHING`` only for plain constraints on
+    ``namespace`` plus columns the legacy table also has. Anything else
+    (partial, expression or ``NULLS NOT DISTINCT`` indexes, constraints
+    without namespace or on namespace alone, columns added after 0.9.x) is
+    left out of the conflict test and makes the preview an estimate.
+    ``ON CONFLICT`` rejects deferrable unique constraints outright.
     """
     regclass = f"{CURRENT_SCHEMA}.{table}"
     cur.execute(
@@ -191,9 +193,23 @@ def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool, bool]:
         """,
         (regclass,),
     )
-    exact = int(cur.fetchone()["n"]) == 0 and all("namespace" in cols for cols in constraints)
-    keys = [[c for c in cols if c != "namespace"] for cols in constraints]
-    return [key for key in keys if key], exact, deferrable
+    exact = int(cur.fetchone()["n"]) == 0
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s",
+        (LEGACY_SCHEMA, table),
+    )
+    legacy_columns = {str(row["column_name"]) for row in cur.fetchall()}
+    keys: list[list[str]] = []
+    for cols in constraints:
+        key = [c for c in cols if c != "namespace"]
+        # Not modelled, so the preview is only an estimate (the real merge
+        # still relies on ON CONFLICT): a constraint without namespace, one on
+        # namespace alone, or one using a column the legacy table lacks.
+        if "namespace" not in cols or not key or not set(key) <= legacy_columns:
+            exact = False
+            continue
+        keys.append(key)
+    return keys, exact, deferrable
 
 
 def _conflict(cur: Any, table: str, alias: str) -> tuple[sql.Composable, int]:
@@ -393,16 +409,17 @@ def status(cur: Any, ns: str, tables: Sequence[str]) -> dict[str, Any]:
         "legacy_grew": {},
     }
     marker = _marker(cur, ns)
-    present = legacy_present(cur)
-    rows = _source_rows(cur, ns, tables) if present else {}
     if marker is not None:
         result["migrated"] = marker
         recorded = marker.get("source_rows")
-        if isinstance(recorded, dict):
+        # A purge needs no legacy reads, which this role may not be allowed.
+        if isinstance(recorded, dict) and marker.get("mode") != "purged" and legacy_present(cur):
+            rows = _source_rows(cur, ns, tables)
             result["legacy_grew"] = {
                 table: n - int(recorded.get(table, 0)) for table, n in rows.items() if n > int(recorded.get(table, 0))
             }
         return result
+    rows = _source_rows(cur, ns, tables) if legacy_present(cur) else {}
     result["pending"] = bool(rows)
     result["rows"] = rows
     result["meta_keys"] = _legacy_meta_count(cur, ns, new_only=False) if rows else 0

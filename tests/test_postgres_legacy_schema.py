@@ -504,6 +504,83 @@ def test_marker_records_what_the_copy_saw(dsn: str) -> None:
         memory._backend.close()
 
 
+def test_locked_legacy_table_does_not_hang_startup(dsn: str) -> None:
+    import time
+
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    with psycopg.connect(dsn) as holder:
+        holder.execute("LOCK TABLE harness_memory.raw_events IN ACCESS EXCLUSIVE MODE")
+        started = time.monotonic()
+        memory = _open(dsn, "agent_a")
+        try:
+            assert time.monotonic() - started < 15
+            assert memory._backend.count_stats()["raw_events"] == 0
+        finally:
+            memory._backend.close()
+        holder.rollback()
+
+    memory = _open(dsn, "agent_a")  # retried once the table is free
+    try:
+        assert memory._backend.count_stats()["raw_events"] == 3
+    finally:
+        memory._backend.close()
+
+
+@pytest.mark.parametrize("ns", ["harness_memory", "octop_memory"])
+def test_namespaces_named_like_a_schema_recover_their_own_rows(dsn: str, ns: str) -> None:
+    _write(dsn, ns, tag="own")
+    _write(dsn, "agent_b", tag="b")
+    _rename_to_legacy(dsn)
+
+    memory = _open(dsn, ns)
+    try:
+        assert memory._backend.count_stats()["raw_events"] == 3
+        assert memory.legacy_schema_status()["migrated"]["mode"] == "auto"
+    finally:
+        memory._backend.close()
+    assert _count(dsn, "octop_memory", "raw_events", "agent_b") == 0
+
+
+def test_purged_status_needs_no_legacy_reads(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    memory = _open(dsn, "agent_a")
+    try:
+        memory._backend.purge_namespace()
+
+        def denied(*_args: Any) -> dict[str, int]:
+            raise psycopg.errors.InsufficientPrivilege("permission denied for table memory_nodes")
+
+        monkeypatch.setattr(postgres_legacy, "_source_rows", denied)
+        assert memory.legacy_schema_status()["migrated"]["mode"] == "purged"
+        assert memory.merge_legacy_schema(dry_run=False)["status"] == "purged"
+    finally:
+        memory._backend.close()
+
+
+@pytest.mark.parametrize(
+    ("table", "columns"),
+    [("entity_pages", "namespace, id, mutation_version"), ("raw_events", "namespace")],
+)
+def test_constraints_the_preview_cannot_model_make_it_an_estimate(dsn: str, table: str, columns: str) -> None:
+    _start_with_new_memory(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO harness_memory.entity_pages (namespace, id, entity_id, created_at, updated_at) "
+            "VALUES ('agent_a', 'page-1', 'entity-1', now(), now())"
+        )
+        conn.execute(f"ALTER TABLE octop_memory.{table} ADD CONSTRAINT custom_unique UNIQUE ({columns})")
+    memory = _open(dsn, "agent_a")
+    try:
+        plan = memory.merge_legacy_schema()
+        assert plan["status"] == "dry_run"
+        assert plan["exact"] is False
+        assert memory.merge_legacy_schema(dry_run=False)["status"] == "merged"
+    finally:
+        memory._backend.close()
+
+
 def test_sqlite_has_no_legacy_schema(tmp_path: Any) -> None:
     memory = Memory(namespace="agent_a", backend="sqlite", backend_config={"db_path": str(tmp_path / "m.db")})
     try:

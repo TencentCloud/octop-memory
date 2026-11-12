@@ -796,16 +796,17 @@ class PostgresMemoryBackend:
         """Copy this namespace from the pre-1.0 ``harness_memory`` schema if still empty.
 
         Databases without that schema pay one catalog lookup. The copy holds
-        only this namespace's lock, with its own timeout, so other agents keep
-        starting. A failure is logged and rolled back rather than raised: the
+        only this namespace's lock, and every lock wait in it is bounded, so
+        neither other agents nor this one wait indefinitely; a timed-out copy
+        is retried on the next open. A failure is logged and rolled back rather than raised: the
         rows stay in the old schema, and the store must still open.
         """
         from octop_memory.storage.backends import postgres_legacy
 
         with self._cursor() as cur:
-            present = self._ns not in {SHARED_SCHEMA, postgres_legacy.LEGACY_SCHEMA} and (
-                postgres_legacy.legacy_present(cur)
-            )
+            # Rows are filtered by ``namespace``, so namespaces named like either
+            # schema are safe here (unlike the per-namespace-schema migration).
+            present = postgres_legacy.legacy_present(cur)
         self._conn.commit()
         if not present:
             return
@@ -814,6 +815,9 @@ class PostgresMemoryBackend:
             # commit each table on its own and release the lock immediately.
             with self._conn.transaction(), self._conn.cursor() as cur:
                 postgres_legacy.lock_namespace(cur, self._ns)
+                # Our own transaction: bound every lock wait in it (e.g. on a
+                # legacy table someone holds), then give up and open anyway.
+                cur.execute(f"SET LOCAL lock_timeout = '{postgres_legacy.LOCK_TIMEOUT}'")
                 postgres_legacy.auto_migrate(cur, self._ns, _TABLES)
         except psycopg.Error:
             logger.exception("could not migrate namespace %r from the pre-1.0 schema", self._ns)
