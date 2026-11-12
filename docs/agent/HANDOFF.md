@@ -46,6 +46,18 @@ A rehearsal on a SQLite copy matched all 764 surviving checkpoints. The dry run 
 removed 745 checkpoints and 1,112 writes. Octop returned identical history and trajectory pages for 52
 threads, preserved the next model input, and copied a 57-message prefix when forking from an old reply.
 
+Harness can now opt in to replaying its messages DeltaChannel at a root-only retention boundary.
+The SQLite planner prepares a snapshot only where the boundary's sole replay dependency is messages.
+The snapshot, parent detachment and ancestor deletion commit together. Dry runs prepare the same plan.
+Other hosts keep the dependency-preserving default.
+
+Using the Harness timer entry point on the previously pruned main database copy reduced 764 checkpoints
+to 283 and 1,050 writes to 353. After incremental vacuum the file fell from 6.99 MiB to 4.52 MiB.
+All 283 retained graph states and Harness history cursors matched. Octop history and trajectories matched
+across 31 threads and 69 history pages, and dashboard fork and continuation passed. Real Harness tests also
+cover pending parent and subagent approvals. Subgraph retention is still pending because a Harness history
+cursor can read a subgraph stream when the checkpoint list lacks a namespace filter.
+
 ### Atom-only automatic recall
 
 - **Status:** [PR #41](https://github.com/TencentCloud/octop-memory/pull/41) merged into develop as e43ca72; not in released v1.0.3. Publishing is outside this delivery. Historical validation below belongs to that PR.

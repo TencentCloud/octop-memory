@@ -12,10 +12,16 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, field
 from itertools import batched, islice
+from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.serde.base import SerializerProtocol
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from octop_memory.storage.backends.sqlite_checkpoint import FORMAT, CompactSqliteSaver, unpack_envelope
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.channels.delta import DeltaChannel
 
 
 def _can_replay_channel(name: str) -> bool:
@@ -43,8 +49,28 @@ def retain_checkpoint_dependencies(
     parent links and keep the entire path to each required seed. Every
     ancestor kept for replay must itself remain restorable.
     """
+    plan = plan_checkpoint_pruning(cur, serde, thread, candidates)
+    return plan.victims, plan.detach
+
+
+@dataclass
+class CheckpointPrunePlan:
+    victims: list[str]
+    detach: list[str]
+    message_snapshot_ids: list[str]
+
+
+def plan_checkpoint_pruning(
+    cur: sqlite3.Cursor,
+    serde: SerializerProtocol,
+    thread: str,
+    candidates: list[str],
+    *,
+    snapshot_messages: bool = False,
+) -> CheckpointPrunePlan:
+    """Find deletable ancestors and boundaries that need a new message seed."""
     if not candidates:
-        return [], []
+        return CheckpointPrunePlan([], [], [])
     candidate_ids = set(candidates)
     writes: dict[str, set[str]] = defaultdict(set)
     sends: set[str] = set()
@@ -59,6 +85,7 @@ def retain_checkpoint_dependencies(
     channels_through: dict[str, set[str]] = {}
     parents: dict[str, str | None] = {}
     needs_parent: set[str] = set()
+    message_boundaries: set[str] = set()
     for cid, parent, kind, payload in cur.execute(
         "SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint FROM checkpoints "
         "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
@@ -70,9 +97,19 @@ def retain_checkpoint_dependencies(
         values = {name for name in checkpoint["channel_values"] if _can_replay_channel(name)}
         inherited = channels_through[parent] if parent is not None else set()
         version = checkpoint["v"]
+        missing = inherited - values
+        if (
+            snapshot_messages
+            and version == 4
+            and missing == {"messages"}
+            and "messages" in checkpoint["channel_versions"]
+            and cid not in candidate_ids
+            and parent in candidate_ids
+        ):
+            message_boundaries.add(cid)
         # Older readers can reconstruct pending sends from the parent's
         # writes. An unknown newer format may have additional dependencies.
-        if inherited - values or (version < 4 and parent in sends) or version > 4:
+        elif missing or (version < 4 and parent in sends) or version > 4:
             needs_parent.add(cid)
         parents[cid] = parent
         channels_through[cid] = inherited | values | writes.get(cid, set())
@@ -84,7 +121,69 @@ def retain_checkpoint_dependencies(
             keep.add(parent)
     victims = [cid for cid in candidates if cid not in keep]
     detach = [cid for cid in keep if parents[cid] is not None and parents[cid] not in keep]
-    return victims, detach
+    return CheckpointPrunePlan(victims, detach, sorted(message_boundaries.intersection(detach)))
+
+
+@dataclass
+class CheckpointMessageSnapshot:
+    checkpoint_id: str
+    kind: str
+    payload: bytes
+    blobs: dict[str, tuple[str, bytes]]
+
+
+def prepare_checkpoint_message_snapshots(
+    cur: sqlite3.Cursor,
+    saver: CompactSqliteSaver,
+    thread: str,
+    checkpoint_ids: list[str],
+    channel: DeltaChannel[list[Any]],
+) -> list[CheckpointMessageSnapshot]:
+    """Replay through a reader on the caller's locked SQLite transaction."""
+    from langgraph._internal._typing import MISSING
+    from langgraph.checkpoint.serde.types import _DeltaSnapshot
+
+    # A separate saver lock avoids reentering the writer. Its read cursors
+    # neither start nor commit a transaction and can see the same snapshot.
+    reader = SqliteSaver(saver.conn, serde=saver.serde)
+    reader.is_setup = True
+    snapshots = []
+    for cid in checkpoint_ids:
+        row = cur.execute(
+            "SELECT type, checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+            (thread, cid),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Missing checkpoint at the message snapshot boundary")
+        checkpoint = saver.serde.loads_typed(row)
+        config: RunnableConfig = {"configurable": {"thread_id": thread, "checkpoint_ns": "", "checkpoint_id": cid}}
+        history = reader.get_delta_channel_history(config=config, channels=["messages"])["messages"]
+        messages = channel.from_checkpoint(history.get("seed", MISSING))
+        messages.replay_writes(history["writes"])
+        checkpoint["channel_values"]["messages"] = _DeltaSnapshot(messages.get())
+        if saver.compact:
+            kind, payload, blobs = saver.codec.encode(checkpoint)
+        else:
+            kind, payload = saver.serde.dumps_typed(checkpoint)
+            blobs = {}
+        snapshots.append(CheckpointMessageSnapshot(cid, kind, payload, blobs))
+    return snapshots
+
+
+def write_checkpoint_message_snapshots(
+    cur: sqlite3.Cursor, thread: str, snapshots: list[CheckpointMessageSnapshot]
+) -> None:
+    """Replace the boundary payload in place before detaching its parent."""
+    for snapshot in snapshots:
+        cur.executemany(
+            "INSERT OR IGNORE INTO hm_checkpoint_blobs (digest, type, value) VALUES (?, ?, ?)",
+            [(digest, *item) for digest, item in snapshot.blobs.items()],
+        )
+        cur.execute(
+            "UPDATE checkpoints SET type = ?, checkpoint = ? "
+            "WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+            (snapshot.kind, snapshot.payload, thread, snapshot.checkpoint_id),
+        )
 
 
 def delete_checkpoint_candidates(

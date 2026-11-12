@@ -20,6 +20,8 @@ from octop_memory.storage.driver_errors import REPORTABLE_ERRORS
 _LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from langgraph.channels.delta import DeltaChannel
+
     from octop_memory.core import Memory
 
 DEFAULT_KEEP_LAST_CHECKPOINTS = 1
@@ -56,6 +58,7 @@ def prune_checkpoints(
     skip_pending: bool = False,
     dry_run: bool = False,
     now: datetime | None = None,
+    messages_channel: DeltaChannel[list[Any]] | None = None,
 ) -> CheckpointGcStats:
     """Delete checkpoints outside the retention window and dependency closure.
 
@@ -69,6 +72,11 @@ def prune_checkpoints(
     parent is a completed checkpoint with no pending work. The force flag
     overrides those subgraph guards. Dry runs use the same plan as deletion.
     With ``skip_pending``, leave threads with work pending at their head intact.
+
+    Hosts can pass their graph's ``messages_channel`` to snapshot messages at
+    a retained boundary whose only replay dependency is that channel. The
+    channel must use the same reducer as the stored threads. This applies
+    to root-only threads using the compact SQLite saver.
     """
     if keep_last is None and keep_days is None:
         raise ValueError("prune_checkpoints requires keep_last and/or keep_days")
@@ -77,9 +85,12 @@ def prune_checkpoints(
     if keep_days is not None and keep_days < 0:
         raise ValueError("keep_days must be >= 0")
 
+    from octop_memory.storage.backends.sqlite_checkpoint import CompactSqliteSaver
     from octop_memory.storage.backends.sqlite_checkpoint_maintenance import (
         delete_checkpoint_candidates,
-        retain_checkpoint_dependencies,
+        plan_checkpoint_pruning,
+        prepare_checkpoint_message_snapshots,
+        write_checkpoint_message_snapshots,
     )
 
     conn = _get_checkpointer_conn(memory)
@@ -110,21 +121,29 @@ def prune_checkpoints(
                     if latest is not None and _has_pending_work(conn, tid, *latest):
                         stats.parent_prunes_skipped += 1
                         continue
-                victims, detach = retain_checkpoint_dependencies(cur, saver.serde, tid, candidates)
+                can_snapshot = messages_channel is not None and isinstance(saver, CompactSqliteSaver) and not subgraphs
+                plan = plan_checkpoint_pruning(cur, saver.serde, tid, candidates, snapshot_messages=can_snapshot)
                 if (
                     subgraphs
                     and not force_drop
-                    and not _safe_to_drop_subgraphs(conn, saver.serde, tid, deleted_parents=len(victims))
+                    and not _safe_to_drop_subgraphs(conn, saver.serde, tid, deleted_parents=len(plan.victims))
                 ):
                     stats.parent_prunes_skipped += 1
                     continue
+                snapshots = (
+                    prepare_checkpoint_message_snapshots(cur, saver, tid, plan.message_snapshot_ids, messages_channel)
+                    if plan.message_snapshot_ids and messages_channel is not None
+                    else []
+                )
             except REPORTABLE_ERRORS:
                 stats.parent_prunes_skipped += 1
                 _LOG.warning("prune_checkpoints: cannot verify ancestry for thread=%s", tid, exc_info=True)
                 continue
 
-            stats.writes_deleted += delete_checkpoint_candidates(cur, tid, victims, detach, dry_run=dry_run)
-            stats.checkpoints_deleted += len(victims)
+            if snapshots and not dry_run:
+                write_checkpoint_message_snapshots(cur, tid, snapshots)
+            stats.writes_deleted += delete_checkpoint_candidates(cur, tid, plan.victims, plan.detach, dry_run=dry_run)
+            stats.checkpoints_deleted += len(plan.victims)
             for ns in subgraphs:
                 checkpoints, writes = _delete_stream(conn, tid, ns, dry_run=dry_run)
                 stats.checkpoints_deleted += checkpoints

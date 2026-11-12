@@ -86,7 +86,10 @@ The separate `thread prune --dry-run` command previews the count or age window a
 The window counts graph checkpoints, including intermediate steps within a turn. Retention can keep older checkpoints
 and writes needed by a survivor. Pruning preserves survivor IDs and detaches a parent link only at an independent boundary.
 Threads with subgraphs retain their cross-stream history unless explicit subgraph removal passes the pruning guards.
-Scheduled SQLite maintenance keeps replay dependencies and skips threads with pending work or subgraphs.
+Hosts can pass their graph's `messages_channel` to `prune_checkpoints` for root-only threads.
+When a retained boundary depends on its deleted parent solely for messages, pruning replays that channel with
+the host's reducer and stores the snapshot on the existing checkpoint in the same transaction as deletion.
+Scheduled Harness maintenance skips threads with pending work or subgraphs.
 The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
 Long-lived readers may delay WAL reclamation. These format-maintenance operations support SQLite only and explicitly
 reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the memory namespace.

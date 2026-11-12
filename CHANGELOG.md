@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- SQLite checkpoint 裁剪支持由宿主提供 `messages` 的 DeltaChannel。在仅依赖消息增量的根图保留边界写入完整快照后，裁掉旧父链及写入，并保留窗口内的 checkpoint ID 和恢复状态。
+
 ## [1.0.4] - 2026-11-10
 
 ### 修复

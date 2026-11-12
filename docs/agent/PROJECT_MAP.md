@@ -265,6 +265,9 @@ The saver serializes planning and deletion in a single transaction per thread. O
 without its deleted parent loses that link. IDs, payloads and pending writes stay intact.
 Offline migration honors its caller's explicit `protected_ids` before evaluating replay dependencies.
 Harness uses scheduled SQLite cleanup with `skip_pending=True`, leaving checkpoints with pending head work intact.
+For root-only threads Harness also supplies its messages reducer. A retained boundary with only a message
+dependency can store a full DeltaChannel snapshot in the pruning transaction. The boundary keeps its ID,
+metadata and writes. The planner keeps dependencies for other channels and unrecognized checkpoint formats.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;
