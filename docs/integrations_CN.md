@@ -314,9 +314,11 @@ bridge 为 `octopmemory-bridge`，OpenClaw/Hermes 插件 ID 为 `octopmemory`。
   已有新数据的 namespace 不会自动合并：`Memory.legacy_schema_status()` 会报告它，
   `Memory.merge_legacy_schema()` 默认只预览，确认后合并，键已存在的行跳过，同名实体或主题分支可能出现两份。
   这两个方法要在宿主已经打开的 `Memory` 上调用，因为新建实例本身就可能触发自动复制。清空某个 namespace
-  也会永久放弃它的旧数据。状态里的 `legacy_grew` 表示复制之后仍有 0.9.x 写入方在写旧 schema，这些行不会被合并。
+  也会永久放弃它的旧数据（这个决定记在 `octop_memory.meta` 里，整个删掉 `octop_memory` schema 会把它一起删掉）。状态里的
+  `legacy_grew` 是复制之后旧数据每张表的净增长，表示仍有 0.9.x 写入方在写旧 schema，这些行不会被合并。
   默认 DSN 数据库名也改为 `octop_memory`；数据库本身不要求改名，可通过 `OCTOP_MEMORY_DSN` 显式配置原数据库。
 - portable 的 Agent 默认扫描路径为 `~/.octop/agents/*/memory.sqlite` 和
   `~/.octop-harness/*/memory.sqlite`。旧目录不再自动扫描；可迁移到新位置，或在 Python
   `list_sources(extra_paths=[("agent", "/path/to/previous/*/memory.sqlite")])` 中显式补充扫描路径。
-- 新默认路径/schema 不会自动发现旧位置；安装新包不会自动搬移数据库，已有安装应先完成迁移再启动。
+- 新的默认值不会自动发现旧的 SQLite 路径、Chroma 目录和配置，安装新包也不会搬移任何文件，已有安装应先完成这些迁移再启动。
+  PG schema 是例外，见上文：打开 namespace 时会按 namespace 自动复制。

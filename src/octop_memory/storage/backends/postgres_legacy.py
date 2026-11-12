@@ -69,9 +69,16 @@ def legacy_present(cur: Any) -> bool:
 
 
 def lock_namespace(cur: Any, ns: str) -> None:
-    """Serialize copy, merge and purge of ``ns`` until the transaction ends."""
-    cur.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+    """Serialize copy, merge and purge of ``ns`` until the transaction ends.
+
+    Waits at most ``_LOCK_TIMEOUT`` for the lock, then restores the caller's
+    ``lock_timeout`` so an enclosing transaction keeps its own setting.
+    """
+    cur.execute("SELECT current_setting('lock_timeout') AS v")
+    previous = str(cur.fetchone()["v"])
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (_LOCK_TIMEOUT,))
     cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (_LOCK_CLASS, ns))
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
 
 
 def _marker(cur: Any, ns: str) -> dict[str, Any] | None:
@@ -151,17 +158,19 @@ def _copy_columns(cur: Any, table: str) -> list[str]:
     ]
 
 
-def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool]:
-    """Primary/unique constraint columns (namespace excluded), and whether counts are exact.
+def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool, bool]:
+    """Primary/unique constraint columns (namespace excluded), whether counts are exact,
+    and whether a deferrable one exists.
 
     Counting matches ``ON CONFLICT DO NOTHING`` only for plain constraints that
     include ``namespace``. Any other unique index (partial, expression,
-    ``NULLS NOT DISTINCT``, not namespace-scoped) makes the preview an estimate.
+    ``NULLS NOT DISTINCT``, not namespace-scoped) makes the preview an
+    estimate. ``ON CONFLICT`` rejects deferrable unique constraints outright.
     """
     regclass = f"{CURRENT_SCHEMA}.{table}"
     cur.execute(
         """
-        SELECT array_agg(a.attname ORDER BY k.ord) AS cols
+        SELECT array_agg(a.attname ORDER BY k.ord) AS cols, bool_or(c.condeferrable) AS deferrable
         FROM pg_constraint c
         CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
@@ -170,7 +179,9 @@ def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool]:
         """,
         (regclass,),
     )
-    constraints = [list(row["cols"]) for row in cur.fetchall()]
+    found = cur.fetchall()
+    constraints = [list(row["cols"]) for row in found]
+    deferrable = any(row["deferrable"] for row in found)
     cur.execute(
         """
         SELECT count(*) AS n FROM pg_index i
@@ -182,18 +193,17 @@ def _unique_keys(cur: Any, table: str) -> tuple[list[list[str]], bool]:
     )
     exact = int(cur.fetchone()["n"]) == 0 and all("namespace" in cols for cols in constraints)
     keys = [[c for c in cols if c != "namespace"] for cols in constraints]
-    return [key for key in keys if key], exact
+    return [key for key in keys if key], exact, deferrable
 
 
-def _conflict(cur: Any, table: str, alias: str) -> tuple[sql.Composable, int, bool]:
+def _conflict(cur: Any, table: str, alias: str) -> tuple[sql.Composable, int]:
     """SQL condition: legacy row ``alias`` collides with a current row of the same namespace.
 
-    Returns the condition, how many ``%s`` namespace parameters it takes, and
-    whether the condition is exact (see :func:`_unique_keys`).
+    Returns the condition and how many ``%s`` namespace parameters it takes.
     """
-    keys, exact = _unique_keys(cur, table)
+    keys, _exact, _deferrable = _unique_keys(cur, table)
     if not keys:
-        return sql.SQL("FALSE"), 0, exact
+        return sql.SQL("FALSE"), 0
     clauses = [
         sql.SQL("EXISTS (SELECT 1 FROM {} d WHERE d.namespace = %s AND {})").format(
             _ident(CURRENT_SCHEMA, table),
@@ -203,15 +213,19 @@ def _conflict(cur: Any, table: str, alias: str) -> tuple[sql.Composable, int, bo
         )
         for key in keys
     ]
-    return sql.SQL("({})").format(sql.SQL(" OR ").join(clauses)), len(clauses), exact
+    return sql.SQL("({})").format(sql.SQL(" OR ").join(clauses)), len(clauses)
 
 
 def _plan(cur: Any, ns: str, rows: dict[str, int]) -> dict[str, Any]:
     tables: dict[str, dict[str, int]] = {}
     exact = True
+    deferrable: list[str] = []
     for table, total in rows.items():
-        cond, n, table_exact = _conflict(cur, table, "s")
+        _keys, table_exact, table_deferrable = _unique_keys(cur, table)
         exact = exact and table_exact
+        if table_deferrable:
+            deferrable.append(table)
+        cond, n = _conflict(cur, table, "s")
         cur.execute(
             sql.SQL("SELECT count(*) AS n FROM {} s WHERE s.namespace = %s AND {}").format(
                 _ident(LEGACY_SCHEMA, table), cond
@@ -220,7 +234,12 @@ def _plan(cur: Any, ns: str, rows: dict[str, int]) -> dict[str, Any]:
         )
         skip = int(cur.fetchone()["n"])
         tables[table] = {"insert": total - skip, "skip": skip}
-    return {"tables": tables, "exact": exact, "blocked": _blocked_nodes(cur, ns, rows)}
+    return {
+        "tables": tables,
+        "exact": exact and not deferrable,
+        "blocked": _blocked_nodes(cur, ns, rows),
+        "deferrable": deferrable,
+    }
 
 
 def _blocked_nodes(cur: Any, ns: str, rows: dict[str, int]) -> list[str]:
@@ -231,8 +250,8 @@ def _blocked_nodes(cur: Any, ns: str, rows: dict[str, int]) -> list[str]:
     """
     if "memory_nodes" not in rows:
         return []
-    child_cond, n_child, _ = _conflict(cur, "memory_nodes", "s")
-    parent_cond, n_parent, _ = _conflict(cur, "memory_nodes", "p")
+    child_cond, n_child = _conflict(cur, "memory_nodes", "s")
+    parent_cond, n_parent = _conflict(cur, "memory_nodes", "p")
     cur.execute(
         sql.SQL(
             "SELECT s.id FROM {legacy} s WHERE s.namespace = %s AND s.parent_id IS NOT NULL "
@@ -252,24 +271,38 @@ def _blocked_nodes(cur: Any, ns: str, rows: dict[str, int]) -> list[str]:
     return [str(row["id"]) for row in cur.fetchall()]
 
 
-def _copy_table(cur: Any, table: str, ns: str) -> int:
+def _copy_table(cur: Any, table: str, ns: str) -> tuple[int, int]:
+    """Copy one table; returns ``(source rows, inserted rows)`` from one statement's snapshot."""
     cols = sql.SQL(", ").join(sql.Identifier(c) for c in _copy_columns(cur, table))
     cur.execute(
         sql.SQL(
-            "INSERT INTO {} (namespace, {cols}) SELECT namespace, {cols} FROM {} "
-            "WHERE namespace = %s ON CONFLICT DO NOTHING"
-        ).format(_ident(CURRENT_SCHEMA, table), _ident(LEGACY_SCHEMA, table), cols=cols),
+            "WITH src AS (SELECT namespace, {cols} FROM {legacy} WHERE namespace = %s), "
+            "ins AS (INSERT INTO {current} (namespace, {cols}) SELECT namespace, {cols} FROM src "
+            "ON CONFLICT DO NOTHING RETURNING 1) "
+            "SELECT (SELECT count(*) FROM src) AS total, (SELECT count(*) FROM ins) AS inserted"
+        ).format(
+            cols=cols,
+            legacy=_ident(LEGACY_SCHEMA, table),
+            current=_ident(CURRENT_SCHEMA, table),
+        ),
         (ns,),
     )
-    return max(int(cur.rowcount), 0)
+    row = cur.fetchone()
+    return int(row["total"]), int(row["inserted"])
 
 
-def _copy(cur: Any, ns: str, rows: dict[str, int], *, mode: str) -> dict[str, Any]:
+def _copy(cur: Any, ns: str, tables: Sequence[str], *, mode: str) -> dict[str, Any]:
+    """Copy every legacy table of ``ns`` and write the marker.
+
+    ``source_rows`` in the marker is what each copy statement actually saw,
+    so ``legacy_grew`` later measures net growth since that snapshot.
+    """
     cur.execute("SET CONSTRAINTS ALL DEFERRED")
     report: dict[str, dict[str, int]] = {}
-    for table, total in rows.items():
-        inserted = _copy_table(cur, table, ns)
-        report[table] = {"insert": inserted, "skip": total - inserted}
+    for table in _legacy_tables(cur, tables):
+        total, inserted = _copy_table(cur, table, ns)
+        if total:
+            report[table] = {"insert": inserted, "skip": total - inserted}
     meta = 0
     if _table_exists(cur, LEGACY_SCHEMA, "meta"):
         cur.execute(
@@ -288,7 +321,7 @@ def _copy(cur: Any, ns: str, rows: dict[str, int], *, mode: str) -> dict[str, An
             "at": datetime.now(UTC).isoformat(),
             "rows": sum(item["insert"] for item in report.values()),
             "skipped": sum(item["skip"] for item in report.values()),
-            "source_rows": rows,
+            "source_rows": {table: item["insert"] + item["skip"] for table, item in report.items()},
         },
     )
     return {"tables": report, "meta_keys": meta}
@@ -316,7 +349,7 @@ def auto_migrate(cur: Any, ns: str, tables: Sequence[str]) -> dict[str, Any] | N
                 LEGACY_SCHEMA,
             )
         return None
-    report = _copy(cur, ns, rows, mode="auto")
+    report = _copy(cur, ns, tables, mode="auto")
     logger.info(
         "migrated namespace %r from schema %r: %s, %d meta keys",
         ns,
@@ -330,17 +363,26 @@ def auto_migrate(cur: Any, ns: str, tables: Sequence[str]) -> dict[str, Any] | N
 def mark_purged(cur: Any, ns: str) -> None:
     """Record that ``ns`` was purged, so its legacy rows are never copied back.
 
-    Call under :func:`lock_namespace`, in the purge's transaction.
+    Call under :func:`lock_namespace`, in the purge's transaction, whether or
+    not the legacy tables are visible: a role may only be granted them later.
+    An earlier copy's marker is kept under ``previous``.
     """
-    _write_marker(cur, ns, {"mode": "purged", "at": datetime.now(UTC).isoformat()})
+    marker: dict[str, Any] = {"mode": "purged", "at": datetime.now(UTC).isoformat()}
+    previous = _marker(cur, ns)
+    if previous is not None:
+        marker["previous"] = previous.get("previous", previous) if previous.get("mode") == "purged" else previous
+    _write_marker(cur, ns, marker)
 
 
 def status(cur: Any, ns: str, tables: Sequence[str]) -> dict[str, Any]:
     """Read-only view of legacy rows of ``ns``.
 
+    ``migrated``: the marker (copied automatically, merged, or purged), read
+    first so it stays visible even after the legacy schema is archived.
     ``pending``: rows exist and were never copied or discarded.
-    ``legacy_grew``: after a copy, a 0.9.x writer added rows to the old schema
-    (per-table increase); they are not merged.
+    ``legacy_grew``: per-table net growth of the legacy rows since the copy's
+    snapshot, i.e. a 0.9.x writer kept writing; those rows are not merged.
+    Replacing rows one for one is not detected.
     """
     result: dict[str, Any] = {
         "supported": True,
@@ -350,10 +392,9 @@ def status(cur: Any, ns: str, tables: Sequence[str]) -> dict[str, Any]:
         "meta_keys": 0,
         "legacy_grew": {},
     }
-    if not legacy_present(cur):
-        return result
     marker = _marker(cur, ns)
-    rows = _source_rows(cur, ns, tables)
+    present = legacy_present(cur)
+    rows = _source_rows(cur, ns, tables) if present else {}
     if marker is not None:
         result["migrated"] = marker
         recorded = marker.get("source_rows")
@@ -373,29 +414,34 @@ def merge(cur: Any, ns: str, tables: Sequence[str], *, dry_run: bool) -> dict[st
 
     Rows whose primary or unique key already exists are skipped. Similar
     entities or topic branches can end up twice; later memory maintenance
-    consolidates them. ``dry_run`` reports the same counts without writing
-    (``exact`` is false when custom unique indexes make them an estimate).
-    When a copied node's parent would be skipped, ``status`` is ``blocked``,
-    ``blocked`` lists such node ids, and nothing is written. Call under
-    :func:`lock_namespace` unless ``dry_run``.
+    consolidates them. ``dry_run`` reports the counts without writing.
+
+    ``exact`` is false when custom unique indexes make the counts an
+    estimate. Only an exact preview can stop a merge: when copied nodes would
+    lose their parent, ``status`` is ``blocked``, ``blocked`` lists them and
+    nothing is written. An inexact one is attempted and rolls back as a whole
+    if a constraint fails. ``ON CONFLICT`` cannot use deferrable unique
+    constraints, so their tables make the result ``unsupported``.
+    Call under :func:`lock_namespace` unless ``dry_run``.
     """
-    empty: dict[str, Any] = {"tables": {}, "meta_keys": 0, "exact": True, "blocked": []}
-    if not legacy_present(cur):
-        return {"status": "nothing_to_merge", **empty}
+    empty: dict[str, Any] = {"tables": {}, "meta_keys": 0, "exact": True, "blocked": [], "deferrable": []}
     marker = _marker(cur, ns)
     if marker is not None:
         state = "purged" if marker.get("mode") == "purged" else "already_migrated"
         return {"status": state, **empty}
+    if not legacy_present(cur):
+        return {"status": "nothing_to_merge", **empty}
     rows = _source_rows(cur, ns, tables)
     if not rows:
         return {"status": "nothing_to_merge", **empty}
     plan = _plan(cur, ns, rows)
-    if dry_run or plan["blocked"]:
-        return {
-            "status": "blocked" if plan["blocked"] else "dry_run",
-            **plan,
-            "meta_keys": _legacy_meta_count(cur, ns, new_only=True),
-        }
-    result = _copy(cur, ns, rows, mode="merge")
+    plan["meta_keys"] = _legacy_meta_count(cur, ns, new_only=True)
+    if plan["deferrable"]:
+        return {"status": "unsupported", **plan}
+    if plan["exact"] and plan["blocked"]:
+        return {"status": "blocked", **plan}
+    if dry_run:
+        return {"status": "dry_run", **plan}
+    result = _copy(cur, ns, tables, mode="merge")
     logger.info("merged namespace %r from schema %r: %s", ns, LEGACY_SCHEMA, result)
-    return {"status": "merged", **result, "exact": True, "blocked": []}
+    return {"status": "merged", **result, "exact": plan["exact"], "blocked": [], "deferrable": []}

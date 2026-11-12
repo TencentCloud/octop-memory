@@ -322,11 +322,12 @@ For previous installations, stop hosts and all database writers, back up configu
   `{ns}:` meta keys automatically; `harness_memory` itself is never changed. A namespace that already has new rows is not merged
   automatically: `Memory.legacy_schema_status()` reports it, and `Memory.merge_legacy_schema()` previews (default) or merges it,
   skipping rows whose keys exist. Similar entities or branches may then appear twice. Call both on the host's already-open `Memory`,
-  because constructing a new instance may itself run the automatic copy. Purging a namespace also discards its old rows for good.
-  `legacy_grew` in the status means a 0.9.x writer kept writing after the copy; those rows are not merged.
+  because constructing a new instance may itself run the automatic copy. Purging a namespace also discards its old rows for good
+  (the marker lives in `octop_memory.meta`, so dropping the whole `octop_memory` schema forgets it). `legacy_grew` in the status is the
+  per-table net growth of old rows since the copy, i.e. a 0.9.x writer kept writing; those rows are not merged.
   The default DSN database name is also octop_memory, but renaming the database is unnecessary: set `OCTOP_MEMORY_DSN` to use the old one.
 - Portable agent scans default to `~/.octop/agents/*/memory.sqlite` and `~/.octop-harness/*/memory.sqlite`.
   Old directories are no longer discovered automatically. Move them or pass
   `list_sources(extra_paths=[("agent", "/path/to/previous/*/memory.sqlite")])` explicitly from Python.
-- New defaults do not discover old paths/schemas and installing the package does not move data automatically.
-  Finish migration before starting the new installation.
+- New defaults do not discover old SQLite paths, Chroma directories or configuration, and installing the package moves no files.
+  Finish moving those before starting the new installation. The PG schema is the exception described above: it is copied per namespace on open.

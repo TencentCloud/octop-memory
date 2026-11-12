@@ -51,8 +51,11 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
   one that already has new rows is only merged through `Memory.merge_legacy_schema()`, which skips rows whose keys exist and can leave
   similar entities or branches twice. The old schema is never changed or dropped. SQLite never used it and rejects the merge.
   The per-namespace lock does not stop ordinary writes: a new-version writer in another process during the automatic copy ends up
-  merged, and 0.9.x writers after the copy are only reported (`legacy_grew`). Dropping the whole `octop_memory` schema loses the
-  migration and purge markers, so old rows would be copied again.
+  merged, and 0.9.x writers after the copy are only reported (`legacy_grew`, net growth per table; one-for-one replacement is not
+  detected). Dropping the whole `octop_memory` schema loses the migration and purge markers, so old rows would be copied again.
+  A merge into a table with a deferrable unique constraint is refused (`unsupported`): `ON CONFLICT` cannot use it.
+- The older per-namespace-schema migration (`_migrate_legacy_schema`) relies on the connection's implicit transaction; with
+  `autocommit=True` a failure part-way can leave a partial copy. The pre-1.0 shared-schema copy uses an explicit transaction.
 - Without PostgreSQL `btree_gin`, indexes fall back to plain GIN. Namespace filtering stays correct but performance isolation weakens.
   Shared checkpoint maintenance needs database-wide scope checks; even ordinary VACUUM cannot promise no lock waits.
 - Some SQLite runtimes report `attempt to write a readonly database` during read-only FTS checks.

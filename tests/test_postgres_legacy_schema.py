@@ -199,7 +199,7 @@ def test_failed_merge_writes_nothing(dsn: str, monkeypatch: pytest.MonkeyPatch) 
     real = postgres_legacy._copy_table
     calls: list[str] = []
 
-    def copy_then_fail(cur: Any, table: str, ns: str) -> int:
+    def copy_then_fail(cur: Any, table: str, ns: str) -> tuple[int, int]:
         calls.append(table)
         if len(calls) == 2:
             raise psycopg.errors.QueryCanceled("simulated failure")
@@ -348,6 +348,160 @@ def test_a_held_namespace_lock_does_not_block_other_agents(dsn: str) -> None:
             assert memory._backend.count_stats()["raw_events"] == 3
         finally:
             memory._backend.close()
+
+
+def _legacy_copy_of_current(dsn: str, ns: str) -> None:
+    """Create a pre-1.0 schema holding three raw events for ``ns`` after the fact."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE SCHEMA harness_memory")
+        conn.execute("CREATE TABLE harness_memory.raw_events (LIKE octop_memory.raw_events INCLUDING DEFAULTS)")
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO harness_memory.raw_events (namespace, id, host, timestamp, event_type, content) "
+                "VALUES (%s, %s, 'manual', now(), 'user_message', 'old')",
+                (ns, f"old-{i}"),
+            )
+
+
+def test_purge_is_recorded_even_when_the_legacy_schema_is_not_visible(dsn: str) -> None:
+    memory = _open(dsn, "agent_a")
+    try:
+        memory.add_raw("new", event_type="user_message")
+        memory._backend.purge_namespace()
+    finally:
+        memory._backend.close()
+    # Access to the old schema appears only afterwards (created, or granted to this role).
+    _legacy_copy_of_current(dsn, "agent_a")
+
+    memory = _open(dsn, "agent_a")
+    try:
+        assert memory._backend.count_stats()["raw_events"] == 0
+        assert memory.legacy_schema_status()["migrated"]["mode"] == "purged"
+    finally:
+        memory._backend.close()
+
+
+def test_uncommitted_write_does_not_stall_other_startups(dsn: str) -> None:
+    _open(dsn, "agent_a")._backend.close()
+    with psycopg.connect(dsn) as holder:
+        # An open transaction that already wrote to a shared table, like a merge in progress.
+        holder.execute(
+            "INSERT INTO octop_memory.memory_nodes (namespace, id, parent_id, level, content) "
+            "VALUES ('agent_a', 'pending', NULL, 'branch', 'pending')"
+        )
+        memory = _open(dsn, "agent_b")
+        try:
+            assert memory._backend.count_stats()["raw_events"] == 0
+        finally:
+            memory._backend.close()
+        holder.rollback()
+
+
+def test_failed_auto_migration_on_autocommit_connection_writes_nothing(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    real = postgres_legacy._copy_table
+    calls: list[str] = []
+
+    def copy_then_fail(cur: Any, table: str, ns: str) -> tuple[int, int]:
+        calls.append(table)
+        if len(calls) == 2:
+            raise psycopg.errors.QueryCanceled("simulated failure")
+        return real(cur, table, ns)
+
+    monkeypatch.setattr(postgres_legacy, "_copy_table", copy_then_fail)
+    memory = Memory(namespace="agent_a", backend="postgres", backend_config={"dsn": dsn, "autocommit": True})
+    try:
+        monkeypatch.undo()
+        assert memory._backend.count_stats()["raw_events"] == 0
+        assert _count(dsn, "octop_memory", "memory_nodes", "agent_a") == 0
+        assert _meta(dsn, "agent_a:legacy_schema_migrated") is None
+    finally:
+        memory._backend.close()
+
+
+def test_inexact_preview_does_not_block_and_the_merge_rolls_back(dsn: str) -> None:
+    _start_with_new_memory(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        _insert_node(conn, "harness_memory", "old-parent", None, "atom-1")
+        _insert_node(conn, "harness_memory", "old-child", "old-parent", None)
+        _insert_node(conn, "octop_memory", "new-node", None, "atom-1")
+        conn.execute(
+            "CREATE UNIQUE INDEX raw_events_custom ON octop_memory.raw_events (namespace, content) "
+            "WHERE host = 'nobody'"
+        )
+    memory = _open(dsn, "agent_a")
+    try:
+        plan = memory.merge_legacy_schema()
+        assert plan["exact"] is False
+        assert plan["status"] == "dry_run"
+        assert plan["blocked"] == ["old-child"]
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            memory.merge_legacy_schema(dry_run=False)
+        assert memory._backend.count_stats()["raw_events"] == 1
+        assert memory.legacy_schema_status()["pending"] is True
+    finally:
+        memory._backend.close()
+
+
+def test_deferrable_unique_constraint_is_unsupported(dsn: str) -> None:
+    _start_with_new_memory(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "ALTER TABLE octop_memory.raw_events ADD CONSTRAINT raw_events_deferred "
+            "UNIQUE (namespace, id, host) DEFERRABLE"
+        )
+    memory = _open(dsn, "agent_a")
+    try:
+        assert memory.merge_legacy_schema()["status"] == "unsupported"
+        done = memory.merge_legacy_schema(dry_run=False)
+        assert done["status"] == "unsupported"
+        assert done["deferrable"] == ["raw_events"]
+        assert memory._backend.count_stats()["raw_events"] == 1
+    finally:
+        memory._backend.close()
+
+
+def test_nested_purge_keeps_the_callers_lock_timeout(dsn: str) -> None:
+    memory = _open(dsn, "agent_a")
+    try:
+        with memory._backend.transaction(), memory._backend._cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = '50ms'")
+            memory._backend.purge_namespace()
+            cur.execute("SELECT current_setting('lock_timeout') AS v")
+            assert cur.fetchone()["v"] == "50ms"
+    finally:
+        memory._backend.close()
+
+
+def test_purge_marker_stays_visible_after_archiving_the_legacy_schema(dsn: str) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    memory = _open(dsn, "agent_a")
+    try:
+        memory._backend.purge_namespace()
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("ALTER SCHEMA harness_memory RENAME TO harness_memory_archive")
+        status = memory.legacy_schema_status()
+        assert status["migrated"]["mode"] == "purged"
+        assert status["migrated"]["previous"]["mode"] == "auto"
+        assert memory.merge_legacy_schema(dry_run=False)["status"] == "purged"
+    finally:
+        memory._backend.close()
+
+
+def test_marker_records_what_the_copy_saw(dsn: str) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    memory = _open(dsn, "agent_a")
+    try:
+        marker = memory.legacy_schema_status()["migrated"]
+        assert marker["source_rows"]["raw_events"] == 3
+        assert marker["skipped"] == 0
+    finally:
+        memory._backend.close()
 
 
 def test_sqlite_has_no_legacy_schema(tmp_path: Any) -> None:
