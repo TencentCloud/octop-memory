@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 变更
 
+- PostgreSQL checkpoint 裁剪与 SQLite 共用数量、日期、待办和恢复依赖规则，支持预演与根图消息快照。裁剪在同一事务中删除旧链及其写入，只回收裁剪后已无引用的候选 blob 版本。
 - SQLite checkpoint 裁剪支持由宿主提供 `messages` 的 DeltaChannel。在仅依赖消息增量的根图保留边界写入完整快照后，裁掉旧父链及写入，并保留窗口内的 checkpoint ID 和恢复状态。
 
 ## [1.0.4] - 2026-11-10

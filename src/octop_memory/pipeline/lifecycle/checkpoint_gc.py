@@ -1,8 +1,8 @@
-"""Prune SQLite checkpoint history while preserving the state of every survivor.
+"""Prune checkpoint history while preserving the state of every survivor.
 
 The retention window keeps the latest checkpoint and any checkpoint matching
 the count or age limit. It also keeps the checkpoints and writes required to
-replay that state. A retained checkpoint's ID, payload and writes stay intact.
+replay that state. A retained checkpoint keeps its ID and writes.
 Only an independent boundary can be detached from a deleted ancestor.
 """
 
@@ -15,6 +15,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from octop_memory.storage.backends.checkpoint_retention import (
+    checkpoint_ends_with_final_reply,
+    checkpoint_has_pending_work,
+    select_victim_ids,
+)
 from octop_memory.storage.driver_errors import REPORTABLE_ERRORS
 
 _LOG = logging.getLogger(__name__)
@@ -23,6 +28,7 @@ if TYPE_CHECKING:
     from langgraph.channels.delta import DeltaChannel
 
     from octop_memory.core import Memory
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
 
 DEFAULT_KEEP_LAST_CHECKPOINTS = 1
 """Default per-stream checkpoint count to retain when the CLI doesn't override it.
@@ -62,7 +68,7 @@ def prune_checkpoints(
 ) -> CheckpointGcStats:
     """Delete checkpoints outside the retention window and dependency closure.
 
-    Retention is SQLite-only. The newest parent checkpoint is always kept.
+    The newest root checkpoint is always kept on SQLite and PostgreSQL.
     Other checkpoints match the window if they are among the newest
     ``keep_last`` or at most ``keep_days`` old. Ancestors needed for replay
     can make the resulting history longer than this window.
@@ -76,7 +82,7 @@ def prune_checkpoints(
     Hosts can pass their graph's ``messages_channel`` to snapshot messages at
     a retained boundary whose only replay dependency is that channel. The
     channel must use the same reducer as the stored threads. This applies
-    to root-only threads using the compact SQLite saver.
+    to root-only threads with a supported SQLite or PostgreSQL saver.
     """
     if keep_last is None and keep_days is None:
         raise ValueError("prune_checkpoints requires keep_last and/or keep_days")
@@ -85,6 +91,62 @@ def prune_checkpoints(
     if keep_days is not None and keep_days < 0:
         raise ValueError("keep_days must be >= 0")
 
+    stats = CheckpointGcStats(started_at=datetime.now(UTC), dry_run=dry_run)
+    cutoff_id = None
+    if keep_days is not None:
+        cutoff_id = _cutoff_checkpoint_id((now or datetime.now(UTC)) - timedelta(days=keep_days))
+    force_drop = drop_subgraph_streams and force_drop_subgraphs
+    options: dict[str, Any] = {
+        "keep_last": keep_last,
+        "cutoff_id": cutoff_id,
+        "drop_subgraph_streams": drop_subgraph_streams,
+        "force_drop": force_drop,
+        "skip_pending": skip_pending,
+        "dry_run": dry_run,
+        "messages_channel": messages_channel,
+    }
+    if backend := _postgres_backend(memory):
+        from octop_memory.storage.backends.postgres_checkpoint_retention import prune_postgres
+
+        for streams, dropped, checkpoints, writes, skipped in prune_postgres(backend, thread_id=thread_id, **options):
+            stats.threads_scanned += 1
+            stats.streams_scanned += streams
+            stats.streams_dropped += dropped
+            stats.checkpoints_deleted += checkpoints
+            stats.writes_deleted += writes
+            stats.parent_prunes_skipped += int(skipped)
+    else:
+        _prune_sqlite(memory, stats, thread_id=thread_id, **options)
+
+    stats.finished_at = datetime.now(UTC)
+    level = logging.DEBUG if skip_pending and not stats.checkpoints_deleted else logging.INFO
+    _LOG.log(
+        level,
+        "prune_checkpoints done streams=%s streams_dropped=%s checkpoints_deleted=%s "
+        "writes_deleted=%s skipped=%s dry_run=%s",
+        stats.streams_scanned,
+        stats.streams_dropped,
+        stats.checkpoints_deleted,
+        stats.writes_deleted,
+        stats.parent_prunes_skipped,
+        dry_run,
+    )
+    return stats
+
+
+def _prune_sqlite(
+    memory: Memory,
+    stats: CheckpointGcStats,
+    *,
+    thread_id: str | None,
+    keep_last: int | None,
+    cutoff_id: str | None,
+    drop_subgraph_streams: bool,
+    force_drop: bool,
+    skip_pending: bool,
+    dry_run: bool,
+    messages_channel: DeltaChannel[list[Any]] | None,
+) -> None:
     from octop_memory.storage.backends.sqlite_checkpoint import CompactSqliteSaver
     from octop_memory.storage.backends.sqlite_checkpoint_maintenance import (
         delete_checkpoint_candidates,
@@ -95,11 +157,6 @@ def prune_checkpoints(
 
     conn = _get_checkpointer_conn(memory)
     saver = memory._checkpointer
-    stats = CheckpointGcStats(started_at=datetime.now(UTC), dry_run=dry_run)
-    cutoff_id = None
-    if keep_days is not None:
-        cutoff_id = _cutoff_checkpoint_id((now or datetime.now(UTC)) - timedelta(days=keep_days))
-    force_drop = drop_subgraph_streams and force_drop_subgraphs
 
     with saver.cursor(transaction=False):
         threads = dict.fromkeys(tid for tid, _ in _thread_ns_pairs(conn, thread_id=thread_id))
@@ -149,21 +206,6 @@ def prune_checkpoints(
                 stats.checkpoints_deleted += checkpoints
                 stats.writes_deleted += writes
                 stats.streams_dropped += int(bool(checkpoints or writes))
-
-    stats.finished_at = datetime.now(UTC)
-    level = logging.DEBUG if skip_pending and not stats.checkpoints_deleted else logging.INFO
-    _LOG.log(
-        level,
-        "prune_checkpoints done streams=%s streams_dropped=%s checkpoints_deleted=%s "
-        "writes_deleted=%s skipped=%s dry_run=%s",
-        stats.streams_scanned,
-        stats.streams_dropped,
-        stats.checkpoints_deleted,
-        stats.writes_deleted,
-        stats.parent_prunes_skipped,
-        dry_run,
-    )
-    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +259,7 @@ def _safe_to_drop_subgraphs(conn: sqlite3.Connection, serde: Any, thread_id: str
     latest = _latest_root_checkpoint(conn, serde, thread_id)
     if latest is None or _has_pending_work(conn, thread_id, *latest):
         return False
-    messages = latest[1]["channel_values"].get("messages")
-    return (
-        isinstance(messages, list)
-        and bool(messages)
-        and _message_is_ai(messages[-1])
-        and not _message_has_tool_calls(messages[-1])
-    )
+    return checkpoint_ends_with_final_reply(latest[1])
 
 
 def _latest_root_checkpoint(conn: sqlite3.Connection, serde: Any, thread_id: str) -> tuple[str, dict[str, Any]] | None:
@@ -239,14 +275,7 @@ def _latest_root_checkpoint(conn: sqlite3.Connection, serde: Any, thread_id: str
 
 
 def _has_pending_work(conn: sqlite3.Connection, thread_id: str, checkpoint_id: str, checkpoint: dict[str, Any]) -> bool:
-    values = checkpoint["channel_values"]
-    if (
-        any(name.startswith("branch:to:") for name in values)
-        or "__start__" in values
-        or values.get("__pregel_tasks")
-        or values.get("__interrupt__")
-        or checkpoint.get("pending_sends")
-    ):
+    if checkpoint_has_pending_work(checkpoint):
         return True
     return bool(
         conn.execute(
@@ -272,56 +301,21 @@ def _subgraph_newer_than_parent(conn: sqlite3.Connection, thread_id: str) -> boo
     return newer is not None
 
 
-def _message_has_tool_calls(msg: object) -> bool:
-    if isinstance(msg, dict):
-        return bool(msg.get("tool_calls"))
-    return bool(getattr(msg, "tool_calls", None))
-
-
-def _message_is_ai(msg: object) -> bool:
-    if isinstance(msg, dict):
-        return str(msg.get("type") or "") in {"ai", "AIMessage", "AIMessageChunk"}
-    name = type(msg).__name__
-    if name in {"AIMessage", "AIMessageChunk"}:
-        return True
-    return getattr(msg, "type", None) == "ai"
-
-
-def _postgres_memory(memory: Any) -> bool:
-    """True when ``memory`` stores on Postgres.
-
-    Idle maintenance calls pruning for every loaded agent. Opening the
-    checkpointer there builds a connection pool, so Postgres has to be
-    rejected before ``_ensure_checkpointer`` (TencentCloud/Octop#1795).
-    """
+def _postgres_backend(memory: Memory) -> PostgresMemoryBackend | None:
+    """Find a PostgreSQL backend without opening its agent checkpointer."""
     backend = getattr(memory, "_backend", None)
     if backend is None:
-        return False
+        return None
     try:
         from octop_memory.storage.backends.postgres import PostgresMemoryBackend
     except ImportError:
-        return False
+        return None
 
-    return isinstance(backend, PostgresMemoryBackend)
+    return backend if isinstance(backend, PostgresMemoryBackend) else None
 
 
 def _get_checkpointer_conn(memory: Memory) -> sqlite3.Connection:
-    """Return the raw sqlite3 connection backing ``memory``'s checkpointer.
-
-    Raises if the checkpointer isn't LangGraph's SQLite ``SqliteSaver``
-    (e.g. no ``langgraph`` extra installed, or PostgreSQL backend) —
-    silently no-op'ing would hide the fact that nothing got pruned.
-
-    PostgreSQL is rejected before ``_ensure_checkpointer``. That call builds
-    a connection pool, and the hourly maintenance tick would otherwise open
-    one per loaded agent even though Postgres pruning always fails.
-    """
-    if _postgres_memory(memory):
-        raise RuntimeError(
-            "Checkpoint pruning requires the SQLite checkpointer (langgraph SqliteSaver); "
-            "got 'PostgresMemoryBackend' with no usable 'conn' attribute "
-            "(PostgreSQL checkpoint pruning is not yet supported)"
-        )
+    """Return the raw connection for the SQLite retention path."""
     memory._ensure_checkpointer()
     saver = memory._checkpointer
     # getattr on an untyped saver yields Any; narrow explicitly so the
@@ -331,8 +325,7 @@ def _get_checkpointer_conn(memory: Memory) -> sqlite3.Connection:
     if not isinstance(conn, sqlite3.Connection):
         raise RuntimeError(
             "Checkpoint pruning requires the SQLite checkpointer (langgraph SqliteSaver); "
-            f"got {type(saver).__name__!r} with no usable 'conn' attribute "
-            "(PostgreSQL checkpoint pruning is not yet supported)"
+            f"got {type(saver).__name__!r} with no usable 'conn' attribute"
         )
     return conn
 
@@ -362,21 +355,7 @@ def _victim_checkpoint_ids(
         "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? ORDER BY checkpoint_id DESC",
         (thread_id, checkpoint_ns),
     ).fetchall()
-    ids = [r[0] for r in rows]
-    if not ids:
-        return []
-
-    # Safety net: never prune the single latest checkpoint of an active
-    # stream, even if it somehow fails both checks (e.g. keep_last=0
-    # would be rejected earlier, but a huge keep_days on a stale clock
-    # shouldn't be able to erase the only usable state either).
-    survivors: set[str] = {ids[0]}
-    if keep_last is not None:
-        survivors.update(ids[:keep_last])
-    if cutoff_id is not None:
-        survivors.update(cid for cid in ids if cid >= cutoff_id)
-
-    return [cid for cid in ids if cid not in survivors]
+    return select_victim_ids([r[0] for r in rows], keep_last=keep_last, cutoff_id=cutoff_id)
 
 
 def _cutoff_checkpoint_id(cutoff: datetime) -> str:

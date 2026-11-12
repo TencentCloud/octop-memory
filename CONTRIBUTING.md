@@ -90,9 +90,15 @@ Hosts can pass their graph's `messages_channel` to `prune_checkpoints` for root-
 When a retained boundary depends on its deleted parent solely for messages, pruning replays that channel with
 the host's reducer and stores the snapshot on the existing checkpoint in the same transaction as deletion.
 Scheduled Harness maintenance skips threads with pending work or subgraphs.
+The same count/age and dependency policies apply to PostgreSQL. PostgreSQL keeps LangGraph's native message
+blob versions, verifies retained rows sharing a snapshot version, and removes unreferenced versions belonging
+to deleted checkpoints. The transaction skips a thread when a checkpoint table already has a conflicting
+writer. PostgreSQL scheduled backups contain the checkpoint table rows as transactional COPY SQL.
+Restore with `psql -f <backup>` to an empty database with matching LangGraph checkpoint tables initialized.
 The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
-Long-lived readers may delay WAL reclamation. These format-maintenance operations support SQLite only and explicitly
-reject PostgreSQL, which uses its original saver. `checkpoint_ns` is not the memory namespace.
+Long-lived readers may delay WAL reclamation. Field deduplication, expansion and `slim_live_checkpoints`
+operate on SQLite files. PostgreSQL uses the original saver layout and ordinary VACUUM during idle maintenance.
+`checkpoint_ns` is not the memory namespace.
 
 ## Pull requests and releases
 

@@ -45,8 +45,9 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
   a local environment skipping unavailable services is not PG acceptance.
 - `run_gc()` retention currently supports SQLite only; PG returns empty statistics. This is an existing capability gap.
   Row deletion, checkpoint retention, and physical reclamation are different operations; none proves a host schedules them automatically.
-- Checkpoint pruning and content deduplication/expansion support SQLite only. PG explicitly rejects these paths and uses its original
-  saver. Do not equate PG vacuum with checkpoint retention; see [checkpoint maintenance](../../CONTRIBUTING.md#checkpoint-maintenance).
+- Checkpoint retention supports both backends. PostgreSQL retention takes a table-level writer lock per thread and
+  defers work when a conflicting writer already holds a lock. Ordinary VACUUM makes deleted space reusable.
+  SQLite field deduplication and expansion remain file-only operations.
 - Without PostgreSQL `btree_gin`, indexes fall back to plain GIN. Namespace filtering stays correct but performance isolation weakens.
   Shared checkpoint maintenance needs database-wide scope checks; even ordinary VACUUM cannot promise no lock waits.
 - Some SQLite runtimes report `attempt to write a readonly database` during read-only FTS checks.

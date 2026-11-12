@@ -30,7 +30,7 @@ The old lifecycle prune could leave historical checkpoints pointing to deleted r
 A LangGraph regression reproduces message and custom-channel loss across two delta channels.
 The SQLite planner keeps each retained checkpoint's dependencies and preserves its ID, payload and pending writes.
 Lifecycle pruning plans and applies each thread under one saver transaction. Offline checkpoint maintenance uses
-the same dependency filter after selecting caller-approved candidates. PostgreSQL pruning remains unsupported.
+the same dependency filter after selecting caller-approved candidates.
 
 Validation on two local database copies at `keep_last=20` deleted 896 checkpoints and checked 904 survivors.
 DeepAgents message and file state replay matched for each survivor, and the copies had no new dangling links.
@@ -57,6 +57,11 @@ All 283 retained graph states and Harness history cursors matched. Octop history
 across 31 threads and 69 history pages, and dashboard fork and continuation passed. Real Harness tests also
 cover pending parent and subagent approvals. Subgraph retention is still pending because a Harness history
 cursor can read a subgraph stream when the checkpoint list lacks a namespace filter.
+
+PostgreSQL now uses the same retention planner and defaults. It stores boundary snapshots in native
+versioned blobs and checks surviving peers before writing a shared version. PG transactions defer behind
+active writers. The disposable PG 16 validation covered preview and actual pruning, history, continuation,
+dashboard fork and approval in both the root and subagent, plus restore of the scheduled COPY backup.
 
 ### Atom-only automatic recall
 

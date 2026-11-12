@@ -115,5 +115,5 @@ class TestCheckpointerConnRequirement:
         class _NoConn:
             pass
 
-        with pytest.raises(RuntimeError, match="PostgreSQL checkpoint pruning is not yet supported"):
+        with pytest.raises(RuntimeError, match="requires the SQLite checkpointer"):
             _get_checkpointer_conn(_Memory(saver=_NoConn()))  # type: ignore[arg-type]

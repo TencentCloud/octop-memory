@@ -260,7 +260,7 @@ current session/thread scope excludes that conversation's raw. The legacy `recal
 SQLite isolates namespaces with table prefixes; PostgreSQL uses shared `octop_memory` schema and namespace-first keys.
 Chroma/Qdrant are optional indexes, not replacements for relational data/transactions; real vector-backend validation is still missing.
 LangGraph checkpoints optionally persist execution state; `checkpoint_ns` differs from the memory namespace.
-SQLite retention selects checkpoints by count or age, then keeps the ancestry and writes needed by each survivor.
+SQLite and PostgreSQL retention select checkpoints by count or age, then keep the ancestry and writes needed by each survivor.
 The saver serializes planning and deletion in a single transaction per thread. Only a survivor that can restore
 without its deleted parent loses that link. IDs, payloads and pending writes stay intact.
 Offline migration honors its caller's explicit `protected_ids` before evaluating replay dependencies.
@@ -268,6 +268,10 @@ Harness uses scheduled SQLite cleanup with `skip_pending=True`, leaving checkpoi
 For root-only threads Harness also supplies its messages reducer. A retained boundary with only a message
 dependency can store a full DeltaChannel snapshot in the pruning transaction. The boundary keeps its ID,
 metadata and writes. The planner keeps dependencies for other channels and unrecognized checkpoint formats.
+PostgreSQL stores the message seed in the native versioned blob table and holds a transaction-level writer
+reservation while applying a thread's plan. Consistent PG replay handles a reader that fetched the retained
+boundary before it was detached. PostgreSQL releases blob versions only when every surviving checkpoint
+in that namespace has stopped referencing them.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;

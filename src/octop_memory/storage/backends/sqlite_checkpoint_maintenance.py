@@ -7,8 +7,7 @@ backup and invocation. No automatic retention is installed by this module.
 from __future__ import annotations
 
 import sqlite3
-from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
 from itertools import batched, islice
@@ -17,26 +16,16 @@ from typing import TYPE_CHECKING, Any
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from octop_memory.storage.backends.checkpoint_retention import (
+    CheckpointPrunePlan,
+    CheckpointRetentionRow,
+    plan_checkpoint_dependencies,
+)
 from octop_memory.storage.backends.sqlite_checkpoint import FORMAT, CompactSqliteSaver, unpack_envelope
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
     from langgraph.channels.delta import DeltaChannel
-
-
-def _can_replay_channel(name: str) -> bool:
-    # LangGraph uses these names for scheduling and task bookkeeping, not
-    # DeltaChannel data. Consumed branch triggers routinely disappear from
-    # channel_values while remaining in channel_versions.
-    return not name.startswith("branch:to:") and name not in {
-        "__start__",
-        "__pregel_tasks",
-        "__error__",
-        "__interrupt__",
-        "__resume__",
-        "__return__",
-        "__no_writes__",
-    }
 
 
 def retain_checkpoint_dependencies(
@@ -53,13 +42,6 @@ def retain_checkpoint_dependencies(
     return plan.victims, plan.detach
 
 
-@dataclass
-class CheckpointPrunePlan:
-    victims: list[str]
-    detach: list[str]
-    message_snapshot_ids: list[str]
-
-
 def plan_checkpoint_pruning(
     cur: sqlite3.Cursor,
     serde: SerializerProtocol,
@@ -68,60 +50,29 @@ def plan_checkpoint_pruning(
     *,
     snapshot_messages: bool = False,
 ) -> CheckpointPrunePlan:
-    """Find deletable ancestors and boundaries that need a new message seed."""
+    """Read SQLite's checkpoint payloads for the shared dependency planner."""
     if not candidates:
         return CheckpointPrunePlan([], [], [])
-    candidate_ids = set(candidates)
-    writes: dict[str, set[str]] = defaultdict(set)
-    sends: set[str] = set()
-    for cid, channel in cur.execute(
+    writes = cur.execute(
         "SELECT DISTINCT checkpoint_id, channel FROM writes WHERE thread_id = ? AND checkpoint_ns = ''", (thread,)
-    ):
-        if channel == "__pregel_tasks":
-            sends.add(cid)
-        if _can_replay_channel(channel):
-            writes[cid].add(channel)
+    ).fetchall()
 
-    channels_through: dict[str, set[str]] = {}
-    parents: dict[str, str | None] = {}
-    needs_parent: set[str] = set()
-    message_boundaries: set[str] = set()
-    for cid, parent, kind, payload in cur.execute(
-        "SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint FROM checkpoints "
-        "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
-        (thread,),
-    ):
-        if parent is not None and parent not in parents:
-            raise ValueError("Missing or out-of-order checkpoint ancestor")
-        checkpoint = serde.loads_typed((kind, payload))
-        values = {name for name in checkpoint["channel_values"] if _can_replay_channel(name)}
-        inherited = channels_through[parent] if parent is not None else set()
-        version = checkpoint["v"]
-        missing = inherited - values
-        if (
-            snapshot_messages
-            and version == 4
-            and missing == {"messages"}
-            and "messages" in checkpoint["channel_versions"]
-            and cid not in candidate_ids
-            and parent in candidate_ids
+    def checkpoints() -> Iterator[CheckpointRetentionRow]:
+        for cid, parent, kind, payload in cur.execute(
+            "SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint FROM checkpoints "
+            "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
+            (thread,),
         ):
-            message_boundaries.add(cid)
-        # Older readers can reconstruct pending sends from the parent's
-        # writes. An unknown newer format may have additional dependencies.
-        elif missing or (version < 4 and parent in sends) or version > 4:
-            needs_parent.add(cid)
-        parents[cid] = parent
-        channels_through[cid] = inherited | values | writes.get(cid, set())
+            checkpoint = serde.loads_typed((kind, payload))
+            yield (
+                cid,
+                parent,
+                checkpoint["v"],
+                checkpoint["channel_values"],
+                "messages" in checkpoint["channel_versions"],
+            )
 
-    keep = parents.keys() - candidate_ids
-    for cid in reversed(parents):
-        parent = parents[cid]
-        if parent is not None and cid in keep and cid in needs_parent:
-            keep.add(parent)
-    victims = [cid for cid in candidates if cid not in keep]
-    detach = [cid for cid in keep if parents[cid] is not None and parents[cid] not in keep]
-    return CheckpointPrunePlan(victims, detach, sorted(message_boundaries.intersection(detach)))
+    return plan_checkpoint_dependencies(checkpoints(), writes, candidates, snapshot_messages=snapshot_messages)
 
 
 @dataclass
