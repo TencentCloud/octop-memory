@@ -57,6 +57,16 @@ threads, preserved the next model input, and copied a 57-message prefix when for
 - **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
 - **Continuation:** PR #41 awaits a future release/adoption; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
 
+### Pre-1.0 PostgreSQL schema recovery
+
+- **Status:** Local branch `fix/pre-rename-schema-migration` (two commits, after one review round); not pushed, unreleased.
+- **Problem:** 0.9.6 to 0.9.11 stored shared tables in PG schema `harness_memory`; 1.0.0 switched to `octop_memory` without moving rows, so upgraded PG users lost long-term memory (checkpoints on `public` are unaffected).
+- **Scope and acceptance:** Empty namespaces copy automatically on open with a marker; non-empty ones are reported by `Memory.legacy_schema_status()` and merged only through `Memory.merge_legacy_schema()` (dry run by default, one transaction, key conflicts skipped, `blocked` nodes stop the merge). Purge records a `purged` marker so old rows never return. `harness_memory` is never modified. Per-namespace advisory lock with its own timeout; no DDL lock. SQLite reports unsupported and rejects merge.
+- **⚠️ Recall/write path change:** Opening a PG namespace can add rows to all eleven namespace tables and its `{ns}:` meta keys, which then participate in recall and extraction cursors.
+- **Key files:** `storage/backends/postgres_legacy.py`, `postgres.py` (`_migrate_pre_rename_schema`, `purge_namespace`, guard in `_migrate_legacy_schema`), `core.py`; `tests/test_postgres_legacy_schema.py`; integration guides (EN/CN).
+- **Validation:** `TEST_POSTGRES_DSN=<dedicated-test-db> make all`: 1607 passed, 12 optional skips (dashboard extra, Harness, Hermes, /proc). 14 legacy-schema tests run on per-test temporary databases without skips. A template copy of a real 0.9.x database migrated 217 rows across 10 tables on open (0.16 s); other namespaces opened in 0.05 s.
+- **Continuation:** Review, PR into develop, release in 1.0.6. Hosts add a status/merge entry (Octop storage page and CLI). GitHub Wiki development-status pages are not yet synchronized.
+
 ### Explicit remember classification
 
 - **Status:** Validated on `fix/manual-memory-kind` in memory and Harness; pending PR review against develop. Unreleased.

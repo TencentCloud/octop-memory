@@ -602,11 +602,22 @@ class PostgresMemoryBackend:
     # ------------------------------------------------------------------
 
     def _legacy_schema_exists(self, cur: Any) -> bool:
+        """A per-namespace schema: ``raw_events`` without a ``namespace`` column.
+
+        A table with that column belongs to a shared layout, never to one namespace.
+        """
         cur.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = %s AND table_name = 'raw_events'",
             (self._ns,),
         )
-        return cur.fetchone() is not None
+        if cur.fetchone() is None:
+            return False
+        cur.execute(
+            """SELECT 1 FROM information_schema.columns
+               WHERE table_schema = %s AND table_name = 'raw_events' AND column_name = 'namespace'""",
+            (self._ns,),
+        )
+        return cur.fetchone() is None
 
     def _legacy_has_uuid_ids(self, cur: Any) -> bool:
         """True when the legacy schema predates TEXT ids (data unusable)."""
@@ -653,10 +664,12 @@ class PostgresMemoryBackend:
         the legacy schema is renamed to ``{ns}__old`` as a backup — data is
         never dropped here.
         """
+        from octop_memory.storage.backends.postgres_legacy import LEGACY_SCHEMA
+
         ns = self._ns
-        if ns == SHARED_SCHEMA:
-            # A namespace literally named like the shared schema would make the
-            # legacy probe match the shared tables themselves — never migrate.
+        if ns in {SHARED_SCHEMA, LEGACY_SCHEMA}:
+            # A namespace named like a shared schema (current or pre-1.0) would
+            # make the legacy probe match shared tables themselves — never migrate.
             self._conn.commit()
             return
         with self._cursor() as cur:
@@ -714,17 +727,23 @@ class PostgresMemoryBackend:
     def _migrate_pre_rename_schema(self) -> None:
         """Copy this namespace from the pre-1.0 ``harness_memory`` schema if still empty.
 
-        A failure is logged and rolled back rather than raised: the rows stay
-        in the old schema, and the store must still open.
+        Databases without that schema pay one catalog lookup. The copy holds
+        only this namespace's lock, with its own timeout, so other agents keep
+        starting. A failure is logged and rolled back rather than raised: the
+        rows stay in the old schema, and the store must still open.
         """
         from octop_memory.storage.backends import postgres_legacy
 
-        if self._ns in {SHARED_SCHEMA, postgres_legacy.LEGACY_SCHEMA}:
-            self._conn.commit()
+        with self._cursor() as cur:
+            present = self._ns not in {SHARED_SCHEMA, postgres_legacy.LEGACY_SCHEMA} and (
+                postgres_legacy.legacy_present(cur)
+            )
+        self._conn.commit()
+        if not present:
             return
         try:
             with self._cursor() as cur:
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+                postgres_legacy.lock_namespace(cur, self._ns)
                 postgres_legacy.auto_migrate(cur, self._ns, _TABLES)
             self._conn.commit()
         except psycopg.Error:
@@ -732,18 +751,22 @@ class PostgresMemoryBackend:
             logger.exception("could not migrate namespace %r from the pre-1.0 schema", self._ns)
 
     def legacy_schema_status(self) -> dict[str, Any]:
-        """Rows of this namespace still in the pre-1.0 schema. See :mod:`postgres_legacy`."""
+        """Rows of this namespace in the pre-1.0 schema. See :mod:`postgres_legacy`."""
         from octop_memory.storage.backends import postgres_legacy
 
         with self._cursor() as cur:
             return postgres_legacy.status(cur, self._ns, _TABLES)
 
     def merge_legacy_schema(self, *, dry_run: bool) -> dict[str, Any]:
-        """Merge this namespace's pre-1.0 rows into its current tables in one transaction."""
+        """Merge this namespace's pre-1.0 rows into its current tables in one transaction.
+
+        A dry run only reads and takes no lock.
+        """
         from octop_memory.storage.backends import postgres_legacy
 
         with self.transaction(), self._cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+            if not dry_run:
+                postgres_legacy.lock_namespace(cur, self._ns)
             return postgres_legacy.merge(cur, self._ns, _TABLES, dry_run=dry_run)
 
     def _rename_legacy_schema(self, cur: Any) -> None:
@@ -769,8 +792,16 @@ class PostgresMemoryBackend:
         Returns the total number of rows deleted. The shared tables and
         other namespaces are untouched.
         """
+        from octop_memory.storage.backends import postgres_legacy
+
         total = 0
-        with self._cursor() as cur:
+        with self.transaction(), self._cursor() as cur:
+            # Purging is a decision to discard this namespace's memory, including
+            # anything still waiting in the pre-1.0 schema: record it so that
+            # memory is never copied back on a later open.
+            if postgres_legacy.legacy_present(cur):
+                postgres_legacy.lock_namespace(cur, self._ns)
+                postgres_legacy.mark_purged(cur, self._ns)
             # Children before parents: memory_nodes self-FK is the only one.
             cur.execute("SET CONSTRAINTS ALL DEFERRED")
             for table in _TABLES:

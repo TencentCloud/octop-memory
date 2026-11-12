@@ -122,7 +122,7 @@ def test_marker_keeps_purged_memory_from_coming_back(dsn: str) -> None:
     memory = _open(dsn, "agent_a")
     try:
         assert memory._backend.count_stats()["raw_events"] == 0
-        assert memory.merge_legacy_schema(dry_run=False)["status"] == "already_migrated"
+        assert memory.merge_legacy_schema(dry_run=False)["status"] == "purged"
     finally:
         memory._backend.close()
 
@@ -176,6 +176,8 @@ def test_namespace_with_new_memory_waits_for_explicit_merge(dsn: str) -> None:
 
         plan = memory.merge_legacy_schema()
         assert plan["status"] == "dry_run"
+        assert plan["exact"] is True
+        assert plan["blocked"] == []
         assert plan["tables"]["raw_events"] == {"insert": 2, "skip": 1}
         assert plan["tables"]["memory_nodes"] == {"insert": 2, "skip": 0}
         assert plan["meta_keys"] == 0
@@ -226,10 +228,126 @@ def test_no_legacy_schema_reports_nothing(dsn: str) -> None:
             "migrated": None,
             "rows": {},
             "meta_keys": 0,
+            "legacy_grew": {},
         }
         assert memory.merge_legacy_schema(dry_run=False)["status"] == "nothing_to_merge"
     finally:
         memory._backend.close()
+
+
+def test_purge_before_migration_discards_legacy_memory(dsn: str) -> None:
+    _start_with_new_memory(dsn)
+    memory = _open(dsn, "agent_a")
+    try:
+        assert memory.legacy_schema_status()["pending"] is True
+        memory._backend.purge_namespace()
+    finally:
+        memory._backend.close()
+
+    memory = _open(dsn, "agent_a")
+    try:
+        assert memory._backend.count_stats()["raw_events"] == 0
+        status = memory.legacy_schema_status()
+        assert status["pending"] is False
+        assert status["migrated"]["mode"] == "purged"
+        assert memory.merge_legacy_schema(dry_run=False)["status"] == "purged"
+    finally:
+        memory._backend.close()
+
+
+def test_namespace_named_like_the_legacy_schema_copies_nothing(dsn: str) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _write(dsn, "agent_b", tag="b")
+    _rename_to_legacy(dsn)
+
+    memory = _open(dsn, "harness_memory")
+    try:
+        assert memory._backend.count_stats()["raw_events"] == 0
+    finally:
+        memory._backend.close()
+    with psycopg.connect(dsn) as conn:
+        schemas = {str(r[0]) for r in conn.execute("SELECT nspname FROM pg_namespace")}
+        rows = conn.execute("SELECT count(*) FROM harness_memory.raw_events").fetchone()
+    assert "harness_memory" in schemas
+    assert "harness_memory__old" not in schemas
+    assert rows is not None and rows[0] == 6
+
+
+def test_old_writer_after_migration_is_reported(dsn: str) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _rename_to_legacy(dsn)
+    _open(dsn, "agent_a")._backend.close()
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO harness_memory.raw_events (namespace, id, host, timestamp, event_type, content) "
+            "VALUES ('agent_a', 'late', 'manual', now(), 'user_message', 'written by 0.9.x')"
+        )
+
+    memory = _open(dsn, "agent_a")
+    try:
+        status = memory.legacy_schema_status()
+        assert status["pending"] is False
+        assert status["legacy_grew"] == {"raw_events": 1}
+        assert memory._backend.count_stats()["raw_events"] == 3
+    finally:
+        memory._backend.close()
+
+
+def _insert_node(conn: Any, schema: str, node_id: str, parent: str | None, atom: str | None) -> None:
+    conn.execute(
+        f"INSERT INTO {schema}.memory_nodes (namespace, id, parent_id, level, atom_id, content) "
+        "VALUES ('agent_a', %s, %s, %s, %s, %s)",
+        (node_id, parent, "leaf" if atom else "branch", atom, node_id),
+    )
+
+
+def test_dry_run_reports_nodes_whose_parent_would_be_skipped(dsn: str) -> None:
+    _start_with_new_memory(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # The old parent shares atom_id with a different current node, so it is skipped.
+        _insert_node(conn, "harness_memory", "old-parent", None, "atom-1")
+        _insert_node(conn, "harness_memory", "old-child", "old-parent", None)
+        _insert_node(conn, "octop_memory", "new-node", None, "atom-1")
+
+    memory = _open(dsn, "agent_a")
+    try:
+        plan = memory.merge_legacy_schema()
+        assert plan["status"] == "blocked"
+        assert plan["blocked"] == ["old-child"]
+        done = memory.merge_legacy_schema(dry_run=False)
+        assert done["status"] == "blocked"
+        assert memory._backend.count_stats()["raw_events"] == 1  # nothing written
+        assert memory.legacy_schema_status()["pending"] is True
+    finally:
+        memory._backend.close()
+
+
+def test_custom_unique_index_makes_preview_an_estimate(dsn: str) -> None:
+    _start_with_new_memory(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "CREATE UNIQUE INDEX raw_events_custom ON octop_memory.raw_events (namespace, content) "
+            "WHERE host = 'manual'"
+        )
+    memory = _open(dsn, "agent_a")
+    try:
+        assert memory.merge_legacy_schema()["exact"] is False
+    finally:
+        memory._backend.close()
+
+
+def test_a_held_namespace_lock_does_not_block_other_agents(dsn: str) -> None:
+    _write(dsn, "agent_a", tag="a")
+    _write(dsn, "agent_b", tag="b")
+    _rename_to_legacy(dsn)
+    with psycopg.connect(dsn, autocommit=True) as holder:
+        # As if agent_a were mid-merge in another process.
+        holder.execute("SELECT pg_advisory_lock(%s, hashtext('agent_a'))", (postgres_legacy._LOCK_CLASS,))
+        memory = _open(dsn, "agent_b")
+        try:
+            assert memory._backend.count_stats()["raw_events"] == 3
+        finally:
+            memory._backend.close()
 
 
 def test_sqlite_has_no_legacy_schema(tmp_path: Any) -> None:
