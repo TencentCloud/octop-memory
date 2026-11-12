@@ -74,7 +74,7 @@ shared file is the host-agnostic transport module.
 DSH is deliberately absent: it goes through the native plugin below, so it needs no
 hook scripts and no hook config."""
 
-_DSH_NATIVE_PACKAGE = "dsh-octop-memory@^0.1.4"
+_DSH_NATIVE_PACKAGE = "dsh-octop-memory@^0.1.5"
 """DSH 原生插件按包安装（独立仓库 ArvinQi/dsh-octop-memory），不再随安装器 vendored。"""
 
 _DSH_NATIVE_NAME = "dsh-octop-memory"
@@ -1204,8 +1204,8 @@ HOOK_FILES = {
 }
 # 原生插件（dsh-octop-memory）按包安装：独立仓库发版，安装器不再 vendored 源码。
 NATIVE_NAME = "dsh-octop-memory"
-NATIVE_PACKAGE = "dsh-octop-memory@^0.1.4"
-NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.4"
+NATIVE_PACKAGE = "dsh-octop-memory@^0.1.5"
+NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.5"
 
 for terminal in os.environ["OCTOP_TERMINALS"].split(","):
     terminal = terminal.strip()
