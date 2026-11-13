@@ -1236,6 +1236,21 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         self._ensure_checkpointer()
         return self._checkpointer.get_tuple(config)
 
+    def get_delta_channel_history(self, *, config: Any, channels: Sequence[str]) -> Any:
+        """Replay PostgreSQL ancestry in one consistent read transaction."""
+        if self._checkpointer_pool is None:
+            return super().get_delta_channel_history(config=config, channels=channels)
+
+        from octop_memory.storage.backends.postgres_checkpoint_retention import read_delta_history
+
+        return read_delta_history(self._checkpointer, config, channels)
+
+    async def aget_delta_channel_history(self, *, config: Any, channels: Sequence[str]) -> Any:
+        """Use the same PostgreSQL replay view for async graph readers."""
+        if self._checkpointer_pool is None:
+            return await super().aget_delta_channel_history(config=config, channels=channels)
+        return await asyncio.to_thread(self.get_delta_channel_history, config=config, channels=channels)
+
     def put(
         self,
         config: Any,

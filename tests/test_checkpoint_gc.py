@@ -90,7 +90,10 @@ def _insert_raw_checkpoint(memory: Memory, thread_id: str, checkpoint_id: str, c
 
 
 class TestKeepLast:
-    def test_retained_graph_checkpoints_restore_all_delta_channels(self, memory: Memory) -> None:
+    @pytest.mark.parametrize("snapshot_messages", [False, True])
+    def test_retained_graph_checkpoints_restore_all_delta_channels(
+        self, memory: Memory, snapshot_messages: bool
+    ) -> None:
         from typing import Annotated, TypedDict
 
         from langchain_core.messages import HumanMessage
@@ -98,11 +101,12 @@ class TestKeepLast:
 
         delta_channel = pytest.importorskip("langgraph.channels.delta").DeltaChannel
         message_reducer = pytest.importorskip("langgraph.graph.message")._messages_delta_reducer
+        messages = delta_channel(message_reducer, list, snapshot_frequency=3)
         state_schema = TypedDict(  # noqa: UP013 - class annotations cannot resolve function-local imports.
             "State",
             {
                 "prompt": str,
-                "messages": Annotated[list, delta_channel(message_reducer, snapshot_frequency=3)],
+                "messages": Annotated[list, messages],
                 "audit": Annotated[list, delta_channel(lambda seed, writes: seed + writes, snapshot_frequency=4)],
             },
         )
@@ -138,9 +142,14 @@ class TestKeepLast:
 
         before = states()
         keep_last = 5
-        preview = prune_checkpoints(memory, keep_last=keep_last, thread_id="graph", dry_run=True)
+        options = {
+            "keep_last": keep_last,
+            "thread_id": "graph",
+            "messages_channel": messages if snapshot_messages else None,
+        }
+        preview = prune_checkpoints(memory, **options, dry_run=True)
         assert states() == before
-        stats = prune_checkpoints(memory, keep_last=keep_last, thread_id="graph")
+        stats = prune_checkpoints(memory, **options)
         after = states()
 
         assert stats.checkpoints_deleted > 0
@@ -149,7 +158,7 @@ class TestKeepLast:
         assert set(list(before)[:keep_last]) <= after.keys()
         assert next(iter(after)) == next(iter(before))
         assert after == {cid: before[cid] for cid in after}
-        assert prune_checkpoints(memory, keep_last=keep_last, thread_id="graph").checkpoints_deleted == 0
+        assert prune_checkpoints(memory, **options).checkpoints_deleted == 0
 
     def test_keeps_only_newest_n_checkpoints(self, memory: Memory) -> None:
         for step in range(5):
@@ -435,6 +444,71 @@ def _store_delta_parent_chain(
 
 
 class TestRetentionDependencies:
+    def test_materializes_messages_at_oldest_retained_checkpoint(self, memory: Memory) -> None:
+        from typing import Annotated, TypedDict
+
+        from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+        from langgraph.graph import END, START, StateGraph
+
+        delta_channel = pytest.importorskip("langgraph.channels.delta").DeltaChannel
+        reducer = pytest.importorskip("langgraph.graph.message")._messages_delta_reducer
+        snapshot_type = pytest.importorskip("langgraph.checkpoint.serde.types")._DeltaSnapshot
+        channel = delta_channel(reducer, list, snapshot_frequency=200)
+        schema = TypedDict(  # noqa: UP013 - class annotations cannot resolve function-local imports.
+            "State", {"messages": Annotated[list, channel]}
+        )
+        graph = (
+            StateGraph(schema)
+            .add_node("reply", lambda state: {"messages": [AIMessage(content="reply", id="answer")]})
+            .add_edge(START, "reply")
+            .add_edge("reply", END)
+            .compile(checkpointer=memory)
+        )
+        thread = {"configurable": {"thread_id": "snapshot", "checkpoint_ns": ""}}
+        for index in range(10):
+            graph.invoke({"messages": [HumanMessage(content=f"turn {index}", id=str(index))]}, thread)
+        graph.invoke({"messages": [RemoveMessage(id="0")]}, thread)
+        saved = list(memory.list(thread))
+        keep_last = 5
+        window = saved[:keep_last]
+        boundary = window[-1]
+        assert "messages" not in boundary.checkpoint["channel_values"]
+        assert boundary.parent_config is not None
+
+        def states() -> list[tuple[Any, ...]]:
+            snapshots = [graph.get_state(row.config) for row in window] + [graph.get_state(thread)]
+            return [(snap.values, snap.next, snap.tasks, snap.interrupts) for snap in snapshots]
+
+        before = states()
+        options = {"thread_id": "snapshot", "keep_last": keep_last, "messages_channel": channel}
+        preview = prune_checkpoints(memory, **options, dry_run=True)
+        assert preview.checkpoints_deleted == len(saved) - keep_last
+        assert list(memory.list(thread)) == saved
+        conn = memory._checkpointer.conn
+        conn.execute(
+            "CREATE TEMP TRIGGER fail_prune BEFORE DELETE ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            prune_checkpoints(memory, **options)
+        assert list(memory.list(thread)) == saved
+        conn.execute("DROP TRIGGER fail_prune")
+
+        stats = prune_checkpoints(memory, **options)
+        assert stats.checkpoints_deleted == preview.checkpoints_deleted
+        assert stats.writes_deleted == preview.writes_deleted
+        actual_boundary = memory.get_tuple(boundary.config)
+        assert actual_boundary.parent_config is None
+        assert actual_boundary.pending_writes == boundary.pending_writes
+        assert actual_boundary.metadata == boundary.metadata
+        assert isinstance(actual_boundary.checkpoint["channel_values"]["messages"], snapshot_type)
+        assert states() == before
+        assert prune_checkpoints(memory, **options).checkpoints_deleted == 0
+        output = graph.invoke({"messages": [HumanMessage(content="next turn", id="next")]}, thread)
+        assert [m.content for m in output["messages"] if isinstance(m, HumanMessage)] == [
+            *(f"turn {i}" for i in range(1, 10)),
+            "next turn",
+        ]
+
     def test_scheduled_sqlite_retention_does_not_require_postgres(
         self, memory: Memory, monkeypatch: pytest.MonkeyPatch
     ) -> None:

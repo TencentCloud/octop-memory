@@ -61,7 +61,7 @@ def show_cmd(ctx: click.Context, thread_id: str, limit: int) -> None:
 @click.option(
     "--thread-id",
     default=None,
-    help="Prune only this thread. Default: scan every thread in the checkpointer.",
+    help="Prune only this thread. Required on PostgreSQL. SQLite defaults to all threads.",
 )
 @click.option(
     "--keep-last",
@@ -88,9 +88,10 @@ def show_cmd(ctx: click.Context, thread_id: str, limit: int) -> None:
     "--force-drop-subgraphs",
     is_flag=True,
     default=False,
-    help="With --drop-subgraph-streams, delete subgraphs even if the parent looks in-flight.",
+    help="SQLite only. With --drop-subgraph-streams, delete subgraphs even if the parent looks in-flight.",
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Count what WOULD be deleted without modifying anything.")
+@click.option("--offline", is_flag=True, help="Confirm the PostgreSQL thread is paused on all hosts.")
 @click.pass_context
 def prune_cmd(
     ctx: click.Context,
@@ -100,6 +101,7 @@ def prune_cmd(
     drop_subgraph_streams: bool,
     force_drop_subgraphs: bool,
     dry_run: bool,
+    offline: bool,
 ) -> None:
     """Shrink the checkpointer's ``checkpoints``/``writes`` tables.
 
@@ -107,17 +109,28 @@ def prune_cmd(
     together with older checkpoints needed to replay them. The thread itself
     stays available.
     """
+    if ctx.obj["backend"] == "postgres":
+        if not thread_id:
+            raise click.UsageError("PostgreSQL checkpoint pruning requires --thread-id.")
+        if not dry_run and not offline:
+            raise click.UsageError("PostgreSQL checkpoint pruning requires --offline.")
+        if force_drop_subgraphs:
+            raise click.UsageError("Forced subgraph pruning is supported only on SQLite.")
     memory = get_memory(ctx)
     effective_keep_last = keep_last if keep_last > 0 else None
-    stats = prune_checkpoints(
-        memory,
-        keep_last=effective_keep_last,
-        keep_days=keep_days,
-        thread_id=thread_id,
-        drop_subgraph_streams=drop_subgraph_streams or force_drop_subgraphs,
-        force_drop_subgraphs=force_drop_subgraphs,
-        dry_run=dry_run,
-    )
+    try:
+        stats = prune_checkpoints(
+            memory,
+            keep_last=effective_keep_last,
+            keep_days=keep_days,
+            thread_id=thread_id,
+            drop_subgraph_streams=drop_subgraph_streams or force_drop_subgraphs,
+            force_drop_subgraphs=force_drop_subgraphs,
+            dry_run=dry_run,
+            offline=offline,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     if ctx.obj.get("output_json"):
         click.echo(_stats_to_json(stats))
