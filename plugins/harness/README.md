@@ -59,6 +59,12 @@ octop-memory-harness install \
 
 DSH 原生插件在独立仓库发布：<https://github.com/ArvinQi/dsh-octop-memory>。
 
+## DSH 版本兼容
+
+DSH 原生插件 `dsh-octop-memory` 在 `package.json` 声明 `dsh.engines.dsh` / `peerDependencies`
+（当前 `>= 0.2.0`，已在 `0.2.2-rc.1` 验证）。安装器拉取的版本会带上这个约束，DSH 版本过低时
+插件不会加载，安装日志会提示。
+
 ## 对话记录怎么上报
 
 服务端不再解析 transcript。Stop / stop hook 把新的字节交给本地
