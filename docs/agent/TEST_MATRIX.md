@@ -48,6 +48,9 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 | Recall evaluation | `uv run python -m evals.recall.run` |
 | Example / evaluation static checks | `uv run ruff check examples evals` and `uv run ruff format --check examples evals` |
 
+The manual-document session-context duplicate test runs real SQLite retrieval and the recall policy with a fixed elapsed
+clock and synchronous source calls. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
+
 ## PostgreSQL and real host environments
 
 SQLite/PostgreSQL are production backends. Public I/O, persistence orchestration, contracts, schema, transactions,

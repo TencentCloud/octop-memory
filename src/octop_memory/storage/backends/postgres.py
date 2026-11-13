@@ -80,6 +80,26 @@ _TABLES = (
 )
 
 
+_INDEX_NAME = re.compile(r"CREATE INDEX IF NOT EXISTS (\w+)")
+
+
+def _ensure_index(cur: Any, existing: set[str], ddl: str) -> None:
+    """Run ``CREATE INDEX IF NOT EXISTS`` only for an index that is missing.
+
+    The statement takes a SHARE lock on the table before it notices the index
+    exists, so any uncommitted write there (a long merge, another agent's
+    transaction) would stall every later startup past its lock timeout.
+    A single-column FTS index already replaced by its namespace-scoped
+    ``*_ns`` counterpart also counts as present; recreating it on every
+    startup only for ``_scope_fts_indexes_by_namespace`` to drop it again
+    was wasted work.
+    """
+    match = _INDEX_NAME.match(ddl)
+    if match is not None and (match.group(1) in existing or f"{match.group(1)}_ns" in existing):
+        return
+    cur.execute(ddl)
+
+
 def _rowcount(value: Any) -> int:
     """Normalize DB-API rowcount values for strict typing."""
     return int(value) if value is not None else 0
@@ -121,6 +141,7 @@ class PostgresMemoryBackend:
             with self._connection():
                 self._init_schema()
                 self._migrate_legacy_schema()
+                self._migrate_pre_rename_schema()
         except BaseException:
             self.close()
             raise
@@ -188,6 +209,8 @@ class PostgresMemoryBackend:
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SHARED_SCHEMA}")
             cur.execute(f"SET search_path TO {SHARED_SCHEMA}, public")
+            cur.execute("SELECT indexname FROM pg_indexes WHERE schemaname = %s", (SHARED_SCHEMA,))
+            indexes = {str(row["indexname"]) for row in cur.fetchall()}
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS meta (
@@ -232,9 +255,15 @@ class PostgresMemoryBackend:
                         DEFERRABLE INITIALLY IMMEDIATE
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS memory_nodes_parent ON memory_nodes(namespace, parent_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS memory_nodes_level ON memory_nodes(namespace, level)")
-            cur.execute("CREATE INDEX IF NOT EXISTS memory_nodes_fts ON memory_nodes USING GIN(content_tsv)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS memory_nodes_parent ON memory_nodes(namespace, parent_id)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS memory_nodes_level ON memory_nodes(namespace, level)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS memory_nodes_fts ON memory_nodes USING GIN(content_tsv)"
+            )
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS raw_events (
@@ -252,12 +281,22 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_time ON raw_events(namespace, timestamp)")
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_session ON raw_events(namespace, session_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_thread ON raw_events(namespace, thread_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_host ON raw_events(namespace, host)")
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_type ON raw_events(namespace, event_type)")
-            cur.execute("CREATE INDEX IF NOT EXISTS raw_events_fts ON raw_events USING GIN(content_tsv)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_time ON raw_events(namespace, timestamp)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_session ON raw_events(namespace, session_id)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_thread ON raw_events(namespace, thread_id)"
+            )
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_host ON raw_events(namespace, host)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_type ON raw_events(namespace, event_type)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_fts ON raw_events USING GIN(content_tsv)"
+            )
 
             # ----------------------------------------------------------
             # M2: L1 Candidates
@@ -292,13 +331,19 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS candidates_status ON candidates(namespace, status)")
-            cur.execute("CREATE INDEX IF NOT EXISTS candidates_session ON candidates(namespace, session_id)")
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS candidates_target_entity ON candidates(namespace, target_entity_id)"
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS candidates_status ON candidates(namespace, status)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS candidates_session ON candidates(namespace, session_id)"
             )
-            cur.execute("CREATE INDEX IF NOT EXISTS candidates_created_at ON candidates(namespace, created_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS candidates_fts ON candidates USING GIN(fts_tsv)")
+            _ensure_index(
+                cur,
+                indexes,
+                "CREATE INDEX IF NOT EXISTS candidates_target_entity ON candidates(namespace, target_entity_id)",
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS candidates_created_at ON candidates(namespace, created_at)"
+            )
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS candidates_fts ON candidates USING GIN(fts_tsv)")
 
             # ----------------------------------------------------------
             # M2: L2 Atoms
@@ -330,12 +375,14 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_entity ON atoms(namespace, entity_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_importance ON atoms(namespace, importance)")
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_created_at ON atoms(namespace, created_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_occurred_at ON atoms(namespace, occurred_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_superseded ON atoms(namespace, superseded_by)")
-            cur.execute("CREATE INDEX IF NOT EXISTS atoms_fts ON atoms USING GIN(fts_tsv)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_entity ON atoms(namespace, entity_id)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_importance ON atoms(namespace, importance)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_created_at ON atoms(namespace, created_at)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_occurred_at ON atoms(namespace, occurred_at)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_superseded ON atoms(namespace, superseded_by)"
+            )
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS atoms_fts ON atoms USING GIN(fts_tsv)")
 
             # ----------------------------------------------------------
             # M2: L3 Entities (minimal — no summary; D28)
@@ -353,8 +400,10 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS entities_type ON entities(namespace, entity_type)")
-            cur.execute("CREATE INDEX IF NOT EXISTS entities_name ON entities(namespace, LOWER(canonical_name))")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS entities_type ON entities(namespace, entity_type)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS entities_name ON entities(namespace, LOWER(canonical_name))"
+            )
 
             # ----------------------------------------------------------
             # M2: Aliases (string-normalized lookup)
@@ -370,8 +419,8 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, alias, entity_id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS aliases_alias ON aliases(namespace, alias)")
-            cur.execute("CREATE INDEX IF NOT EXISTS aliases_entity ON aliases(namespace, entity_id)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS aliases_alias ON aliases(namespace, alias)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS aliases_entity ON aliases(namespace, entity_id)")
 
             # ----------------------------------------------------------
             # M3: L3 Entity Pages (long-form summary; D32-D37)
@@ -409,9 +458,17 @@ class PostgresMemoryBackend:
                 cur.execute(
                     "ALTER TABLE entity_pages ADD COLUMN IF NOT EXISTS mutation_version BIGINT NOT NULL DEFAULT 0"
                 )
-            cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_dirty ON entity_pages(namespace, dirty)")
-            cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_updated ON entity_pages(namespace, updated_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS entity_pages_last_regen ON entity_pages(namespace, last_regen_at)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS entity_pages_dirty ON entity_pages(namespace, dirty)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS entity_pages_updated ON entity_pages(namespace, updated_at)"
+            )
+            _ensure_index(
+                cur,
+                indexes,
+                "CREATE INDEX IF NOT EXISTS entity_pages_last_regen ON entity_pages(namespace, last_regen_at)",
+            )
 
             # ----------------------------------------------------------
             # M4: thread active-entity LRU stack (D41a + D41b)
@@ -426,9 +483,11 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, thread_id, entity_id)
                 )
             """)
-            cur.execute(
+            _ensure_index(
+                cur,
+                indexes,
                 "CREATE INDEX IF NOT EXISTS thread_active_entities_seen "
-                "ON thread_active_entities(namespace, thread_id, last_seen_at DESC)"
+                "ON thread_active_entities(namespace, thread_id, last_seen_at DESC)",
             )
 
             # ----------------------------------------------------------
@@ -450,12 +509,18 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS journal_time ON journal(namespace, timestamp)")
-            cur.execute("CREATE INDEX IF NOT EXISTS journal_action ON journal(namespace, action)")
-            cur.execute("CREATE INDEX IF NOT EXISTS journal_target_entity ON journal(namespace, target_entity_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS journal_target_atom ON journal(namespace, target_atom_id)")
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS journal_target_candidate ON journal(namespace, target_candidate_id)"
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS journal_time ON journal(namespace, timestamp)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS journal_action ON journal(namespace, action)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS journal_target_entity ON journal(namespace, target_entity_id)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS journal_target_atom ON journal(namespace, target_atom_id)"
+            )
+            _ensure_index(
+                cur,
+                indexes,
+                "CREATE INDEX IF NOT EXISTS journal_target_candidate ON journal(namespace, target_candidate_id)",
             )
             # RISK-026 / ADR-025: journal is the highest-churn shared table
             # (every namespace's extract_run heartbeat + every real mutation
@@ -502,10 +567,14 @@ class PostgresMemoryBackend:
                     PRIMARY KEY (namespace, id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS episodes_occurred ON episodes(namespace, occurred_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS episodes_session ON episodes(namespace, session_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS episodes_emotion ON episodes(namespace, emotion)")
-            cur.execute("CREATE INDEX IF NOT EXISTS episodes_fts ON episodes USING GIN(fts_tsv)")
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS episodes_occurred ON episodes(namespace, occurred_at)"
+            )
+            _ensure_index(
+                cur, indexes, "CREATE INDEX IF NOT EXISTS episodes_session ON episodes(namespace, session_id)"
+            )
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS episodes_emotion ON episodes(namespace, emotion)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS episodes_fts ON episodes USING GIN(fts_tsv)")
 
             # ----------------------------------------------------------
             # M5: Weekly/monthly digests of episodes
@@ -527,7 +596,7 @@ class PostgresMemoryBackend:
                     UNIQUE (namespace, period_kind, period_key)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS digests_start ON digests(namespace, period_start)")
+            _ensure_index(cur, indexes, "CREATE INDEX IF NOT EXISTS digests_start ON digests(namespace, period_start)")
 
             self._scope_fts_indexes_by_namespace(cur)
 
@@ -601,11 +670,22 @@ class PostgresMemoryBackend:
     # ------------------------------------------------------------------
 
     def _legacy_schema_exists(self, cur: Any) -> bool:
+        """A per-namespace schema: ``raw_events`` without a ``namespace`` column.
+
+        A table with that column belongs to a shared layout, never to one namespace.
+        """
         cur.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = %s AND table_name = 'raw_events'",
             (self._ns,),
         )
-        return cur.fetchone() is not None
+        if cur.fetchone() is None:
+            return False
+        cur.execute(
+            """SELECT 1 FROM information_schema.columns
+               WHERE table_schema = %s AND table_name = 'raw_events' AND column_name = 'namespace'""",
+            (self._ns,),
+        )
+        return cur.fetchone() is None
 
     def _legacy_has_uuid_ids(self, cur: Any) -> bool:
         """True when the legacy schema predates TEXT ids (data unusable)."""
@@ -652,10 +732,12 @@ class PostgresMemoryBackend:
         the legacy schema is renamed to ``{ns}__old`` as a backup — data is
         never dropped here.
         """
+        from octop_memory.storage.backends.postgres_legacy import LEGACY_SCHEMA
+
         ns = self._ns
-        if ns == SHARED_SCHEMA:
-            # A namespace literally named like the shared schema would make the
-            # legacy probe match the shared tables themselves — never migrate.
+        if ns in {SHARED_SCHEMA, LEGACY_SCHEMA}:
+            # A namespace named like a shared schema (current or pre-1.0) would
+            # make the legacy probe match shared tables themselves — never migrate.
             self._conn.commit()
             return
         with self._cursor() as cur:
@@ -710,6 +792,55 @@ class PostgresMemoryBackend:
         self._conn.commit()
         logger.info("migrated legacy memory schema %r into shared tables (%d rows)", ns, copied)
 
+    def _migrate_pre_rename_schema(self) -> None:
+        """Copy this namespace from the pre-1.0 ``harness_memory`` schema if still empty.
+
+        Databases without that schema pay one catalog lookup. The copy holds
+        only this namespace's lock, and every lock wait in it is bounded, so
+        neither other agents nor this one wait indefinitely; a timed-out copy
+        is retried on the next open. A failure is logged and rolled back rather than raised: the
+        rows stay in the old schema, and the store must still open.
+        """
+        from octop_memory.storage.backends import postgres_legacy
+
+        with self._cursor() as cur:
+            # Rows are filtered by ``namespace``, so namespaces named like either
+            # schema are safe here (unlike the per-namespace-schema migration).
+            present = postgres_legacy.legacy_present(cur)
+        self._conn.commit()
+        if not present:
+            return
+        try:
+            # Explicit: with ``autocommit=True`` an implicit transaction would
+            # commit each table on its own and release the lock immediately.
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                postgres_legacy.lock_namespace(cur, self._ns)
+                # Our own transaction: bound every lock wait in it (e.g. on a
+                # legacy table someone holds), then give up and open anyway.
+                cur.execute(f"SET LOCAL lock_timeout = '{postgres_legacy.LOCK_TIMEOUT}'")
+                postgres_legacy.auto_migrate(cur, self._ns, _TABLES)
+        except psycopg.Error:
+            logger.exception("could not migrate namespace %r from the pre-1.0 schema", self._ns)
+
+    def legacy_schema_status(self) -> dict[str, Any]:
+        """Rows of this namespace in the pre-1.0 schema. See :mod:`postgres_legacy`."""
+        from octop_memory.storage.backends import postgres_legacy
+
+        with self._cursor() as cur:
+            return postgres_legacy.status(cur, self._ns, _TABLES)
+
+    def merge_legacy_schema(self, *, dry_run: bool) -> dict[str, Any]:
+        """Merge this namespace's pre-1.0 rows into its current tables in one transaction.
+
+        A dry run only reads and takes no lock.
+        """
+        from octop_memory.storage.backends import postgres_legacy
+
+        with self.transaction(), self._cursor() as cur:
+            if not dry_run:
+                postgres_legacy.lock_namespace(cur, self._ns)
+            return postgres_legacy.merge(cur, self._ns, _TABLES, dry_run=dry_run)
+
     def _rename_legacy_schema(self, cur: Any) -> None:
         # PG identifiers cap at 63 bytes; keep room for the suffix.
         backup = f"{self._ns[:56]}__old"
@@ -733,8 +864,16 @@ class PostgresMemoryBackend:
         Returns the total number of rows deleted. The shared tables and
         other namespaces are untouched.
         """
+        from octop_memory.storage.backends import postgres_legacy
+
         total = 0
-        with self._cursor() as cur:
+        with self.transaction(), self._cursor() as cur:
+            # Purging is a decision to discard this namespace's memory, including
+            # anything in the pre-1.0 schema: record it so that memory is never
+            # copied back on a later open. Recorded even when this role cannot
+            # see that schema, since access may be granted later.
+            postgres_legacy.lock_namespace(cur, self._ns)
+            postgres_legacy.mark_purged(cur, self._ns)
             # Children before parents: memory_nodes self-FK is the only one.
             cur.execute("SET CONSTRAINTS ALL DEFERRED")
             for table in _TABLES:

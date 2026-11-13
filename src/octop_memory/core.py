@@ -41,6 +41,7 @@ from octop_memory.types import (
 
 if TYPE_CHECKING:
     from octop_memory.pipeline.promotion import PromotionResult
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
     from octop_memory.storage.vector import EmbeddingProvider, VectorIndex
 
 logger = logging.getLogger("octop_memory")
@@ -1049,6 +1050,33 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
     def get_meta(self, key: str) -> str | None:
         return self._backend.get_meta(key)
 
+    def legacy_schema_status(self) -> dict[str, Any]:
+        """Memory of this namespace left in the pre-1.0 ``harness_memory`` schema.
+
+        PostgreSQL only: SQLite never used that schema and reports
+        ``{"supported": False, "pending": False}``. ``pending`` means old rows
+        exist but were not copied, because this namespace already had new
+        memory when it was opened; :meth:`merge_legacy_schema` merges them.
+        """
+        backend = self._postgres_backend()
+        if backend is None:
+            return {"supported": False, "pending": False}
+        return backend.legacy_schema_status()
+
+    def merge_legacy_schema(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """Merge this namespace's pre-1.0 PostgreSQL memory into the current tables.
+
+        ``dry_run`` (the default) only reports per table how many rows would be
+        inserted and how many skipped because a row with the same key exists.
+        Otherwise copies in one transaction and records that the namespace is
+        migrated. Similar entities or branches may then exist twice. Raises
+        ``NotImplementedError`` on SQLite, which has nothing to merge.
+        """
+        backend = self._postgres_backend()
+        if backend is None:
+            raise NotImplementedError("merge_legacy_schema applies only to the PostgreSQL backend")
+        return backend.merge_legacy_schema(dry_run=dry_run)
+
     def set_meta(self, key: str, value: str) -> None:
         self._backend.set_meta(key, value)
 
@@ -1711,6 +1739,13 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         except ImportError:
             return False
         return isinstance(self._backend, PostgresMemoryBackend)
+
+    def _postgres_backend(self) -> PostgresMemoryBackend | None:
+        try:
+            from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+        except ImportError:
+            return None
+        return self._backend if isinstance(self._backend, PostgresMemoryBackend) else None
 
     def _ensure_checkpointer(self) -> None:
         """Resolve the checkpointer on first use, or raise a precise error.

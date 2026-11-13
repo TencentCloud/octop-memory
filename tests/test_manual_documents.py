@@ -14,7 +14,8 @@ import pytest
 from octop_memory import Memory, MemoryService
 from octop_memory.application.dashboard_data import promote_candidate
 from octop_memory.operations.retention import manual_document_review_status
-from octop_memory.pipeline.recall import recall_for_prompt
+from octop_memory.pipeline.recall import multi_source, recall_for_prompt
+from octop_memory.pipeline.recall.timeout import Stopwatch
 
 
 class ManualLLM:
@@ -90,7 +91,14 @@ def test_conflict_is_quarantined_and_replacement_is_a_review_candidate(memory: M
     assert [a.assertion for a in memory.list_atoms()] == [docs["USER.md"]]
 
 
-def test_exact_duplicates_are_suppressed_only_with_the_matching_session_context(memory: Memory) -> None:
+def test_exact_duplicates_are_suppressed_only_with_the_matching_session_context(
+    memory: Memory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Keep real SQLite retrieval and the recall policy deterministic under
+    # suite load. The deadline tests exercise timeout behavior separately.
+    monkeypatch.setattr(Stopwatch, "elapsed_ms", property(lambda _: 0))
+    monkeypatch.setattr(multi_source, "with_deadline", lambda search, **_: search())
+
     memory.store("Aurora uses PostgreSQL.")
     service = MemoryService(memory)
     docs = {"USER.md": "", "MEMORY.md": "# Project\n- Aurora uses PostgreSQL."}

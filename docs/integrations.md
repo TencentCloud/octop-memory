@@ -317,13 +317,17 @@ For previous installations, stop hosts and all database writers, back up configu
 - SQLite structure/namespaces, internal `hm_*` tables, `harness-checkpoint-v1` encoding, and `.hmpkg` remain unchanged by the rename.
   Continue with an explicit db_path or stop, back up, and move the complete data directory. Do not copy a live .sqlite alone and omit WAL.
   Move Chroma directories or configure their locations explicitly as well.
-- The shared PG schema is `octop_memory`. Keep the existing DSN; after backup, shutdown, and confirmation the new schema is absent,
-  have the database owner verify the old schema's actual name, then run
-  `ALTER SCHEMA "<actual_previous_schema>" RENAME TO octop_memory;` after replacing the placeholder.
-  If both schemas exist, reconcile/merge explicitly rather than overwriting one. The default DSN database name is also octop_memory,
-  but renaming the database is unnecessary: set `OCTOP_MEMORY_DSN` to use the old database.
+- The shared PG schema is `octop_memory`; 0.9.6 to 0.9.11 used `harness_memory`. Keep the existing DSN and do not rename schemas:
+  stop every 0.9.x writer first, then upgrade. Opening a namespace whose `octop_memory` rows are still empty copies its old rows and
+  `{ns}:` meta keys automatically; `harness_memory` itself is never changed. A namespace that already has new rows is not merged
+  automatically: `Memory.legacy_schema_status()` reports it, and `Memory.merge_legacy_schema()` previews (default) or merges it,
+  skipping rows whose keys exist. Similar entities or branches may then appear twice. Call both on the host's already-open `Memory`,
+  because constructing a new instance may itself run the automatic copy. Purging a namespace also discards its old rows for good
+  (the marker lives in `octop_memory.meta`, so dropping the whole `octop_memory` schema forgets it). `legacy_grew` in the status is the
+  per-table net growth of old rows since the copy, i.e. a 0.9.x writer kept writing; those rows are not merged.
+  The default DSN database name is also octop_memory, but renaming the database is unnecessary: set `OCTOP_MEMORY_DSN` to use the old one.
 - Portable agent scans default to `~/.octop/agents/*/memory.sqlite` and `~/.octop-harness/*/memory.sqlite`.
   Old directories are no longer discovered automatically. Move them or pass
   `list_sources(extra_paths=[("agent", "/path/to/previous/*/memory.sqlite")])` explicitly from Python.
-- New defaults do not discover old paths/schemas and installing the package does not move data automatically.
-  Finish migration before starting the new installation.
+- New defaults do not discover old SQLite paths, Chroma directories or configuration, and installing the package moves no files.
+  Finish moving those before starting the new installation. The PG schema is the exception described above: it is copied per namespace on open.
