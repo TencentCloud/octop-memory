@@ -86,14 +86,20 @@ The separate `thread prune --dry-run` command previews the count or age window a
 The window counts graph checkpoints, including intermediate steps within a turn. Retention can keep older checkpoints
 and writes needed by a survivor. Pruning preserves survivor IDs and detaches a parent link only at an independent boundary.
 Threads with subgraphs retain their cross-stream history unless explicit subgraph removal passes the pruning guards.
-Hosts can pass their graph's `messages_channel` to `prune_checkpoints` for root-only threads.
+Hosts can pass their graph's `messages_channel` to `prune_checkpoints` for root-only threads and for
+PostgreSQL threads whose subgraph streams qualify for removal.
 When a retained boundary depends on its deleted parent solely for messages, pruning replays that channel with
 the host's reducer and stores the snapshot on the existing checkpoint in the same transaction as deletion.
-Scheduled Harness maintenance skips threads with pending work or subgraphs.
-The same count/age and dependency policies apply to PostgreSQL. PostgreSQL keeps LangGraph's native message
-blob versions, verifies retained rows sharing a snapshot version, and removes unreferenced versions belonging
-to deleted checkpoints. The transaction skips a thread when a checkpoint table already has a conflicting
-writer. PostgreSQL scheduled backups contain the checkpoint table rows as transactional COPY SQL.
+Scheduled Harness maintenance prunes SQLite threads and skips threads with pending work or subgraphs.
+PostgreSQL checkpoint tables are shared across agents and hosts. For a preview, specify a verified
+`--thread-id`. To apply, also pass `--offline` after stopping all execution, resumes and forks for
+that thread across all hosts. Keep the thread paused until pruning returns. The library API uses
+`thread_id` and `offline=True`. The caller verifies ownership and coordinates the pause.
+PostgreSQL removes task-scoped subgraph streams only with explicit opt-in, one retained completed root,
+and no pending work. Threads with persistent or unrecognized subgraph namespaces are preserved.
+PostgreSQL keeps LangGraph's native message blob versions, verifies retained rows sharing a snapshot
+version, and removes unreferenced versions belonging to deleted checkpoints. The transaction defers if a
+checkpoint table has a conflicting writer. PostgreSQL checkpoint backups contain table rows as transactional COPY SQL.
 Restore with `psql -f <backup>` to an empty database with matching LangGraph checkpoint tables initialized.
 The host coordinates `slim_live_checkpoints`: pause new invocations, coordinate readers, and resume.
 Long-lived readers may delay WAL reclamation. Field deduplication, expansion and `slim_live_checkpoints`

@@ -87,6 +87,9 @@ def run_idle_maintenance(
     ``include_orphan_raw=False`` skips the orphan-raw pass (startup can
     opt out if a host wants the shortest path to VACUUM).
 
+    Checkpoint pruning on this path applies to SQLite. PostgreSQL requires
+    an explicit thread and an offline window.
+
     ``drop_subgraph_streams=True`` deletes finished ``tools:*`` streams
     (in-flight / HITL threads are skipped). Hosts should pass this only
     from a quiet window or after a completed turn; the default stays

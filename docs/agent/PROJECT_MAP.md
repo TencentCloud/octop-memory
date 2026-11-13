@@ -274,6 +274,10 @@ reservation while applying a thread's plan. Consistent PG replay handles a reade
 boundary before it was detached. PostgreSQL releases blob versions only when every surviving checkpoint
 in that namespace has stopped referencing them. Retained branches that can reuse an integer message
 version keep their replay ancestry.
+The PostgreSQL dispatcher requires an explicit caller-verified thread ID and offline confirmation for writes.
+Scheduled maintenance has neither an ownership source nor a cross-host pause and skips PG pruning.
+Opt-in subgraph removal preserves threads with stable or unrecognized namespaces and checks the reconstructed
+root reply when the caller supplies a messages DeltaChannel.
 
 Each SQLite backend has one connection and a reentrant lock across complete SQL/results, transactions, maintenance, and close.
 Failed standalone writes roll back; close waits for operations and never reopens. Different backends have independent locks;

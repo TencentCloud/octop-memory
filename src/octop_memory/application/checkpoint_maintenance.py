@@ -22,13 +22,14 @@ __all__ = [
 
 
 def run_checkpoint_retention(memory: Memory, *, keep_last: int) -> CheckpointGcStats | None:
-    """Run dependency-aware host retention on completed SQLite or PostgreSQL threads.
+    """Run dependency-aware host retention on completed SQLite threads.
 
-    Return None for other backends, whose checkpoint stores are outside this maintenance.
+    PostgreSQL requires a verified thread and an offline window. Return None
+    for shared or unsupported stores.
     """
     from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 
-    if not isinstance(getattr(memory, "backend", None), SqliteMemoryBackend) and _postgres_backend(memory) is None:
+    if not isinstance(getattr(memory, "backend", None), SqliteMemoryBackend):
         return None
 
     from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints

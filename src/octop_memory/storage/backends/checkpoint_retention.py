@@ -30,8 +30,7 @@ def checkpoint_has_pending_work(checkpoint: Mapping[str, Any]) -> bool:
     )
 
 
-def checkpoint_ends_with_final_reply(checkpoint: Mapping[str, Any]) -> bool:
-    messages = checkpoint["channel_values"].get("messages")
+def messages_end_with_final_reply(messages: Any) -> bool:
     if not isinstance(messages, list) or not messages:
         return False
     last = messages[-1]

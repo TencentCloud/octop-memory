@@ -16,8 +16,8 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from octop_memory.storage.backends.checkpoint_retention import (
-    checkpoint_ends_with_final_reply,
     checkpoint_has_pending_work,
+    messages_end_with_final_reply,
     select_victim_ids,
 )
 from octop_memory.storage.driver_errors import REPORTABLE_ERRORS
@@ -63,6 +63,7 @@ def prune_checkpoints(
     force_drop_subgraphs: bool = False,
     skip_pending: bool = False,
     dry_run: bool = False,
+    offline: bool = False,
     now: datetime | None = None,
     messages_channel: DeltaChannel[list[Any]] | None = None,
 ) -> CheckpointGcStats:
@@ -75,14 +76,20 @@ def prune_checkpoints(
 
     Threads with subgraphs keep their cross-stream dependencies. An explicit
     ``drop_subgraph_streams`` can remove subgraphs when the only surviving
-    parent is a completed checkpoint with no pending work. The force flag
-    overrides those subgraph guards. Dry runs use the same plan as deletion.
+    parent is a completed checkpoint with no pending work. On PostgreSQL
+    only task-scoped subgraph streams are eligible. The force flag overrides
+    the completion guards on SQLite. Dry runs use the same plan as deletion.
     With ``skip_pending``, leave threads with work pending at their head intact.
 
     Hosts can pass their graph's ``messages_channel`` to snapshot messages at
     a retained boundary whose only replay dependency is that channel. The
-    channel must use the same reducer as the stored threads. This applies
-    to root-only threads with a supported SQLite or PostgreSQL saver.
+    channel must use the same reducer as the stored thread.
+
+    PostgreSQL checkpoint tables are shared. Supply a thread_id whose
+    ownership the caller has verified. Calls without a thread_id skip
+    PostgreSQL. To apply, pass offline=True after stopping execution,
+    resumption and forks of that thread across every host. Keep the thread
+    paused until pruning returns. An offline declaration does not pause it.
     """
     if keep_last is None and keep_days is None:
         raise ValueError("prune_checkpoints requires keep_last and/or keep_days")
@@ -100,23 +107,31 @@ def prune_checkpoints(
         "keep_last": keep_last,
         "cutoff_id": cutoff_id,
         "drop_subgraph_streams": drop_subgraph_streams,
-        "force_drop": force_drop,
         "skip_pending": skip_pending,
         "dry_run": dry_run,
         "messages_channel": messages_channel,
     }
     if backend := _postgres_backend(memory):
-        from octop_memory.storage.backends.postgres_checkpoint_retention import prune_postgres
+        if force_drop:
+            raise ValueError("Forced subgraph pruning is supported only on SQLite")
+        if offline and not thread_id:
+            raise ValueError("PostgreSQL checkpoint pruning requires an explicit thread_id")
+        if thread_id:
+            if not dry_run and not offline:
+                raise ValueError("PostgreSQL checkpoint pruning requires offline=True")
+            from octop_memory.storage.backends.postgres_checkpoint_retention import prune_postgres
 
-        for streams, dropped, checkpoints, writes, skipped in prune_postgres(backend, thread_id=thread_id, **options):
-            stats.threads_scanned += 1
-            stats.streams_scanned += streams
-            stats.streams_dropped += dropped
-            stats.checkpoints_deleted += checkpoints
-            stats.writes_deleted += writes
-            stats.parent_prunes_skipped += int(skipped)
+            result = prune_postgres(backend, thread_id=thread_id, **options)
+            if result is not None:
+                streams, dropped, checkpoints, writes, skipped = result
+                stats.threads_scanned = 1
+                stats.streams_scanned = streams
+                stats.streams_dropped = dropped
+                stats.checkpoints_deleted = checkpoints
+                stats.writes_deleted = writes
+                stats.parent_prunes_skipped = int(skipped)
     else:
-        _prune_sqlite(memory, stats, thread_id=thread_id, **options)
+        _prune_sqlite(memory, stats, thread_id=thread_id, force_drop=force_drop, **options)
 
     stats.finished_at = datetime.now(UTC)
     level = logging.DEBUG if skip_pending and not stats.checkpoints_deleted else logging.INFO
@@ -259,7 +274,7 @@ def _safe_to_drop_subgraphs(conn: sqlite3.Connection, serde: Any, thread_id: str
     latest = _latest_root_checkpoint(conn, serde, thread_id)
     if latest is None or _has_pending_work(conn, thread_id, *latest):
         return False
-    return checkpoint_ends_with_final_reply(latest[1])
+    return messages_end_with_final_reply(latest[1]["channel_values"].get("messages"))
 
 
 def _latest_root_checkpoint(conn: sqlite3.Connection, serde: Any, thread_id: str) -> tuple[str, dict[str, Any]] | None:

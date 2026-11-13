@@ -45,9 +45,11 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
   a local environment skipping unavailable services is not PG acceptance.
 - `run_gc()` retention currently supports SQLite only; PG returns empty statistics. This is an existing capability gap.
   Row deletion, checkpoint retention, and physical reclamation are different operations; none proves a host schedules them automatically.
-- Checkpoint retention supports both backends. PostgreSQL retention takes a table-level writer lock per thread and
-  defers work when a conflicting writer already holds a lock. Ordinary VACUUM makes deleted space reusable.
-  SQLite field deduplication and expansion remain file-only operations.
+- PostgreSQL checkpoint retention requires a caller-verified thread ID. To apply, callers must pause execution,
+  resumes and forks for that thread across all hosts. A transaction-level writer reservation cannot see a graph
+  that has read a checkpoint but has yet to write. Scheduled retention skips the shared tables. Threads with
+  persistent or unrecognized subgraph streams are preserved. Ordinary VACUUM makes deleted space reusable.
+  Field deduplication and expansion apply to SQLite files.
 - Memory written by 0.9.6 to 0.9.11 sits in PG schema `harness_memory`. A namespace still empty in `octop_memory` is copied on open;
   one that already has new rows is only merged through `Memory.merge_legacy_schema()`, which skips rows whose keys exist and can leave
   similar entities or branches twice. The old schema is never changed or dropped. SQLite never used it and rejects the merge.

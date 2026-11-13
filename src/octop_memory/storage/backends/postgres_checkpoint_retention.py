@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -16,8 +17,8 @@ from psycopg_pool import ConnectionPool
 
 from octop_memory.storage.backends.checkpoint_retention import (
     CheckpointPrunePlan,
-    checkpoint_ends_with_final_reply,
     checkpoint_has_pending_work,
+    messages_end_with_final_reply,
     plan_checkpoint_dependencies,
     select_victim_ids,
 )
@@ -35,6 +36,9 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 _SNAPSHOT_MARKER = "_octop_memory_messages_snapshot"
 _TABLES = ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
+# LangGraph appends a task ID to each invocation-scoped path component.
+# Persistent subgraphs use a stable path with those task IDs stripped.
+_TASK_NAMESPACE = re.compile(r"[^:|]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 type _Cursor = Cursor[tuple[Any, ...]]
 
 
@@ -256,16 +260,20 @@ def _prune_thread(
     keep_last: int | None,
     cutoff_id: str | None,
     drop_subgraph_streams: bool,
-    force_drop: bool,
     skip_pending: bool,
     dry_run: bool,
     messages_channel: DeltaChannel[list[Any]] | None,
-) -> tuple[int, int, int, int, bool]:
+) -> tuple[int, int, int, int, bool] | None:
     cur.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints WHERE thread_id = %s", (thread,))
     namespaces = [ns for (ns,) in cur]
+    if not namespaces:
+        return None
     subgraphs = [ns for ns in namespaces if ns]
     skipped = (len(namespaces), 0, 0, 0, True)
-    if subgraphs and not drop_subgraph_streams:
+    if subgraphs and (
+        not drop_subgraph_streams
+        or not all(_TASK_NAMESPACE.fullmatch(part) for ns in subgraphs for part in ns.split("|"))
+    ):
         return skipped
     cur.execute(
         "SELECT checkpoint_id FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = '' ORDER BY checkpoint_id DESC",
@@ -274,20 +282,18 @@ def _prune_thread(
     roots = [cid for (cid,) in cur]
     candidates = select_victim_ids(roots, keep_last=keep_last, cutoff_id=cutoff_id)
     try:
-        latest = (
-            reader.get_tuple(_config(thread))
-            if (skip_pending and candidates) or (subgraphs and not force_drop)
-            else None
-        )
+        latest = reader.get_tuple(_config(thread)) if (skip_pending and candidates) or subgraphs else None
         pending = latest is not None and _has_pending(cur, thread, latest)
         if skip_pending and candidates and pending:
             return skipped
-        plan = _plan(cur, thread, candidates, snapshot_messages=messages_channel is not None and not subgraphs)
-        if subgraphs and not force_drop:
-            if latest is None or pending or len(roots) - len(plan.victims) != 1:
+        if subgraphs:
+            if latest is None or pending:
                 return skipped
+            messages = latest.checkpoint["channel_values"].get("messages")
+            if not isinstance(messages, list) and messages_channel is not None:
+                messages = _replay_messages(reader, thread, latest.checkpoint["id"], messages_channel).value
             if (
-                not checkpoint_ends_with_final_reply(latest.checkpoint)
+                not messages_end_with_final_reply(messages)
                 or cur.execute(
                     "SELECT 1 FROM checkpoints WHERE thread_id = %s AND checkpoint_ns <> '' "
                     "AND checkpoint_id > %s LIMIT 1",
@@ -295,6 +301,7 @@ def _prune_thread(
                 ).fetchone()
             ):
                 return skipped
+        plan = _plan(cur, thread, candidates, snapshot_messages=messages_channel is not None)
         snapshots = []
         if messages_channel is not None and plan.message_snapshot_ids:
             try:
@@ -303,6 +310,8 @@ def _prune_thread(
                 # Preserve the ambiguous branch and still prune unrelated,
                 # independently restorable ancestors of this thread.
                 plan = _plan(cur, thread, candidates, snapshot_messages=False)
+        if subgraphs and len(roots) - len(plan.victims) != 1:
+            return skipped
     except REPORTABLE_ERRORS:
         _LOG.warning("prune_checkpoints: cannot verify ancestry for thread=%s", thread, exc_info=True)
         return skipped
@@ -339,34 +348,25 @@ def _prune_thread(
 
 
 def prune_postgres(
-    backend: PostgresMemoryBackend, *, thread_id: str | None, dry_run: bool, **options: Any
-) -> Iterator[tuple[int, int, int, int, bool]]:
+    backend: PostgresMemoryBackend, *, thread_id: str, dry_run: bool, **options: Any
+) -> tuple[int, int, int, int, bool] | None:
     with _connection(backend) as conn, conn.cursor(row_factory=tuple_row) as cur:
         tables = cur.execute(
             "SELECT to_regclass('checkpoints'), to_regclass('checkpoint_writes'), to_regclass('checkpoint_blobs')"
         ).fetchone()
         if not tables or not all(tables):
-            return
-        cur.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints WHERE (%s::text IS NULL OR thread_id = %s) ORDER BY thread_id",
-            (thread_id, thread_id),
-        )
-        threads = [thread for (thread,) in cur]
+            return None
         reader = PostgresSaver(conn)
-        for thread in threads:
-            try:
-                with conn.transaction():
-                    if dry_run:
-                        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-                    else:
-                        # The saver writes all three tables. Reserve the writer
-                        # before planning without waiting behind a live writer.
-                        cur.execute(
-                            "LOCK TABLE checkpoints, checkpoint_blobs, checkpoint_writes "
-                            "IN SHARE ROW EXCLUSIVE MODE NOWAIT"
-                        )
-                    result = _prune_thread(cur, reader, thread, dry_run=dry_run, **options)
-            except LockNotAvailable:
-                _LOG.debug("prune_checkpoints: concurrent PostgreSQL writer for thread=%s", thread)
-                result = (0, 0, 0, 0, True)
-            yield result
+        try:
+            with conn.transaction():
+                if dry_run:
+                    cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                else:
+                    # Other threads can still write to these shared tables.
+                    cur.execute(
+                        "LOCK TABLE checkpoints, checkpoint_blobs, checkpoint_writes IN SHARE ROW EXCLUSIVE MODE NOWAIT"
+                    )
+                return _prune_thread(cur, reader, thread_id, dry_run=dry_run, **options)
+        except LockNotAvailable:
+            _LOG.debug("prune_checkpoints: concurrent PostgreSQL writer for thread=%s", thread_id)
+            return (0, 0, 0, 0, True)

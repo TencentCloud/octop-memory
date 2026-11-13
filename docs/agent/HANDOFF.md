@@ -24,7 +24,7 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
-### SQLite checkpoint retention
+### Checkpoint retention
 
 The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.
 A LangGraph regression reproduces message and custom-channel loss across two delta channels.
@@ -58,10 +58,17 @@ across 31 threads and 69 history pages, and dashboard fork and continuation pass
 cover pending parent and subagent approvals. Subgraph retention is still pending because a Harness history
 cursor can read a subgraph stream when the checkpoint list lacks a namespace filter.
 
-PostgreSQL now uses the same retention planner and defaults. It stores boundary snapshots in native
-versioned blobs and checks surviving peers before writing a shared version. PG transactions defer behind
-active writers. The disposable PG 16 validation covered preview and actual pruning, history, continuation,
-dashboard fork and approval in both the root and subagent, plus restore of the scheduled COPY backup.
+PostgreSQL uses the same retention planner. The PG checkpoint tables lack agent ownership, and a live fork
+can hold a checkpoint in memory before it writes. `prune_checkpoints` therefore requires an explicitly selected,
+caller-verified PG thread, with execution, resume and fork paused across hosts before applying. Scheduled
+retention skips PG. Opt-in PG subgraph removal retains any thread with persistent or unrecognized subgraph
+streams and supports completed task-scoped streams whose final reply must be replayed from DeltaChannel.
+Boundary snapshots use native versioned blobs and check surviving peers before writing a shared version.
+
+Local branch `fix/subgraph-checkpoint-retention` includes develop at `50127ac` (PR #48).
+With disposable PostgreSQL 16, `make all` passed 1,631 tests with 12 skips, including eight PG retention
+cases. The companion Harness branch, loading this memory source, passed `make all` with 2,076 tests
+and 17 skips. Its PG approval tests exercise both scheduled deferral and explicit offline pruning.
 
 ### Atom-only automatic recall
 
@@ -76,13 +83,13 @@ dashboard fork and approval in both the root and subagent, plus restore of the s
 
 ### Pre-1.0 PostgreSQL schema recovery
 
-- **Status:** Local branch `fix/pre-rename-schema-migration` (four commits, after three review rounds); not pushed, unreleased.
+- **Status:** [PR #48](https://github.com/TencentCloud/octop-memory/pull/48) merged into develop as `50127ac`.
 - **Problem:** 0.9.6 to 0.9.11 stored shared tables in PG schema `harness_memory`; 1.0.0 switched to `octop_memory` without moving rows, so upgraded PG users lost long-term memory (checkpoints on `public` are unaffected).
 - **Scope and acceptance:** Empty namespaces copy automatically on open, in an explicit transaction, with a marker; non-empty ones are reported by `Memory.legacy_schema_status()` and merged only through `Memory.merge_legacy_schema()` (dry run by default, one transaction, key conflicts skipped; an exact preview with `blocked` nodes stops it; deferrable unique constraints make it `unsupported`). Every purge records a `purged` marker so old rows never return, even if the role could not see them. Markers are read before the legacy tables. `harness_memory` is never modified. Per-namespace advisory lock; the automatic copy bounds every lock wait to 5 s and retries on the next open, while a host-called merge keeps the caller's lock_timeout. Namespaces named `harness_memory`/`octop_memory` migrate like any other. SQLite reports unsupported and rejects merge.
 - **⚠️ Recall/write path change:** Opening a PG namespace can add rows to all eleven namespace tables and its `{ns}:` meta keys, which then participate in recall and extraction cursors. Startup DDL now creates only missing indexes, so uncommitted writes elsewhere no longer stall other agents' startup.
 - **Key files:** `storage/backends/postgres_legacy.py`, `postgres.py` (`_ensure_index`, `_migrate_pre_rename_schema`, `purge_namespace`, guard in `_migrate_legacy_schema`), `core.py`; `tests/test_postgres_legacy_schema.py`; integration guides (EN/CN).
 - **Validation:** With dedicated PostgreSQL 16, `make all RUN='uv run --no-sync'` and two subsequent `make test` runs each passed 1621 tests with 12 optional skips. All 27 legacy-schema tests ran (26 temporary PG databases, 1 SQLite). A template copy of a real 0.9.x database migrated 217 rows. Coverage from a failing full run showed the atom timeout branch. Injecting 100 ms into the third SQLite atom query reproduced the same failed assertion in the original test. The updated test keeps real SQLite and policy assertions with a fixed elapsed clock and synchronous source calls, and passes with the same injected delay. Production budgets and deadline tests are unchanged. The cause of the intermittent delay and its association with this branch remain unconfirmed.
-- **Continuation:** Review, PR into develop, release in 1.0.6. Hosts add a status/merge entry (Octop storage page and CLI). GitHub Wiki development-status pages are not yet synchronized.
+- **Continuation:** Hosts add a status/merge entry (Octop storage page and CLI).
 
 ### Explicit remember classification
 
