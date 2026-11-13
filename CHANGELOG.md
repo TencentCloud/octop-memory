@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PostgreSQL checkpoint 裁剪与 SQLite 共用数量、日期、待办和恢复依赖规则，支持预演与根图消息快照。裁剪在同一事务中删除旧链及其写入，只回收裁剪后已无引用的候选 blob 版本。
 - SQLite checkpoint 裁剪支持由宿主提供 `messages` 的 DeltaChannel。在仅依赖消息增量的根图保留边界写入完整快照后，裁掉旧父链及写入，并保留窗口内的 checkpoint ID 和恢复状态。
 
+### 修复
+
+- PostgreSQL：找回 1.0 改名前写入的长期记忆。0.9.6 至 0.9.11 把共享表放在 `harness_memory` schema，1.0.0 改用 `octop_memory` 时没有迁移数据，升级后旧记忆读不到（checkpoint 在 `public`，不受影响）。现在打开某个 namespace 时，如果它在当前 schema 里还没有任何数据，就自动把旧行和 `{ns}:` 开头的 meta 键复制过来；如果已经有新数据，则不自动合并，由宿主通过新增的 `Memory.legacy_schema_status()` 查看、`Memory.merge_legacy_schema(dry_run=...)` 确认后合并（主键或唯一键冲突的行跳过，在一个事务里完成）。两种方式都会写入迁移标记；清空记忆（无论迁移前后）会记录放弃旧数据，以后不会再迁回来；`harness_memory` 本身不改动。迁移和合并只持有该 namespace 的咨询锁（带超时），不占全库 DDL 锁；没有旧 schema 的库只多一次目录查询。预览会列出父节点会被跳过的节点（`blocked`，此时不写入），遇到自定义唯一索引时标为估算（`exact: false`）；迁移后旧 schema 仍有新增行时状态里给出 `legacy_grew`，不自动合并。另修复名为 `harness_memory` 的 namespace 会被旧的单 schema 迁移误当成自己的数据；这类同名 namespace 仍会正常找回自己的旧记忆。自动迁移的所有锁等待最多 5 秒，超时就放弃本次复制、照常打开，下次打开再试。
+- PostgreSQL 启动建表只创建缺少的索引：`CREATE INDEX IF NOT EXISTS` 在发现索引已存在前就要拿表锁，任何未提交的写事务（如一次合并）都会让其他 agent 启动超时；顺带不再每次启动重建再删除已被 `*_fts_ns` 取代的单列 FTS 索引。SQLite 不涉及：状态返回 `supported: False`，合并直接拒绝。
+
 ## [1.0.4] - 2026-11-10
 
 ### 修复

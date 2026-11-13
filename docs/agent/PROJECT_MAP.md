@@ -37,6 +37,7 @@ Paths in this table are relative to `src/octop_memory/`.
 | `application/host_files.py`, `path_projection.py` | Host Markdown index and virtual paths |
 | `application/checkpoint_maintenance.py`, `storage/backends/sqlite_checkpoint*.py` | SQLite checkpoint content reuse, offline/online maintenance, reader compatibility |
 | `storage/backends/__init__.py`, `sqlite.py`, `postgres.py`, `postgres_pool.py` | `MemoryBackend` contract, SQL, FTS, transactions, namespaces, pools |
+| `storage/backends/postgres_legacy.py` | Pre-1.0 `harness_memory` schema: automatic copy on open, status, merge, purge marker (PG only) |
 | `storage/driver_errors.py` | Exception tuples allowed to degrade at each boundary |
 | `storage/vector/`, `ports/llm/` | Optional vector indexes, embeddings, `LLMClient` |
 | `pipeline/` | extractor, promotion, page, episode, recall, lifecycle pipelines |
