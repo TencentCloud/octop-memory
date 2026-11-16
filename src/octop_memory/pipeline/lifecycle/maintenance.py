@@ -81,12 +81,14 @@ def run_idle_maintenance(
 ) -> IdleMaintenanceStats:
     """Run one cheap prune → GC → nudge pass. Safe with live traffic.
 
-    Does not raise. Checkpointer / backend gaps (no langgraph extra,
-    Postgres prune not implemented) land in ``*_error`` and the rest of
+    Does not raise. Checkpointer and backend errors land in ``*_error`` and the rest of
     the tick continues.
 
     ``include_orphan_raw=False`` skips the orphan-raw pass (startup can
     opt out if a host wants the shortest path to VACUUM).
+
+    Checkpoint pruning on this path applies to SQLite. PostgreSQL requires
+    an explicit thread and an offline window.
 
     ``drop_subgraph_streams=True`` deletes finished ``tools:*`` streams
     (in-flight / HITL threads are skipped). Hosts should pass this only
