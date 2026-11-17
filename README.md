@@ -66,7 +66,7 @@ Existing installations should read the [rename migration guide](docs/integration
 pip install octop-memory
 ```
 
-Current release: **1.0.4**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.5**. See the [release notes](CHANGELOG.md).
 
 ```python
 from octop_memory import Memory, MemoryService
