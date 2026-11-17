@@ -101,6 +101,52 @@ def test_events_are_batched_with_stable_session_and_eof(monkeypatch, tmp_path, c
     assert len(keys) == len(set(keys)) == 401
 
 
+def _uuid_parser():
+    """Mirrors Claude uuid keys: stable ids, never ``lineN`` (mapped=False)."""
+
+    def parse(text: str):
+        events = []
+        for index, line in enumerate(text.splitlines()):
+            body = json.loads(line)["line"]
+            events.append(_event(body, f"uuid-{body}:0"))
+        return SimpleNamespace(events=events, session_id="sess-1")
+
+    return parse
+
+
+def test_exactly_one_batch_of_unmapped_events_advances_to_eof(monkeypatch, tmp_path, capsys):
+    """Review: N == batch_limit must still advance offset when every batch succeeded."""
+    monkeypatch.setenv("OCTOP_INGEST_BATCH_SIZE", "200")
+    path = _transcript(tmp_path, 200)
+    _code, calls = _run(monkeypatch, tmp_path, _uuid_parser(), path, responses=[_ok(200)])
+    payload = _out(capsys)
+    assert len(calls) == 1
+    assert payload["ok"] is True
+    assert payload["offset"] == path.stat().st_size
+
+
+def test_exact_multiple_batches_advance_from_nonzero_offset(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("OCTOP_INGEST_BATCH_SIZE", "200")
+    path = _transcript(tmp_path, 400)
+    _code, _calls = _run(
+        monkeypatch, tmp_path, _uuid_parser(), path, responses=[_ok(200), _ok(200)]
+    )
+    payload = _out(capsys)
+    assert payload["batches"] == 2
+    assert payload["offset"] == path.stat().st_size
+
+    # Continue from the saved offset with another exact batch.
+    path.write_text(path.read_text() + "".join(
+        json.dumps({"line": f"msg-{i}"}) + "\n" for i in range(400, 600)
+    ))
+    _code, _calls = _run(
+        monkeypatch, tmp_path, _uuid_parser(), path,
+        offset=payload["offset"], responses=[_ok(200)],
+    )
+    payload2 = _out(capsys)
+    assert payload2["offset"] == path.stat().st_size
+
+
 def test_multiblock_record_is_batched_by_event_count(monkeypatch, tmp_path, capsys):
     """A JSONL line can parse into multiple events; batches count events, not lines."""
     path = _transcript(tmp_path, 101)

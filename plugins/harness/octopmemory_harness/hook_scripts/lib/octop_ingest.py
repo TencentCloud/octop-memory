@@ -317,7 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         if len(batch) >= batch_limit and not _flush(final=False):
             break
     else:
-        _flush(final=True)
+        # An exact multiple of the limit is already flushed with final=False,
+        # so commit the consumed bytes here once every batch succeeded.
+        if _flush(final=True):
+            committed = start + len(complete)
 
     print(
         json.dumps(

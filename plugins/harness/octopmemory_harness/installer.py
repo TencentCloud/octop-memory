@@ -240,7 +240,7 @@ def _restrict(path):
     try:
         if os.name == "nt":
             subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:R"],
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:F"],
                 capture_output=True,
                 check=False,
             )
@@ -1740,7 +1740,7 @@ def _restrict(path):
     try:
         if os.name == "nt":
             subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:R"],
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:F"],
                 capture_output=True,
                 check=False,
             )
@@ -2092,6 +2092,7 @@ def _toml_blocks(text):
 
 def undo_codex():
     path = _project(".codex", "config.toml") if IN_PROJECT else home / ".codex" / "config.toml"
+    scripts_dir = _hooks_target("codex")
     if path.exists():
         text = path.read_text(encoding="utf-8")
         blocks, kept = _toml_blocks(text), []
@@ -2099,7 +2100,7 @@ def undo_codex():
         for block in blocks:
             body = "".join(block)
             header = block[0].strip() if block else ""
-            ours = _mentions_dir(body, CODEX_DIR)
+            ours = _mentions_dir(body, scripts_dir)
             if ours and header.startswith("[[hooks.") and header.endswith(".hooks]]"):
                 event = header[len("[[hooks.") : -len(".hooks]]")]
                 if kept and kept[-1][0].strip() == f"[[hooks.{event}]]" and not "".join(kept[-1][1:]).strip():
