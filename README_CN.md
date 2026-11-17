@@ -65,7 +65,7 @@
 pip install octop-memory
 ```
 
-当前版本：**1.0.4**。更新内容见[发布说明](CHANGELOG.md)。
+当前版本：**1.0.5**。更新内容见[发布说明](CHANGELOG.md)。
 
 ```python
 from octop_memory import Memory, MemoryService
