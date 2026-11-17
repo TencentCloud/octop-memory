@@ -8,7 +8,7 @@ See [CHANGELOG](../CHANGELOG.md) for release changes.
 | Goal | Entry point |
 |---|---|
 | Save and recall memory from Python | [Quick start](../README.md#quick-start), [public API example](../examples/basic_usage.py) |
-| Integrate your agent, OpenClaw, or Hermes | Integration guide: [English](integrations.md), [Chinese](integrations_CN.md) |
+| Integrate your agent, OpenClaw, Hermes, or a coding terminal | Integration guide: [English](integrations.md), [Chinese](integrations_CN.md) |
 | Decide whether a change belongs in memory, Harness, or Octop | [Repository ownership](../AGENTS.md#repository-ownership-and-collaboration), [integration map](agent/PROJECT_MAP.md#repository-integration-map) |
 | Upgrade an installation using previous names/paths | Migration guide: [English](integrations.md#renaming-and-migrating-existing-installations), [Chinese](integrations_CN.md#更名与已有安装迁移) |
 | Back up, slim, or roll back checkpoint formats | [Checkpoint maintenance](../CONTRIBUTING.md#checkpoint-maintenance) |

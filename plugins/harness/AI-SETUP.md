@@ -15,7 +15,7 @@
 ## macOS / Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
   | sh -s -- --url "$OCTOP_URL" --token "$OCTOP_TOKEN"
 ```
 
@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plug
 ## Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
 .\install.ps1 -Url $env:OCTOP_URL -Token $env:OCTOP_TOKEN
 ```
 

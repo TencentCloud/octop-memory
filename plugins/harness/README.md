@@ -9,14 +9,14 @@ MCP 接口和 token；这个包负责在 Claude Code / Codex / Cursor / Kiro / D
 macOS / Linux：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
   | sh -s -- --url https://<octop-host>/mcp/memory/ --token omcp_…
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
 .\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token omcp_…
 ```
 

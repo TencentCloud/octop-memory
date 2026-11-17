@@ -19,7 +19,7 @@ The core uses the standard library and SQLite; PostgreSQL, vector indexes, and L
 
 - Public entry points: `Memory` (`core.py`) and `MemoryService` (`service.py`); shared orchestration is in `application/`.
 - Business pipelines live in `pipeline/`, persistence in `storage/`, and CLI/JSON-RPC adapters in `adapters/`.
-- `plugins/<host>/` adapts external hosts, currently OpenClaw and Hermes. New adapters reuse shared business logic.
+- `plugins/<host>/` adapts external hosts, currently OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. New adapters reuse shared business logic.
 - Find implementation and validation entry points in [PROJECT_MAP](docs/agent/PROJECT_MAP.md)
   and [TEST_MATRIX](docs/agent/TEST_MATRIX.md). Package paths above are relative to `src/octop_memory/`.
 
@@ -38,6 +38,7 @@ a problem appearing in Octop's UI does not justify copying memory algorithms or 
 | User memory settings, HTTP/CLI, permissions, memory/review UI, proactive-reminder product flows | Octop | Apply settings through Harness configuration/public memory APIs. Put new algorithms or generic turn behavior in the owning library. |
 | Schema, SQL, namespaces, checkpoint encoding, migrations, generic space maintenance | octop-memory | Check Harness resource reuse/closure and Octop statistics, backup/restore, thread cleanup, and online-pause coordination. |
 | OpenClaw/Hermes hooks, tool schemas, installation configuration | This repository's `plugins/<host>/` | Reuse this repository's Runtime; external hosts need no changes to octop-harness or Octop. |
+| Terminal client hooks for Claude Code, Codex, Cursor, Kiro, and DSH | This repository's `plugins/harness` | Call an Octop memory MCP with a user token. Parse transcripts locally and send `memory_capture(events=...)`. DSH uses the native plugin. |
 
 Do not confuse the two `MemoryRuntime` classes: this package's `application.runtime.MemoryRuntime`
 is host-neutral orchestration; `octop_harness.memory.runtime.MemoryRuntime` adapts assembly and lifecycle to agents.
