@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -21,6 +22,42 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from transcript import _PARSERS, SESSION_PREFIXES  # noqa: E402
+
+BATCH_ENV = "OCTOP_INGEST_BATCH_SIZE"
+DEFAULT_BATCH_SIZE = 200
+
+
+def _batch_size() -> int:
+    """Events per request; keep in sync with the server's batch cap (200)."""
+    try:
+        value = int(os.environ.get(BATCH_ENV) or DEFAULT_BATCH_SIZE)
+    except ValueError:
+        return DEFAULT_BATCH_SIZE
+    return max(1, min(value, 500))
+
+
+def _tool_error(body: dict) -> str:
+    """MCP SDK wraps tool exceptions as HTTP 200 + ``result.isError=true``."""
+    result = body.get("result")
+    if not isinstance(result, dict) or not result.get("isError"):
+        return ""
+    parts = result.get("content")
+    if isinstance(parts, list):
+        text = " ".join(
+            str(part.get("text") or "") for part in parts if isinstance(part, dict)
+        ).strip()
+        if text:
+            return text
+    return "MCP tool returned isError=true"
+
+
+def _tool_ok(body: dict) -> bool:
+    result = body.get("result")
+    if not isinstance(result, dict) or result.get("isError"):
+        return False
+    structured = result.get("structuredContent")
+    return isinstance(structured, dict) and "accepted" in structured
+
 
 SKIP_MARKERS = (
     "[octop memory ",
@@ -101,65 +138,106 @@ def main(argv: list[str] | None = None) -> int:
     start = args.offset if 0 <= args.offset <= len(raw) else 0
     if start and raw[start - 1 : start] != b"\n":
         start = 0
-    text = raw[start:].decode("utf-8", "replace")
+
+    # Only complete lines are consumed: a half-written trailing record stays for the
+    # next run, otherwise the offset would skip bytes that were never parsed.
+    tail = raw[start:]
+    lines = tail.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+        complete = b"\n".join(lines) + b"\n" if lines else b""
+    else:
+        if len(lines) > 1:
+            lines = lines[:-1]
+            complete = b"\n".join(lines) + b"\n"
+        else:
+            lines = []
+            complete = b""
+    text = complete.decode("utf-8", "replace")
 
     parse = _PARSERS.get(args.source)
     if parse is None:
         print(json.dumps({"ok": False, "error": f"unknown source {args.source!r}"}))
         return 2
-    parsed = parse(text)
+    full = parse(text)
 
-    events: list[dict] = []
-    for event in parsed.events:
-        content = event.content.strip()
-        if not content or any(marker in content for marker in SKIP_MARKERS):
-            continue
-        item: dict = {
-            "event_type": event.event_type,
-            "content": content,
-            "payload": dict(event.payload or {}),
-            "timestamp_iso": event.timestamp.isoformat(),
-        }
-        events.append(item)
-
-    if not events:
-        print(json.dumps({"ok": True, "status": 200, "imported": 0, "offset": len(raw)}))
-        return 0
-
-    session_id = parsed.session_id or args.session
+    session_id = full.session_id or args.session
     if not session_id:
         print(json.dumps({"ok": False, "error": "no session id"}))
         return 2
     prefix = args.prefix or SESSION_PREFIXES.get(args.source, "")
 
-    status, body = _post(
-        f"{url}/",
-        _headers(config),
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "memory_capture",
-                "arguments": {
-                    "events": events,
-                    "source": args.source,
-                    "session_id": f"{prefix}{session_id}",
-                    "extract": True,
+    batch = _batch_size()
+    consumed = 0
+    imported = 0
+    batches = 0
+    ok = True
+    error = ""
+
+    for index in range(0, len(lines), batch):
+        chunk_lines = lines[index : index + batch]
+        chunk = b"\n".join(chunk_lines) + b"\n"
+        parsed = parse(chunk.decode("utf-8", "replace"))
+        events: list[dict] = []
+        for event in parsed.events:
+            content = event.content.strip()
+            if not content or any(marker in content for marker in SKIP_MARKERS):
+                continue
+            events.append(
+                {
+                    "event_type": event.event_type,
+                    "content": content,
+                    "payload": dict(event.payload or {}),
+                    "timestamp_iso": event.timestamp.isoformat(),
+                }
+            )
+        if not events:
+            consumed += len(chunk)
+            continue
+
+        status, body = _post(
+            f"{url}/",
+            _headers(config),
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "memory_capture",
+                    "arguments": {
+                        "events": events,
+                        "source": args.source,
+                        "session_id": f"{prefix}{session_id}",
+                        "extract": True,
+                    },
                 },
             },
-        },
-    )
-    result = body.get("result", {}).get("structuredContent") or {}
-    ok = 200 <= status < 300 and "error" not in body
+        )
+        batches += 1
+        top_error = body.get("error")
+        tool_error = _tool_error(body)
+        if not (200 <= status < 300) or top_error or tool_error or not _tool_ok(body):
+            ok = False
+            error = (
+                (top_error or {}).get("message")
+                if isinstance(top_error, dict)
+                else (tool_error or f"HTTP {status}: unexpected tool result")
+            ) or "capture failed"
+            break
+        structured = body.get("result", {}).get("structuredContent") or {}
+        imported += int(structured.get("accepted") or structured.get("imported") or 0)
+        consumed += len(chunk)
+
+    offset = start + consumed
     print(
         json.dumps(
             {
                 "ok": ok,
-                "status": status,
-                "imported": result.get("accepted", 0),
-                "offset": len(raw) if ok else start,
-                "error": body.get("error", {}).get("message") if body.get("error") else "",
+                "status": 200 if ok else 0,
+                "imported": imported,
+                "batches": batches,
+                "offset": offset,
+                "error": error,
             }
         )
     )

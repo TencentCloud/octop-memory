@@ -188,6 +188,7 @@ sys.exit(main())
 
 _MERGE_PY = '''
 import base64
+import hashlib
 import json
 import os
 import pathlib
@@ -234,9 +235,26 @@ def _load(path):
         return None
 
 
-def _dump(path, data):
+def _restrict(path):
+    """Credential files stay 0600 / owner-only even when the process umask is 022."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:R"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _dump(path, data, private=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+    if private:
+        _restrict(path)
 
 
 def _strings(value):
@@ -276,7 +294,7 @@ def _install_hooks(target, host):
         # 接入端标识：服务端按它统计/禁用「哪些客户端在用这个 token」。
         "client": host,
     }
-    _dump(target / "config.json", config)
+    _dump(target / "config.json", config, private=True)
     print(f"  ✓ hook 脚本（{host} 专用，含共享传输模块）+ config.json → {target}")
     scratch = "%TEMP%" if os.name == "nt" else "$TMPDIR"
     print(
@@ -316,14 +334,22 @@ def _merge_mcp(path, transport=None):
         (name for name in ours if (servers.get(name) or {}).get("url") == entry["url"]), ""
     )
     if reused:
-        print(f"  ✓ MCP 服务 {reused}（已存在且端点一致，复用）→ {path}")
+        existing = servers.get(reused) or {}
+        headers = dict(existing.get("headers") or {})
+        headers.update(entry["headers"])
+        if headers != (existing.get("headers") or {}):
+            servers[reused] = {**existing, "headers": headers}
+            _dump(path, cfg, private=True)
+            print(f"  ✓ MCP 服务 {reused}（已存在，已更新为本轮 token）→ {path}")
+        else:
+            print(f"  ✓ MCP 服务 {reused}（已存在且端点/凭据一致，复用）→ {path}")
         return
     if ours:
         print(f"  · {path} 已有 octop 服务：{', '.join(ours)}（端点与本次 {URL} 不同，保持原样）")
         print("      · 模型侧用哪个服务由你决定；召回/上报 hook 用 config.json 里的地址")
         return
     servers[NAME] = entry
-    _dump(path, cfg)
+    _dump(path, cfg, private=True)
     print(f"  ✓ MCP 服务 {NAME} → {path}")
 
 
@@ -404,9 +430,23 @@ def _upsert_groups(settings, event, groups):
     hooks[event] = kept + list(groups)
 
 
+def _hooks_target(host):
+    """Project installs own their scripts/config under a per-project user directory.
+
+    Global installs keep the host's own hooks dir; project installs must not share
+    that config.json, or installing project B silently repoints project A's token.
+    """
+    if not IN_PROJECT:
+        return {"claude-code": CC_DIR, "kiro": KIRO_DIR, "codex": CODEX_DIR, "cursor": CURSOR_DIR}[host]
+    key = hashlib.sha1(os.path.realpath(PROJECT).encode("utf-8")).hexdigest()[:16]
+    base = {"claude-code": CC_DIR, "kiro": KIRO_DIR, "codex": CODEX_DIR, "cursor": CURSOR_DIR}[host]
+    return base.parent / "octop-memory-projects" / key
+
+
 def do_claude_code():
     # 两条 hook 都是 command 脚本（召回 / 上报），任何模式都要装脚本 + config.json
-    _install_hooks(CC_DIR, "claude-code")
+    hooks_dir = _hooks_target("claude-code")
+    _install_hooks(hooks_dir, "claude-code")
     if IN_PROJECT:
         # MCP 走 Claude 的 local scope（~/.claude.json 里按项目路径存，不进仓库）；
         # hooks 写 settings.local.json（本机私有，不提交），避免没装 octop 的同事
@@ -421,7 +461,7 @@ def do_claude_code():
         settings = home / ".claude" / "settings.json"
     st = _load(settings)
     if st is not None:
-        for event, groups in _claude_hooks(CC_DIR).items():
+        for event, groups in _claude_hooks(hooks_dir).items():
             _upsert_groups(st, event, groups)
         # 早期版本挂过 SessionEnd（mcp_tool 在那里不可用，会持续报错）：清掉我们留下的那条
         _upsert_groups(st, "SessionEnd", [])
@@ -446,6 +486,7 @@ def do_kiro():
     项目级安装跳过 Kiro 的 MCP 条目（``.kiro/settings/mcp.json`` 自带凭据、会随 git 提交）；
     hooks（只有命令、没有凭据）照常写进项目。
     """
+    scripts_dir = _hooks_target("kiro")
     if IN_PROJECT:
         hooks_dir = _project(".kiro", "hooks")
         print("  · Kiro 的 MCP 条目（.kiro/settings/mcp.json）含凭据、会随 git 提交：项目模式跳过")
@@ -454,7 +495,7 @@ def do_kiro():
     else:
         _merge_mcp(home / ".kiro" / "settings" / "mcp.json", transport="streamable_http")
         hooks_dir = KIRO_DIR
-    _install_hooks(KIRO_DIR, "kiro")
+    _install_hooks(scripts_dir, "kiro")
 
     recall = hooks_dir / "memory-recall-on-start.json"
     _dump(
@@ -475,7 +516,7 @@ def do_kiro():
     print(f"  ✓ Kiro 召回 hook（agent 提示词）已写入 {recall}")
 
     save = hooks_dir / "memory-save-on-stop.json"
-    action = {"type": "command", "command": hook_command(f"{KIRO_DIR}/kiro/stop-capture.mjs")}
+    action = {"type": "command", "command": hook_command(f"{scripts_dir}/kiro/stop-capture.mjs")}
     _dump(
         save,
         {
@@ -513,19 +554,20 @@ def _toml_blocks(text):
     return blocks
 
 
-def _codex_upsert(path):
+def _codex_upsert(path, scripts_dir=None):
     """把两条 hook 挂进 ``~/.codex/config.toml``（幂等）。
 
     结构是 ``[[hooks.<Event>]]`` 容器 + ``[[hooks.<Event>.hooks]]`` 处理项，先删掉我们自己
     写过的处理项（连它那个空容器），再把新处理项插到该事件最后一组之后 —— 不动已有 hook 的
     先后位置，因为 codex 的 hook 信任状态按 ``<config>:<event>:<i>:<j>`` 记索引。
     """
+    scripts_dir = scripts_dir or CODEX_DIR
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     blocks, kept = _toml_blocks(text), []
     for block in blocks:
         body = "".join(block)
         header = block[0].strip() if block else ""
-        ours = _mentions_dir(body, CODEX_DIR)
+        ours = _mentions_dir(body, scripts_dir)
         if ours and header.startswith("[[hooks.") and header.endswith(".hooks]]"):
             event = header[len("[[hooks.") : -len(".hooks]]")]
             # 我们自己写的空容器也一起清掉（重装不堆空表）
@@ -564,18 +606,19 @@ def _codex_container_body(block):
     return not "".join(block[1:]).strip()
 
 
-def _cursor_upsert(path):
+def _cursor_upsert(path, scripts_dir=None):
     """把两条 hook 挂进 ``~/.cursor/hooks.json``（幂等，其它事件与别人的 hook 一律保留）。"""
     cfg = _load(path)
     if cfg is None:
         return
+    scripts_dir = scripts_dir or CURSOR_DIR
     cfg.setdefault("version", 1)
     hooks = cfg.setdefault("hooks", {})
     for event, script in _CURSOR_HOOKS:
         entries = [
-            entry for entry in hooks.get(event) or [] if not _mentions_dir(entry, CURSOR_DIR)
+            entry for entry in hooks.get(event) or [] if not _mentions_dir(entry, scripts_dir)
         ]
-        entries.append({"command": hook_command(f"{CURSOR_DIR}/cursor/{script}.mjs")})
+        entries.append({"command": hook_command(f"{scripts_dir}/cursor/{script}.mjs")})
         hooks[event] = entries
     _dump(path, cfg)
 
@@ -587,9 +630,10 @@ def do_codex():
     不伪造 ``hooks.state`` 里的 ``trusted_hash``。项目级写进仓库的 ``.codex/config.toml``，
     该仓库被 Codex 信任后才会加载（未信任只加载 skills）。
     """
-    _install_hooks(CODEX_DIR, "codex")
+    scripts_dir = _hooks_target("codex")
+    _install_hooks(scripts_dir, "codex")
     config = _project(".codex", "config.toml") if IN_PROJECT else home / ".codex" / "config.toml"
-    _codex_upsert(config)
+    _codex_upsert(config, scripts_dir)
     print(f"  ✓ Codex hooks（UserPromptSubmit → 召回；Stop → 上报）→ {config}")
     print("      · 首次需在 codex 里信任该 hook（否则不执行）；自动化可加 --dangerously-bypass-hook-trust")
     print("      · Codex 的 MCP 服务由它自己的配置管理，这里不动")
@@ -600,9 +644,10 @@ def do_codex():
 
 def do_cursor():
     """Cursor：hook 写在 ``~/.cursor/hooks.json``（``{"version":1,"hooks":{<event>:[{command}]}}``）。"""
-    _install_hooks(CURSOR_DIR, "cursor")
+    scripts_dir = _hooks_target("cursor")
+    _install_hooks(scripts_dir, "cursor")
     hooks = _project(".cursor", "hooks.json") if IN_PROJECT else home / ".cursor" / "hooks.json"
-    _cursor_upsert(hooks)
+    _cursor_upsert(hooks, scripts_dir)
     print(f"  ✓ Cursor hooks（beforeSubmitPrompt → 召回；stop → 上报）→ {hooks}")
     print("      · Cursor 的 MCP 服务由它自己的配置管理，这里不动")
     if IN_PROJECT:
@@ -1110,13 +1155,21 @@ def _merge_mcp_local(project):
         (name for name in ours if (servers.get(name) or {}).get("url") == entry["url"]), ""
     )
     if reused:
-        print(f"  ✓ MCP 服务 {reused}（local scope 已有且端点一致，复用）→ {path}")
+        existing = servers.get(reused) or {}
+        headers = dict(existing.get("headers") or {})
+        headers.update(entry["headers"])
+        if headers != (existing.get("headers") or {}):
+            servers[reused] = {**existing, "headers": headers}
+            _dump(path, cfg, private=True)
+            print(f"  ✓ MCP 服务 {reused}（local scope 已存在，已更新为本轮 token）→ {path}")
+        else:
+            print(f"  ✓ MCP 服务 {reused}（local scope 已有且端点/凭据一致，复用）→ {path}")
         return
     if ours:
         print(f"  · 项目 {key} 已有别的 octop 服务：{', '.join(ours)}（端点不同，保持原样）")
         return
     servers[NAME] = entry
-    _dump(path, cfg)
+    _dump(path, cfg, private=True)
     print(f"  ✓ MCP 服务 {NAME}（Claude Code local scope，项目 {key}）→ {path}")
     print("      · 本机私有、按项目的条目：不进仓库，也不需要 .mcp.json 审批")
 
@@ -1572,6 +1625,7 @@ echo "  · 重开终端/IDE（Kiro 重载 hooks；Codex 首次需在 codex 里�
 
 
 _UNINSTALL_PY = r'''
+import hashlib
 import json
 import os
 import pathlib
@@ -1591,6 +1645,55 @@ KIRO_DIR = pathlib.Path(os.environ["OCTOP_KIRO_DIR"]).expanduser()
 DSH_DIR = pathlib.Path(os.environ["OCTOP_DSH_DIR"]).expanduser()
 CODEX_DIR = pathlib.Path(os.environ["OCTOP_CODEX_DIR"]).expanduser()
 CURSOR_DIR = pathlib.Path(os.environ["OCTOP_CURSOR_DIR"]).expanduser()
+HOOK_FILES = {
+    host: json.loads(os.environ["OCTOP_FILES_" + host.upper().replace("-", "_")])
+    for host in ("claude-code", "kiro", "codex", "cursor")
+}
+_OWNED_EXTRA = ("config.json", "manifest.json", "octop-hook.log", "octop-transcript-state.json")
+
+
+def _hooks_target(host):
+    base = {
+        "claude-code": CC_DIR,
+        "kiro": KIRO_DIR,
+        "codex": CODEX_DIR,
+        "cursor": CURSOR_DIR,
+    }[host]
+    if not IN_PROJECT:
+        return base
+    key = hashlib.sha1(os.path.realpath(PROJECT).encode("utf-8")).hexdigest()[:16]
+    return base.parent / "octop-memory-projects" / key
+
+
+def _remove_owned(target, host, label):
+    if not target.exists():
+        print(f"  · {label} 不存在，跳过 → {target}")
+        return
+    owned = set(HOOK_FILES.get(host, {}))
+    for rel in list(owned):
+        stem = rel[:-4] if rel.endswith(".mjs") else rel
+        owned.update(f"{stem}{ext}" for ext in (".mjs", ".sh", ".cmd"))
+    names = owned | set(_OWNED_EXTRA)
+    removed = 0
+    for rel in sorted(names):
+        path = target / rel
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    for folder in sorted(
+        (d for d in target.rglob("*") if d.is_dir()), key=lambda item: len(item.parts), reverse=True
+    ):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+    try:
+        if not any(target.iterdir()):
+            target.rmdir()
+    except OSError:
+        pass
+    print(f"  ✓ 已删除 {label} 中本插件的 {removed} 个文件（其它 hooks 保留）→ {target}")
+
 
 # ---- 安装范围：全局（默认）或只装到某个项目 ----
 # 项目级卸载只清项目里的「注册」；用户目录里的 hook 脚本与 config.json 留给全局卸载。
@@ -1630,9 +1733,26 @@ def _load(path):
         return None
 
 
-def _dump(path, data):
+def _restrict(path):
+    """Credential files stay 0600 / owner-only even when the process umask is 022."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:R"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _dump(path, data, private=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if private:
+        _restrict(path)
 
 
 def _octop_servers(servers):
@@ -1673,12 +1793,38 @@ def _is_our_handler(handler):
     return any(script in command for script in _OUR_SCRIPTS)
 
 
-def _rm_tree(path, label):
-    if not path.exists():
-        print(f"  · {label} 不存在，跳过 → {path}")
+_OWNED_EXTRA = ("config.json", "manifest.json", "octop-hook.log", "octop-transcript-state.json")
+
+
+def _remove_owned(target, host, label):
+    """Delete only files this installer wrote; never rmtree a host-shared hooks dir."""
+    if not target.exists():
+        print(f"  · {label} 不存在，跳过 → {target}")
         return
-    shutil.rmtree(path)
-    print(f"  ✓ 已删除 {label} → {path}")
+    owned = set(HOOK_FILES.get(host, {}))
+    for rel in list(owned):
+        stem = rel[:-4] if rel.endswith(".mjs") else rel
+        owned.update(f"{stem}{ext}" for ext in (".mjs", ".sh", ".cmd"))
+    names = owned | set(_OWNED_EXTRA)
+    removed = 0
+    for rel in sorted(names):
+        path = target / rel
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    for folder in sorted(
+        (d for d in target.rglob("*") if d.is_dir()), key=lambda p: len(p.parts), reverse=True
+    ):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+    try:
+        if not any(target.iterdir()):
+            target.rmdir()
+    except OSError:
+        pass
+    print(f"  ✓ 已删除 {label} 中本插件的 {removed} 个文件（其它 hooks 保留）→ {target}")
 
 
 def _strip_mcp(path):
@@ -1759,11 +1905,11 @@ def undo_claude_code():
     if IN_PROJECT:
         _strip_claude_settings(_project(".claude", "settings.local.json"))
         _strip_mcp_local()
-        print("  · 用户目录里的 hook 脚本保留（全局卸载才清）")
+        _remove_owned(_hooks_target("claude-code"), "claude-code", "项目 Claude Code hooks")
         return
     _strip_claude_settings(home / ".claude" / "settings.json")
     _strip_mcp(home / ".claude.json")
-    _rm_tree(CC_DIR, "Claude Code hooks 目录")
+    _remove_owned(_hooks_target("claude-code"), "claude-code", "Claude Code hooks 目录")
 
 
 def undo_kiro():
@@ -1777,10 +1923,10 @@ def undo_kiro():
             print(f"  · Kiro hook 文件不存在 → {path}")
     if IN_PROJECT:
         _strip_mcp(_project(".kiro", "settings", "mcp.json"))
-        print("  · 用户目录里的 hook 脚本保留（全局卸载才清）")
+        _remove_owned(_hooks_target("kiro"), "kiro", "项目 Kiro hooks")
         return
     _strip_mcp(home / ".kiro" / "settings" / "mcp.json")
-    _rm_tree(KIRO_DIR, "Kiro hooks 目录")
+    _remove_owned(_hooks_target("kiro"), "kiro", "Kiro hooks 目录")
 
 
 _DSH_NATIVE_NAME = "dsh-octop-memory"
@@ -1927,7 +2073,10 @@ def undo_dsh():
     if bundle.exists():
         shutil.rmtree(bundle)
         print(f"  ✓ 已删除 DSH preset bundle → {bundle}")
-    _rm_tree(DSH_DIR, "DSH hooks 目录")
+    scripts = DSH_DIR / "dsh"
+    if scripts.exists():
+        shutil.rmtree(scripts)
+        print(f"  ✓ 已删除 DSH hooks 脚本目录 → {scripts}")
 
 
 def _toml_blocks(text):
@@ -1963,10 +2112,7 @@ def undo_codex():
             print(f"  · Codex config.toml 无 octop hooks → {path}")
     else:
         print(f"  · Codex config.toml 不存在 → {path}")
-    if IN_PROJECT:
-        print("  · 用户目录里的 hook 脚本保留（全局卸载才清）")
-        return
-    _rm_tree(CODEX_DIR, "Codex hooks 目录")
+    _remove_owned(_hooks_target("codex"), "codex", "Codex hooks 目录")
 
 
 def undo_cursor():
@@ -1994,12 +2140,9 @@ def undo_cursor():
             print(f"  · Cursor hooks.json 无 octop hooks → {path}")
     else:
         print(f"  · Cursor hooks.json 不存在 → {path}")
-    if IN_PROJECT:
-        print("  · 用户目录里的 hook 脚本保留（全局卸载才清）")
-        return
+    _remove_owned(_hooks_target("cursor"), "cursor", "Cursor hooks 目录")
     # setup 不为 Cursor 写 MCP，但检索常靠 ~/.cursor/mcp.json 里的 octop-memory*
     _strip_mcp(home / ".cursor" / "mcp.json")
-    _rm_tree(CURSOR_DIR, "Cursor hooks 目录")
 
 
 for terminal in os.environ["OCTOP_TERMINALS"].split(","):
@@ -2183,6 +2326,10 @@ command -v python3 >/dev/null 2>&1 || {{ echo "  ! 未找到 python3" >&2; exit 
 
 OCTOP_CC_DIR="$CC_DIR" OCTOP_KIRO_DIR="$KIRO_DIR" OCTOP_DSH_DIR="$DSH_DIR" \\
 OCTOP_CODEX_DIR="$CODEX_DIR" OCTOP_CURSOR_DIR="$CURSOR_DIR" \\
+OCTOP_FILES_CLAUDE_CODE='{_host_manifest("claude-code")}' \\
+OCTOP_FILES_KIRO='{_host_manifest("kiro")}' \\
+OCTOP_FILES_CODEX='{_host_manifest("codex")}' \\
+OCTOP_FILES_CURSOR='{_host_manifest("cursor")}' \\
 OCTOP_TERMINALS="$TERMINALS" \\
 OCTOP_PROJECT_DIR="$PROJECT_DIR" \\
 python3 - <<'OCTOP_PY'
@@ -2665,6 +2812,10 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     OCTOP_CURSOR_DIR = $CURSOR_DIR
     OCTOP_TERMINALS = $terminals
     OCTOP_PROJECT_DIR = [string]$projectDir
+    OCTOP_FILES_CLAUDE_CODE = __FILES_CLAUDE_CODE_LITERAL__
+    OCTOP_FILES_KIRO = __FILES_KIRO_LITERAL__
+    OCTOP_FILES_CODEX = __FILES_CODEX_LITERAL__
+    OCTOP_FILES_CURSOR = __FILES_CURSOR_LITERAL__
   }
   $envFile = [System.IO.Path]::GetTempFileName()
   $scriptFile = [System.IO.Path]::GetTempFileName()
@@ -2706,6 +2857,10 @@ def render_uninstall_ps1(*, terminals: str = "", project: str = "") -> str:
         "__CODEX_DIR_REL__": _ps_home_rel(HOOKS_DIRS["codex"]),
         "__CURSOR_DIR_REL__": _ps_home_rel(HOOKS_DIRS["cursor"]),
         "__UNINSTALL_PY__": _UNINSTALL_PY,
+        "__FILES_CLAUDE_CODE_LITERAL__": _ps_single_quote(_host_manifest("claude-code")),
+        "__FILES_KIRO_LITERAL__": _ps_single_quote(_host_manifest("kiro")),
+        "__FILES_CODEX_LITERAL__": _ps_single_quote(_host_manifest("codex")),
+        "__FILES_CURSOR_LITERAL__": _ps_single_quote(_host_manifest("cursor")),
     }
     script = _UNINSTALL_PS_TEMPLATE
     for placeholder, value in replacements.items():

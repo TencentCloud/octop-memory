@@ -73,18 +73,31 @@ def main(argv: list[str] | None = None) -> int:
         env["OCTOP_MEMORY_TOKEN"] = token
         env["OCTOP_TERMINALS"] = args.terminals
         env["OCTOP_PROJECT_DIR"] = args.project
-        script = installer.render_setup_script(
-            mcp_url=args.url,
-            terminals=args.terminals,
-            project=args.project,
-        )
+        if os.name == "nt":
+            script = installer.render_setup_ps1(
+                mcp_url=args.url,
+                terminals=args.terminals,
+                project=args.project,
+            )
+        else:
+            script = installer.render_setup_script(
+                mcp_url=args.url,
+                terminals=args.terminals,
+                project=args.project,
+            )
     else:
         env["OCTOP_TERMINALS"] = args.terminals
         env["OCTOP_PROJECT_DIR"] = args.project
-        script = installer.render_uninstall_script(
-            terminals=args.terminals,
-            project=args.project,
-        )
+        if os.name == "nt":
+            script = installer.render_uninstall_ps1(
+                terminals=args.terminals,
+                project=args.project,
+            )
+        else:
+            script = installer.render_uninstall_script(
+                terminals=args.terminals,
+                project=args.project,
+            )
 
     return _run_script(
         script,
