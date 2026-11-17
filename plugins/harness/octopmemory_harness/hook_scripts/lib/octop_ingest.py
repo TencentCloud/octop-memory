@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import sys
 import urllib.error
@@ -113,6 +114,43 @@ def _post(url: str, headers: dict[str, str], body: dict, timeout: float = 60.0) 
     return status, parsed
 
 
+def _split_complete_lines(raw: bytes, start: int) -> tuple[list[bytes], bytes]:
+    """Return complete lines from ``start``; a half-written trailing line is left out."""
+    tail = raw[start:]
+    parts = tail.split(b"\n")
+    if parts and parts[-1] == b"":
+        parts.pop()
+        return parts, (b"\n".join(parts) + b"\n" if parts else b"")
+    if len(parts) > 1:
+        parts = parts[:-1]
+        return parts, b"\n".join(parts) + b"\n"
+    return [], b""
+
+
+def _record_spans(complete: bytes) -> list[tuple[int, int]]:
+    """Byte spans of parsed JSONL records, in parser index order.
+
+    Mirrors ``transcript._iter_records``: blank/malformed lines are skipped and do
+    not advance the record index.
+    """
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    for line in complete.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped:
+            try:
+                json.loads(stripped)
+            except ValueError:
+                pass
+            else:
+                spans.append((offset, offset + len(line)))
+        offset += len(line)
+    return spans
+
+
+_LINE_KEY = re.compile(r"^line(\d+):(\d+)$")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -139,20 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     if start and raw[start - 1 : start] != b"\n":
         start = 0
 
-    # Only complete lines are consumed: a half-written trailing record stays for the
-    # next run, otherwise the offset would skip bytes that were never parsed.
-    tail = raw[start:]
-    lines = tail.split(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()
-        complete = b"\n".join(lines) + b"\n" if lines else b""
-    else:
-        if len(lines) > 1:
-            lines = lines[:-1]
-            complete = b"\n".join(lines) + b"\n"
-        else:
-            lines = []
-            complete = b""
+    _lines, complete = _split_complete_lines(raw, start)
     text = complete.decode("utf-8", "replace")
 
     parse = _PARSERS.get(args.source)
@@ -166,35 +191,63 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "no session id"}))
         return 2
     prefix = args.prefix or SESSION_PREFIXES.get(args.source, "")
+    session = f"{prefix}{session_id}"
 
-    batch = _batch_size()
-    consumed = 0
-    imported = 0
-    batches = 0
-    ok = True
-    error = ""
-
-    for index in range(0, len(lines), batch):
-        chunk_lines = lines[index : index + batch]
-        chunk = b"\n".join(chunk_lines) + b"\n"
-        parsed = parse(chunk.decode("utf-8", "replace"))
-        events: list[dict] = []
-        for event in parsed.events:
-            content = event.content.strip()
-            if not content or any(marker in content for marker in SKIP_MARKERS):
-                continue
-            events.append(
+    # Codex/Claude fall back to ``line{index}`` inside each parse; index restarts for
+    # every delta, so translate it to the record's absolute byte position. That key is
+    # stable across batches and across Stop increments, so server-side dedupe cannot
+    # collapse two different messages.
+    spans = _record_spans(complete)
+    entries: list[tuple[dict, int | None]] = []
+    remaining: dict[int, int] = {}
+    for event in full.events:
+        content = event.content.strip()
+        if not content or any(marker in content for marker in SKIP_MARKERS):
+            continue
+        payload = dict(event.payload or {})
+        record: int | None = None
+        match = _LINE_KEY.match(str(payload.get("src_key") or ""))
+        if match:
+            index = int(match.group(1))
+            if index < len(spans):
+                record = index
+                payload["src_key"] = f"pos:{start + spans[index][0]}:{match.group(2)}"
+        entries.append(
+            (
                 {
                     "event_type": event.event_type,
                     "content": content,
-                    "payload": dict(event.payload or {}),
+                    "payload": payload,
                     "timestamp_iso": event.timestamp.isoformat(),
-                }
+                },
+                record,
             )
-        if not events:
-            consumed += len(chunk)
-            continue
+        )
+        if record is not None:
+            remaining[record] = remaining.get(record, 0) + 1
 
+    if not entries:
+        print(json.dumps({"ok": True, "status": 200, "imported": 0, "offset": len(raw)}))
+        return 0
+
+    batch_limit = _batch_size()
+    next_record = 0
+    safe_end = start
+    # Events whose key is not line-based (uuid / content-hash parsers) cannot be
+    # mapped to a record boundary; stay conservative and only advance to EOF after
+    # every batch succeeded.
+    has_unmapped = any(record is None for _, record in entries)
+
+    def _advance(record: int) -> None:
+        nonlocal next_record, safe_end
+        if has_unmapped:
+            return
+        while next_record <= record and remaining.get(next_record, 0) == 0:
+            if next_record < len(spans):
+                safe_end = start + spans[next_record][1]
+            next_record += 1
+
+    def _send(events: list[dict]) -> tuple[bool, str, int]:
         status, body = _post(
             f"{url}/",
             _headers(config),
@@ -207,28 +260,65 @@ def main(argv: list[str] | None = None) -> int:
                     "arguments": {
                         "events": events,
                         "source": args.source,
-                        "session_id": f"{prefix}{session_id}",
+                        "session_id": session,
                         "extract": True,
                     },
                 },
             },
         )
-        batches += 1
         top_error = body.get("error")
         tool_error = _tool_error(body)
-        if not (200 <= status < 300) or top_error or tool_error or not _tool_ok(body):
-            ok = False
-            error = (
+        ok = (
+            200 <= status < 300
+            and not top_error
+            and not tool_error
+            and _tool_ok(body)
+        )
+        message = ""
+        if not ok:
+            message = (
                 (top_error or {}).get("message")
                 if isinstance(top_error, dict)
                 else (tool_error or f"HTTP {status}: unexpected tool result")
             ) or "capture failed"
-            break
         structured = body.get("result", {}).get("structuredContent") or {}
-        imported += int(structured.get("accepted") or structured.get("imported") or 0)
-        consumed += len(chunk)
+        return ok, message, int(structured.get("accepted") or structured.get("imported") or 0)
 
-    offset = start + consumed
+    imported = 0
+    batches = 0
+    ok = True
+    error = ""
+    committed = start
+    batch: list[dict] = []
+
+    def _flush(final: bool) -> bool:
+        nonlocal imported, batches, committed, batch, ok, error
+        if not batch:
+            return True
+        good, message, accepted = _send(list(batch))
+        batches += 1
+        if not good:
+            ok, error = False, message
+            return False
+        imported += accepted
+        batch = []
+        if final:
+            committed = start + len(complete)
+        elif not has_unmapped:
+            committed = safe_end
+        return True
+
+    for item, record in entries:
+        batch.append(item)
+        if record is not None:
+            remaining[record] -= 1
+            if remaining[record] == 0:
+                _advance(record)
+        if len(batch) >= batch_limit and not _flush(final=False):
+            break
+    else:
+        _flush(final=True)
+
     print(
         json.dumps(
             {
@@ -236,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
                 "status": 200 if ok else 0,
                 "imported": imported,
                 "batches": batches,
-                "offset": offset,
+                "offset": committed,
                 "error": error,
             }
         )

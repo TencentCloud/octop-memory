@@ -342,6 +342,7 @@ def _merge_mcp(path, transport=None):
             _dump(path, cfg, private=True)
             print(f"  ✓ MCP 服务 {reused}（已存在，已更新为本轮 token）→ {path}")
         else:
+            _restrict(path)
             print(f"  ✓ MCP 服务 {reused}（已存在且端点/凭据一致，复用）→ {path}")
         return
     if ours:
@@ -582,7 +583,7 @@ def _codex_upsert(path, scripts_dir=None):
     for event, script in _CODEX_HOOKS:
         handler = (
             f"[[hooks.{event}.hooks]]\\n"
-            f"command = {_toml_string(hook_command(f'{CODEX_DIR}/codex/{script}.mjs'))}\\n"
+            f"command = {_toml_string(hook_command(f'{scripts_dir}/codex/{script}.mjs'))}\\n"
             f'type = "command"\\n'
         )
         insert_at = None
@@ -1163,6 +1164,7 @@ def _merge_mcp_local(project):
             _dump(path, cfg, private=True)
             print(f"  ✓ MCP 服务 {reused}（local scope 已存在，已更新为本轮 token）→ {path}")
         else:
+            _restrict(path)
             print(f"  ✓ MCP 服务 {reused}（local scope 已有且端点/凭据一致，复用）→ {path}")
         return
     if ours:
@@ -2117,10 +2119,10 @@ def undo_codex():
 
 def undo_cursor():
     path = _project(".cursor", "hooks.json") if IN_PROJECT else home / ".cursor" / "hooks.json"
+    marker = str(_hooks_target("cursor"))
     cfg = _load(path)
     if cfg is not None:
         hooks = cfg.setdefault("hooks", {})
-        marker = str(CURSOR_DIR)
         changed = False
         for event in list(hooks):
             entries = hooks.get(event) or []
@@ -2141,6 +2143,8 @@ def undo_cursor():
     else:
         print(f"  · Cursor hooks.json 不存在 → {path}")
     _remove_owned(_hooks_target("cursor"), "cursor", "Cursor hooks 目录")
+    if IN_PROJECT:
+        return
     # setup 不为 Cursor 写 MCP，但检索常靠 ~/.cursor/mcp.json 里的 octop-memory*
     _strip_mcp(home / ".cursor" / "mcp.json")
 

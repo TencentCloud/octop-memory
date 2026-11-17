@@ -1,4 +1,4 @@
-"""Ingest batching / MCP tool-error handling (review: no silent offset advance)."""
+"""Ingest batching / offset / stable keys (review: no silent loss on retry)."""
 
 from __future__ import annotations
 
@@ -15,26 +15,28 @@ sys.path.insert(0, str(LIB))
 import octop_ingest  # noqa: E402
 
 
-class _FakeParser:
-    """One event per non-empty line, stable src_key per line."""
+def _event(content: str, key: str):
+    return SimpleNamespace(
+        event_type="user_message",
+        content=content,
+        payload={"src_key": key},
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+    )
 
-    def __init__(self) -> None:
-        self.session_id = "sess-1"
 
-    def __call__(self, text: str):
+def _line_parser(multiblock: bool = False):
+    """Mirrors Codex: keys start at line0 for every parse (local index)."""
+
+    def parse(text: str):
         events = []
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            events.append(
-                SimpleNamespace(
-                    event_type="user_message",
-                    content=line,
-                    payload={"src_key": f"line:{line}"},
-                    timestamp=datetime(2026, 1, 1, tzinfo=UTC),
-                )
-            )
-        return SimpleNamespace(events=events, session_id=self.session_id)
+        for index, line in enumerate(text.splitlines()):
+            body = json.loads(line)["line"]
+            events.append(_event(body, f"line{index}:0"))
+            if multiblock:
+                events.append(_event(f"{body}-extra", f"line{index}:1"))
+        return SimpleNamespace(events=events, session_id="sess-1")
+
+    return parse
 
 
 def _config(tmp_path: Path) -> Path:
@@ -43,20 +45,24 @@ def _config(tmp_path: Path) -> Path:
     return path
 
 
-def _run(monkeypatch, tmp_path, lines: int, responses):
-    parser = _FakeParser()
+def _transcript(tmp_path: Path, lines: int, first: int = 0) -> Path:
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "\n".join(json.dumps({"line": f"msg-{i}"}) for i in range(first, first + lines)) + "\n"
+    )
+    return path
+
+
+def _run(monkeypatch, tmp_path, parser, path: Path, offset: int = 0, responses=None):
     monkeypatch.setitem(octop_ingest._PARSERS, "fake", parser)
-    calls = []
-    responses = iter(responses)
+    calls: list[dict] = []
+    responses = iter(responses or [])
 
     def fake_post(url, headers, body, timeout=60.0):
         calls.append(body["params"]["arguments"])
         return 200, next(responses)
 
     monkeypatch.setattr(octop_ingest, "_post", fake_post)
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("\n".join(f"line-{i}" for i in range(lines)) + "\n")
-    out = tmp_path / "out.json"
     code = octop_ingest.main(
         [
             "--config",
@@ -64,60 +70,92 @@ def _run(monkeypatch, tmp_path, lines: int, responses):
             "--source",
             "fake",
             "--path",
-            str(transcript),
+            str(path),
+            "--offset",
+            str(offset),
         ]
     )
-    assert code in (0, 1)
-    return json.loads(out.read_text()) if out.exists() else None, calls, transcript
+    return code, calls
 
 
-def test_events_are_sent_in_batches_and_offset_is_eof(monkeypatch, tmp_path, capsys):
-    ok_body = {
-        "result": {
-            "isError": False,
-            "structuredContent": {"accepted": 200},
-        }
-    }
-    _, calls, _ = _run(monkeypatch, tmp_path, 401, [ok_body, ok_body, ok_body])
-    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+def _ok(accepted: int = 200) -> dict:
+    return {"result": {"isError": False, "structuredContent": {"accepted": accepted}}}
+
+
+def _out(capsys) -> dict:
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_events_are_batched_with_stable_session_and_eof(monkeypatch, tmp_path, capsys):
+    path = _transcript(tmp_path, 401)
+    _code, calls = _run(monkeypatch, tmp_path, _line_parser(), path, responses=[_ok(), _ok(), _ok()])
+    payload = _out(capsys)
+
     assert payload["ok"] is True
     assert payload["batches"] == 3
-    assert payload["offset"] == (tmp_path / "t.jsonl").stat().st_size
-    # Every batch carries the same stable session + per-event src_key so the
-    # server can dedupe a retry end to end.
-    sessions = {call["session_id"] for call in calls}
-    assert sessions == {"sess-1"}
-    for call in calls:
-        assert all(event["payload"]["src_key"] for event in call["events"])
+    assert [len(call["events"]) for call in calls] == [200, 200, 1]
+    assert payload["offset"] == path.stat().st_size
+    assert {call["session_id"] for call in calls} == {"sess-1"}
+    # Absolute-position keys: unique across batches.
+    keys = [event["payload"]["src_key"] for call in calls for event in call["events"]]
+    assert len(keys) == len(set(keys)) == 401
 
 
-def test_tool_error_does_not_advance_offset(monkeypatch, tmp_path, capsys):
-    ok_body = {"result": {"isError": False, "structuredContent": {"accepted": 3}}}
-    err_body = {
-        "result": {
-            "isError": True,
-            "content": [{"type": "text", "text": "storage exploded"}],
-        }
-    }
-    _run(monkeypatch, tmp_path, 250, [ok_body, err_body, ok_body])
-    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+def test_multiblock_record_is_batched_by_event_count(monkeypatch, tmp_path, capsys):
+    """A JSONL line can parse into multiple events; batches count events, not lines."""
+    path = _transcript(tmp_path, 101)
+    _code, calls = _run(
+        monkeypatch, tmp_path, _line_parser(multiblock=True), path, responses=[_ok(), _ok()]
+    )
+    payload = _out(capsys)
+
+    assert payload["ok"] is True
+    assert [len(call["events"]) for call in calls] == [200, 2]
+    assert payload["offset"] == path.stat().st_size
+
+
+def test_codex_keys_stay_unique_across_increments(monkeypatch, tmp_path, capsys):
+    """A later Stop parses only the delta; ``line0`` must still not collide."""
+    parser = _line_parser()
+    path = _transcript(tmp_path, 2)
+    _code, first_calls = _run(monkeypatch, tmp_path, parser, path, responses=[_ok()])
+    first = _out(capsys)
+    assert first["ok"] is True
+
+    # Append one more record and report from the saved offset.
+    path.write_text(path.read_text() + json.dumps({"line": "msg-2"}) + "\n")
+    _code, second_calls = _run(
+        monkeypatch, tmp_path, parser, path, offset=first["offset"], responses=[_ok()]
+    )
+    second = _out(capsys)
+
+    assert second["ok"] is True
+    first_keys = {event["payload"]["src_key"] for event in first_calls[0]["events"]}
+    second_keys = {event["payload"]["src_key"] for event in second_calls[0]["events"]}
+    assert second_keys == {f"pos:{first['offset']}:0"}
+    assert not (first_keys & second_keys)
+
+
+def test_tool_error_does_not_advance_past_failed_batch(monkeypatch, tmp_path, capsys):
+    path = _transcript(tmp_path, 250)
+    err = {"result": {"isError": True, "content": [{"type": "text", "text": "storage exploded"}]}}
+    _code, _calls = _run(
+        monkeypatch, tmp_path, _line_parser(), path, responses=[_ok(3), err, _ok(3)]
+    )
+    payload = _out(capsys)
+
     assert payload["ok"] is False
     assert "storage exploded" in payload["error"]
-    # First batch of 200 lines was accepted; the failed batch must stay unconsumed.
-    consumed = payload["offset"]
-    assert consumed > 0
-    assert consumed < (tmp_path / "t.jsonl").stat().st_size
+    assert 0 < payload["offset"] < path.stat().st_size
 
 
 def test_partial_trailing_line_is_not_consumed(monkeypatch, tmp_path, capsys):
-    ok_body = {"result": {"isError": False, "structuredContent": {"accepted": 1}}}
-    parser = _FakeParser()
-    monkeypatch.setitem(octop_ingest._PARSERS, "fake", parser)
-    monkeypatch.setattr(octop_ingest, "_post", lambda *a, **k: (200, ok_body))
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("line-a\nline-b\npartial")
-    octop_ingest.main(
-        ["--config", str(_config(tmp_path)), "--source", "fake", "--path", str(transcript)]
+    path = tmp_path / "t.jsonl"
+    path.write_text(json.dumps({"line": "a"}) + "\n" + json.dumps({"line": "b"}) + "\npartial")
+    _code, _calls = _run(monkeypatch, tmp_path, _line_parser(), path, responses=[_ok(2)])
+    payload = _out(capsys)
+
+    consumed = len((json.dumps({"line": "a"}) + "\n").encode()) + len(
+        (json.dumps({"line": "b"}) + "\n").encode()
     )
-    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert payload["offset"] == len(b"line-a\nline-b\n")
+    assert payload["offset"] == consumed
