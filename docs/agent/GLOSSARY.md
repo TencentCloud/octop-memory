@@ -10,6 +10,7 @@ Core terminology only; see [PROJECT_MAP](PROJECT_MAP.md) for modules and data fl
 | octop_memory MemoryRuntime | `application.runtime.MemoryRuntime`: host-neutral orchestration shared by MemoryService and Bridge |
 | octop_harness MemoryRuntime | `memory.runtime.MemoryRuntime`: adapts Memory/Service, models, tools, middleware, and resource lifecycle to agents; distinct from this library's class |
 | Bridge | JSON-RPC adapter; OpenClaw uses stdio and Hermes reuses it in-process |
+| octop-memory-harness | Client installer in `plugins/harness`. Registers recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH against an Octop memory MCP. Separate from this library wheel and from `octop-harness` |
 | RawEvent / L0 | Immutable source evidence, subject to capture-policy filtering |
 | Candidate / L1 | Extraction result awaiting review/promotion, with evidence references |
 | AtomCard / L2 | Canonical fact; corrections append a successor and invalidate the old fact |

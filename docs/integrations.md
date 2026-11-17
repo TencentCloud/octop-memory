@@ -2,11 +2,11 @@
 
 **English** · [中文](integrations_CN.md)
 
-Host integration, adapters, and validation for the current OpenClaw/Hermes implementations.
+Host integration, adapters, and validation for OpenClaw, Hermes, and the terminal client installer.
 See the [README](../README.md), [CONTRIBUTING](../CONTRIBUTING.md), and [documentation index](README.md)
 for core APIs, development, and navigation.
 
-Read by task: [Python hosts](#python-hosts) · [JSON-RPC bridge](#json-rpc-bridge) · [OpenClaw](#openclaw) ·
+Read by task: [Python hosts](#python-hosts) · [JSON-RPC bridge](#json-rpc-bridge) · [Terminal clients](#terminal-clients) · [OpenClaw](#openclaw) ·
 [Hermes](#hermes) · [Troubleshooting](#shared-verification-and-troubleshooting) ·
 [Existing installations](#renaming-and-migrating-existing-installations).
 
@@ -90,6 +90,36 @@ Batching and durable progress share the [Runtime contract](agent/PROJECT_MAP.md#
 Use Python 3.12+ and SQLite with FTS5. Host requirements follow the
 [OpenClaw manifest](../plugins/openclaw/octopmemory/package.json) and Hermes provider contract.
 Hermes needs v0.10.0+ with `MemoryProvider`; installation instructions are not acceptance of every later host version.
+
+## Terminal clients
+
+`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. It calls an Octop memory MCP endpoint with a user token created in Octop. It does not open a local memory database and does not embed a credential in the repository.
+
+The installer is on the `develop` branch. The `main` branch does not contain these scripts yet, so the one-line installers below use `develop`.
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
+  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+```
+
+The script tries `uvx`, then `pipx`, then a temporary virtualenv. A manual install is `pip install octop-memory-harness` (or `pip install ./plugins/harness` from a checkout) followed by `octop-memory-harness install --url ... --token ...`.
+
+- `--terminals claude-code,codex,cursor,kiro,dsh` selects hosts. Non-interactive runs read this flag.
+- `--project <dir>` registers one repository. Hook scripts and the token file stay in the user directory.
+- `octop-memory-harness uninstall` removes this installer's registrations and files.
+
+Stop hooks pass new transcript bytes to a local parser, which calls `memory_capture(events=...)`. The server does not parse the transcript. The saved byte offset advances only after a successful capture. DSH loads the native plugin `dsh-octop-memory` (`dsh.engines.dsh` at least `0.2.0`) instead of the hook bridge. Codex needs a one-time hook trust, and the terminal should be restarted after install.
+
+Host directories, the `config.json` shape, and the page that can be handed to an assistant are in [plugins/harness/README.md](../plugins/harness/README.md) and [AI-SETUP.md](../plugins/harness/AI-SETUP.md).
 
 ## OpenClaw
 

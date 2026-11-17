@@ -45,7 +45,7 @@ Paths in this table are relative to `src/octop_memory/`.
 | `operations/migration/`, `operations/migration/portable/` | JSONL export/import, namespace migration, backfill, portable packages |
 | `operations/retention.py` | Historical runtime-error governance, semantic manual-document reconciliation, audit metadata |
 
-Root `plugins/<host>/` contains external adapters, currently OpenClaw/Hermes; see the [integration guide](../integrations.md).
+Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
 `tests/` contains behavior tests, `evals/recall/` synthetic evaluation, and `examples/basic_usage.py` a public-API
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.

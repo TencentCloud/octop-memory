@@ -144,14 +144,15 @@ The dashboard is available from a source checkout with `[dashboard]` dependencie
 ## External agent adapters
 
 `plugins/<host>/` maps external agent hooks, tools, and configuration to the shared Python runtime.
-OpenClaw and Hermes adapters are available today. Other agents can integrate through the Python API or JSON-RPC,
-with an adapter implementing their host contract.
+OpenClaw and Hermes adapters are available today. `plugins/harness` installs Claude Code, Codex, Cursor, Kiro, and DSH against an Octop memory MCP; that installer is on `develop`.
+Other agents can integrate through the Python API or JSON-RPC, with an adapter implementing their host contract.
 
 | Integration | Use case | Entry point |
 |---|---|---|
 | In-process Python | Custom agents / Python applications | `MemoryService.capture_turn()` / `recall()` / `search()` / `get()` / `extract()` |
 | JSON-RPC bridge | Cross-language or separate processes | stdio `octopmemory-bridge` |
 | Host plugin | Agent-specific lifecycle and tool interfaces | `plugins/<host>/`; OpenClaw and Hermes currently implemented |
+| Terminal client | Claude Code, Codex, Cursor, Kiro, DSH calling an Octop memory MCP | `plugins/harness`; package `octop-memory-harness` |
 
 See the [integration guide](docs/integrations.md) for installation, configuration, profiles, troubleshooting, and adapter boundaries.
 

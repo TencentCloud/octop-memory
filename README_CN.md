@@ -142,13 +142,15 @@ dashboard 当前仅供源码 checkout 配合 `[dashboard]` 依赖运行，其模
 ## 外部 Agent 适配
 
 `plugins/<host>/` 将外部 Agent 的 hook、工具调用和配置映射到共享 Python runtime。
-当前提供 OpenClaw、Hermes 两种适配；其他 Agent 可通过 Python API 或 JSON-RPC 接入，需实现各自的宿主契约。
+当前提供 OpenClaw、Hermes 两种适配。`plugins/harness` 把 Claude Code、Codex、Cursor、Kiro、DSH 接到 Octop 的 memory MCP，安装器在 `develop` 分支。
+其他 Agent 可通过 Python API 或 JSON-RPC 接入，需实现各自的宿主契约。
 
 | 接入方式 | 适用场景 | 入口 |
 |---|---|---|
 | Python 进程内 | 自有 Agent / Python 应用 | `MemoryService.capture_turn()` / `recall()` / `search()` / `get()` / `extract()` |
 | JSON-RPC bridge | 跨语言或独立进程 | stdio `octopmemory-bridge` |
 | 宿主插件 | 需要对接指定 Agent 的生命周期和工具接口 | `plugins/<host>/`；已有 OpenClaw、Hermes |
+| 终端客户端 | Claude Code、Codex、Cursor、Kiro、DSH 调用 Octop memory MCP | `plugins/harness`；包名 `octop-memory-harness` |
 
 安装、配置、profile、排错和新增适配的边界统一见[集成指南](docs/integrations_CN.md)。
 

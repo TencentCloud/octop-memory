@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 变更
 
+- 新增 `plugins/harness`（包名 `octop-memory-harness`）：为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。凭据在运行时传入，写进用户目录下权限 `0600` 的 `config.json`。客户端本地解析 transcript 后调用 `memory_capture(events=...)`，服务端不再解析对话记录。DSH 使用原生插件 `dsh-octop-memory`。安装脚本在 `develop` 分支，尚未进入 `main`。
+- PostgreSQL checkpoint 裁剪需指定已核实归属的线程，实际裁剪前需在所有宿主上暂停该线程的执行、恢复和分叉。定时维护跳过共享 PG checkpoint 表。可预览并按数量、日期和恢复依赖裁剪，支持从 DeltaChannel 恢复最后一条回复后裁剪已结束的任务级子图。持久子图及其父线程保留。裁剪只回收删除后已无引用的候选 blob 版本。
+- SQLite checkpoint 裁剪支持由宿主提供 `messages` 的 DeltaChannel。在仅依赖消息增量的根图保留边界写入完整快照后，裁掉旧父链及写入，并保留窗口内的 checkpoint ID 和恢复状态。
 - Checkpoint 库不再随对话无限变大。长会话每轮都会落一份快照，旧快照会一直占空间。现在可以按线程裁掉已经用完的旧快照，只保留还能恢复和回放的检查点。正在执行的任务，以及还要继续用的子图，不会被裁掉。
 
 ### 修复
