@@ -32,9 +32,8 @@ from octop_memory.domain.raw_search import raw_search_text
 FTS_TEXT_VERSION = "2"
 """Bump whenever :func:`segment_cjk` output changes for any input.
 
-Stored per-namespace in the ``{ns}_meta`` table; a mismatch at backend
-init triggers a full FTS trigger re-creation + index rebuild so old
-databases pick up the new segmentation transparently.
+Stored per-namespace in the ``{ns}_meta`` table; the explicit index upgrade rebuilds outdated
+triggers and FTS rows before recording the new version.
 """
 
 RAW_FTS_TEXT_VERSION = "1"

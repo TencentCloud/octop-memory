@@ -14,11 +14,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 psycopg = pytest.importorskip("psycopg")
 
-from octop_memory.core import Memory  # noqa: E402
-from octop_memory.storage.backends import postgres_legacy  # noqa: E402
+from octop_memory import Memory, MemoryService  # noqa: E402
+from octop_memory.adapters.cli import main  # noqa: E402
+from octop_memory.storage.backends import (  # noqa: E402
+    SearchIndexUpgradeRequired,
+    postgres_legacy,
+)
 from octop_memory.types import MemoryNode  # noqa: E402
 
 
@@ -119,6 +124,37 @@ def test_raw_search_index_upgrade_keeps_original_events(
 
     if without_btree_gin:
         monkeypatch.setattr(PostgresMemoryBackend, "_enable_btree_gin", lambda self: False)
+    memory = _open(dsn, "legacy_raw_search")
+    service = MemoryService(memory)
+    try:
+        assert not memory.raw_search_index_ready()
+        with pytest.raises(SearchIndexUpgradeRequired):
+            memory.search_raw("legacyimagepayload")
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT to_regprocedure('octop_memory.raw_search_text_v1(text)')").fetchone() == (None,)
+        service.capture_turn(user="pendingcaption sent during upgrade rollout", thread_id="writing")
+        assert memory.list_raw(thread_id="writing")[0].content.startswith("pendingcaption")
+        service.save("Durable fact about papercraft")
+        partial = service.search("papercraft")
+        assert partial["hits"][0]["layer"] == "atom" and "db upgrade-index" in partial["warning"]
+        assert service.recall("papercraft").snippets[0].layer == "atom"
+        assert "db upgrade-index" in service.search("pendingcaption", thread_id="reader")["empty_reason"]
+
+        with psycopg.connect(dsn) as writer, monkeypatch.context() as patch:
+            patch.setattr("octop_memory.storage.backends.postgres._DDL_LOCK_TIMEOUT", "100ms")
+            writer.execute("LOCK TABLE octop_memory.raw_events IN ROW EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                memory.upgrade_search_index()
+        assert not memory.raw_search_index_ready()
+        # Any namespace can maintain the shared index. Existing readers see it immediately.
+        args = ["--backend", "postgres", "--dsn", dsn, "--namespace", "another_agent", "db", "upgrade-index"]
+        for status in ("upgraded", "already_current"):
+            result = CliRunner().invoke(main, args)
+            assert result.exit_code == 0, result.output
+            assert status in result.output
+        assert service.search("pendingcaption", thread_id="reader")["hits"][0]["layer"] == "raw"
+    finally:
+        memory.backend.close()
     for _ in range(2):
         memory = _open(dsn, "legacy_raw_search")
         try:

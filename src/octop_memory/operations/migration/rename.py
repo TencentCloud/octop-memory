@@ -265,26 +265,19 @@ def apply_rename(plan: RenamePlan, *, allow_overwrite: bool = False) -> int:
             # renamed base tables.
             _rebuild_fts_and_triggers(conn, plan.dst_namespace)
         elif plan.mode == "copy":
-            # CREATE TABLE dst AS SELECT * FROM src — preserves rows
-            # but loses indexes / triggers / FTS5 contentless table
-            # specifics. The caller MUST instantiate a fresh
-            # ``Memory(namespace=dst)`` afterwards so the
-            # ``_init_schema`` recreates indexes + triggers + FTS
-            # virtual tables. For FTS virtual tables we skip — the
-            # new namespace's _init_schema will rebuild them and the
-            # AFTER INSERT triggers will re-populate from the copied
-            # base tables.
+            # Copy base rows only. Opening the destination installs empty FTS
+            # tables and triggers. db upgrade-index populates historical rows.
             for step in plan.steps:
                 if step.is_fts_shadow:  # actually "is FTS virtual" — see plan_rename
                     continue
                 conn.execute(f'CREATE TABLE "{step.dst_table}" AS SELECT * FROM "{step.src_table}"')
             # The copied {dst}_meta carries the source's index versions,
-            # which would make the destination's first _init_schema skip
-            # the FTS rebuild and leave the copied namespace unsearchable.
-            # Clear the marker so the rebuild runs against the copied rows.
+            # but its historical rows have not been indexed.
             meta_table = f"{plan.dst_namespace}_meta"
             exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (meta_table,)).fetchone()
             if exists:
+                # CREATE TABLE AS drops the key constraint used to publish versions.
+                conn.execute(f'CREATE UNIQUE INDEX "{meta_table}_key" ON "{meta_table}" (key)')
                 conn.execute(
                     f'DELETE FROM "{meta_table}" WHERE key IN (?, ?)', ("fts_text_version", "raw_fts_text_version")
                 )

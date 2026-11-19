@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from octop_memory.storage.backends import _UNSET, MemoryBackend, _Unset
+from octop_memory.storage.backends import _UNSET, MemoryBackend, SearchIndexMaintenance, _Unset
 from octop_memory.storage.driver_errors import DRIVER_ERRORS, VECTOR_ERRORS
 from octop_memory.types import (
     ActiveEntity,
@@ -372,6 +372,16 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             before=before,
             limit=limit,
         )
+
+    def raw_search_index_ready(self) -> bool:
+        """Custom backends without versioned indexes manage their own search."""
+        return not isinstance(self._backend, SearchIndexMaintenance) or self._backend.raw_search_index_ready()
+
+    def upgrade_search_index(self) -> bool:
+        """Run the built-in backend's offline search index upgrade."""
+        if not isinstance(self._backend, SearchIndexMaintenance):
+            raise NotImplementedError("This backend does not provide a search index upgrade")
+        return self._backend.upgrade_search_index()
 
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
         """Search the text of raw events and return the original records."""

@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from octop_memory.domain.datetime import as_utc
 from octop_memory.domain.raw_search import IMAGE_BLOCK_TYPES, IMAGE_PAYLOAD_FIELDS, IMAGE_PLACEHOLDERS
-from octop_memory.storage.backends import _UNSET, _Unset
+from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.postgres_pool import acquire_pool
 from octop_memory.types import (
     ActiveEntity,
@@ -62,7 +62,6 @@ _DDL_LOCK_TIMEOUT = "5s"
 # Table, indexed vector, and base index name.
 _FTS_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("memory_nodes", "content_tsv", "memory_nodes_fts"),
-    ("raw_events", f"({_RAW_SEARCH_VECTOR})", _RAW_SEARCH_INDEX),
     ("candidates", "fts_tsv", "candidates_fts"),
     ("atoms", "fts_tsv", "atoms_fts"),
     ("episodes", "fts_tsv", "episodes_fts"),
@@ -271,6 +270,8 @@ class PostgresMemoryBackend:
                 cur, indexes, "CREATE INDEX IF NOT EXISTS memory_nodes_fts ON memory_nodes USING GIN(content_tsv)"
             )
 
+            cur.execute("SELECT to_regclass(%s) IS NULL AS fresh", (f"{SHARED_SCHEMA}.raw_events",))
+            fresh_raw_table = cur.fetchone()["fresh"]
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS raw_events (
                     namespace TEXT NOT NULL,
@@ -300,7 +301,8 @@ class PostgresMemoryBackend:
             _ensure_index(
                 cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_type ON raw_events(namespace, event_type)"
             )
-            self._ensure_raw_search_function(cur)
+            if fresh_raw_table:
+                self._build_raw_search_index(cur)
 
             # ----------------------------------------------------------
             # M2: L1 Candidates
@@ -611,6 +613,49 @@ class PostgresMemoryBackend:
         self._conn.commit()
 
     @staticmethod
+    def _raw_search_indexes(cur: Any) -> dict[str, bool]:
+        # The projection version is part of each physical index name. Check
+        # validity as well so an interrupted external build cannot enable search.
+        cur.execute(
+            """SELECT c.relname AS name, i.indisvalid AND i.indisready AS ready
+               FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE i.indrelid = to_regclass(%s)
+                 AND i.indexrelid IN (to_regclass(%s), to_regclass(%s))""",
+            (
+                f"{SHARED_SCHEMA}.raw_events",
+                f"{SHARED_SCHEMA}.{_RAW_SEARCH_INDEX}",
+                f"{SHARED_SCHEMA}.{_RAW_SEARCH_INDEX}_ns",
+            ),
+        )
+        return {row["name"]: row["ready"] for row in cur.fetchall()}
+
+    def raw_search_index_ready(self) -> bool:
+        with self._cursor() as cur:
+            return any(self._raw_search_indexes(cur).values())
+
+    def _build_raw_search_index(self, cur: Any) -> None:
+        self._ensure_raw_search_function(cur)
+        scoped = self._enable_btree_gin()
+        name = f"{_RAW_SEARCH_INDEX}_ns" if scoped else _RAW_SEARCH_INDEX
+        columns = f"namespace, ({_RAW_SEARCH_VECTOR})" if scoped else f"({_RAW_SEARCH_VECTOR})"
+        cur.execute(f"CREATE INDEX {name} ON {SHARED_SCHEMA}.raw_events USING GIN ({columns})")
+
+    def upgrade_search_index(self) -> bool:
+        """Build once for the shared raw_events table in a maintenance transaction."""
+        with self._cursor() as cur:
+            if self._in_transaction:
+                raise RuntimeError("Run the index upgrade outside a business transaction")
+            cur.execute(f"SET LOCAL lock_timeout = '{_DDL_LOCK_TIMEOUT}'")
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+            indexes = self._raw_search_indexes(cur)
+            if any(indexes.values()):
+                return False
+            for name in indexes:
+                cur.execute(sql.SQL("DROP INDEX {}").format(sql.Identifier(SHARED_SCHEMA, name)))
+            self._build_raw_search_index(cur)
+        return True
+
+    @staticmethod
     def _ensure_raw_search_function(cur: Any) -> None:
         """Install the SQL equivalent of raw_search_text for indexed writes."""
         cur.execute("SELECT to_regprocedure(%s) AS projection", (f"{_RAW_SEARCH_FUNCTION}(text)",))
@@ -693,13 +738,6 @@ class PostgresMemoryBackend:
         if not missing_scoped and not existing_legacy:
             return
         if not self._enable_btree_gin():
-            # The new raw projection can be built directly as a scoped index.
-            # Only build the unscoped alternative when the extension is unavailable.
-            _ensure_index(
-                cur,
-                existing,
-                f"CREATE INDEX IF NOT EXISTS {_RAW_SEARCH_INDEX} ON raw_events USING GIN (({_RAW_SEARCH_VECTOR}))",
-            )
             return
         for table, column, legacy_name in _FTS_INDEXES:
             scoped_name = f"{legacy_name}_ns"
@@ -1259,6 +1297,8 @@ class PostgresMemoryBackend:
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
         """Match and rank projected raw text, returning the original events."""
         with self._cursor() as cur:
+            if not any(self._raw_search_indexes(cur).values()):
+                raise SearchIndexUpgradeRequired()
             cur.execute(
                 f"""SELECT * FROM raw_events
                     WHERE namespace = %s

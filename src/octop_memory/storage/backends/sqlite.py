@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Concatenate
 
 from octop_memory.domain.datetime import as_utc, parse_datetime_utc
-from octop_memory.storage.backends import _UNSET, _Unset
+from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.fts_text import (
     FTS_TEXT_VERSION,
     RAW_FTS_TEXT_VERSION,
@@ -44,6 +44,8 @@ from octop_memory.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FTS_VERSIONS = {"fts_text_version": FTS_TEXT_VERSION, "raw_fts_text_version": RAW_FTS_TEXT_VERSION}
 
 # Stamped into {ns}_meta on every open. External tools (portable doctor,
 # portable list-sources) read it to distinguish a healthy octop-memory
@@ -183,6 +185,19 @@ class SqliteMemoryBackend:
 
     def _init_schema(self) -> None:
         ns = self._ns
+        # A new namespace starts with current empty indexes. Existing stores
+        # (including old layouts without metadata) require explicit maintenance.
+        meta_exists = "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?"
+        if self._conn.execute(meta_exists, (f"{ns}_meta",)).fetchone() is None:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(f"CREATE TABLE IF NOT EXISTS {ns}_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                existing = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+                    (f"{ns}_raw_events", f"{ns}_memory_nodes"),
+                ).fetchone()
+                if existing is None:
+                    self._conn.executemany(f"INSERT OR IGNORE INTO {ns}_meta VALUES (?, ?)", _FTS_VERSIONS.items())
         self._conn.executescript(f"""
             CREATE TABLE IF NOT EXISTS {ns}_memory_nodes (
                 id TEXT PRIMARY KEY,
@@ -563,20 +578,28 @@ class SqliteMemoryBackend:
                     f"END;"
                 )
 
-    def _migrate_fts_text_version(self) -> None:
-        """Rebuild indexes from the base tables when their text projection changes."""
+    def _fts_versions(self) -> dict[str, str]:
+        return dict(
+            self._conn.execute(
+                f"SELECT key, value FROM {self._ns}_meta WHERE key IN ('fts_text_version', 'raw_fts_text_version')"
+            )
+        )
+
+    @locked_sqlite_operation
+    def raw_search_index_ready(self) -> bool:
+        return self._fts_versions() == _FTS_VERSIONS
+
+    @locked_sqlite_operation
+    def upgrade_search_index(self) -> bool:
+        """Replace old triggers, rebuild their FTS rows and publish versions atomically."""
         ns = self._ns
-        versions = {"fts_text_version": FTS_TEXT_VERSION, "raw_fts_text_version": RAW_FTS_TEXT_VERSION}
+        if self._in_transaction:
+            raise RuntimeError("Run the index upgrade outside a business transaction")
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
-            self._conn.execute(f"CREATE TABLE IF NOT EXISTS {ns}_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            stored = dict(
-                self._conn.execute(
-                    f"SELECT key, value FROM {ns}_meta WHERE key IN ('fts_text_version', 'raw_fts_text_version')"
-                ).fetchall()
-            )
-            if stored == versions:
-                return
+            stored = self._fts_versions()
+            if stored == _FTS_VERSIONS:
+                return False
 
             specs = self._FTS_SYNC_SPECS
             if stored.get("fts_text_version") == FTS_TEXT_VERSION:
@@ -602,8 +625,9 @@ class SqliteMemoryBackend:
             self._conn.executemany(
                 f"INSERT INTO {ns}_meta (key, value) VALUES (?, ?) "
                 f"ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                versions.items(),
+                _FTS_VERSIONS.items(),
             )
+        return True
 
     def _migrate_schema(self) -> None:
         """Apply incremental schema migrations for existing databases.
@@ -635,9 +659,6 @@ class SqliteMemoryBackend:
             page_cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({page_table})").fetchall()}
             if "mutation_version" not in page_cols:
                 self._conn.execute(f"ALTER TABLE {page_table} ADD COLUMN mutation_version INTEGER NOT NULL DEFAULT 0")
-
-        # Upgrade derived indexes for legacy CJK or raw-media projections.
-        self._migrate_fts_text_version()
 
         # RISK-026 / ADR-024: journal target_* indexes → partial.
         self._migrate_journal_target_indexes_to_partial()
@@ -1043,6 +1064,8 @@ class SqliteMemoryBackend:
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
         """Match and rank projected raw text, returning the original events."""
         ns = self._ns
+        if not self.raw_search_index_ready():
+            raise SearchIndexUpgradeRequired()
         # Wrap as phrase so operators like '-' don't trigger NOT.
         safe_query = fts_match_phrase(query)
         rows = self._conn.execute(

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- 显式记忆搜索按配文匹配和排序，纯图片不会占用结果名额。SQLite 和 PostgreSQL 启用新的检索索引，旧记录仍可按路径读取原文。
+- 显式记忆搜索按配文匹配和排序，纯图片不会占用结果名额。SQLite 和 PostgreSQL 的旧库通过 `octop-memory db upgrade-index` 在维护窗口升级。漏迁时搜索会提示升级，仍可记录对话、召回长期记忆和按路径读取原文。
 
 ## [1.0.5] - 2026-11-17
 

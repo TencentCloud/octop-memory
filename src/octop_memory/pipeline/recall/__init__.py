@@ -458,7 +458,11 @@ def _recall_for_prompt_impl(
     # 2-3. Parse + route -----------------------------------------------
     parsed = parse_query(query, now=pin)
     decision = route(memory, parsed, thread_id=thread_id)
-    sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
+    sources = tuple(
+        s
+        for s in decision.sources
+        if (not atom_only or s in {"atom", "vector"}) and (s != "raw" or raw_policy != "never")
+    )
 
     if not sources:
         return RecallResult(snippets=[], rendered="")

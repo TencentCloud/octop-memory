@@ -10,6 +10,7 @@ from typing import Any, get_args
 import click
 
 from octop_memory.adapters.cli.config import get_memory
+from octop_memory.storage.backends import SearchIndexUpgradeRequired
 from octop_memory.types import RawEvent, RawEventType
 
 _EVENT_TYPES = list(get_args(RawEventType))
@@ -214,7 +215,10 @@ def search_cmd(ctx: click.Context, query: str, limit: int) -> None:
     """FTS search over raw event content."""
     output_json: bool = ctx.obj["output_json"]
     memory = get_memory(ctx)
-    events = memory.search_raw(query, limit=limit)
+    try:
+        events = memory.search_raw(query, limit=limit)
+    except SearchIndexUpgradeRequired as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if output_json:
         click.echo(json.dumps({"status": "ok", "data": {"events": [_raw_to_dict(e) for e in events]}}))

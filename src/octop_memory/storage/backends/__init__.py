@@ -28,6 +28,27 @@ from octop_memory.types import (
 )
 
 
+class SearchIndexUpgradeRequired(RuntimeError):
+    """The stored raw-event index does not have the current text projection."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Raw memory search index needs an upgrade. Run `octop-memory db upgrade-index` "
+            "with the store's connection settings during maintenance."
+        )
+
+
+@runtime_checkable
+class SearchIndexMaintenance(Protocol):
+    """Optional maintenance capability of the built-in relational backends."""
+
+    def raw_search_index_ready(self) -> bool: ...
+
+    def upgrade_search_index(self) -> bool:
+        """Upgrade the stored search index, returning whether work was needed."""
+        ...
+
+
 class _Unset:
     """Sentinel type for "argument not provided" in update APIs.
 

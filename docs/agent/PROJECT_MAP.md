@@ -256,7 +256,10 @@ With multi-source retrieval, raw fallback excludes raw when durable results exis
 current session/thread scope excludes that conversation's raw.
 Both recall pipelines use the raw text projection for candidates and snippets. SQLite FTS5 and PostgreSQL GIN index
 that projection before matching, ranking, and limiting. Image-only events contribute no search text, and SQLite excludes
-them from BM25 statistics. Opening an existing store upgrades its derived raw index. `Memory.search_raw()` returns
+them from BM25 statistics. Fresh stores install empty current indexes. `db upgrade-index` calls `Memory.upgrade_search_index()` for historical
+rows. Explicit tool search checks SQLite version markers or the versioned PostgreSQL index's validity, skips
+pending raw search and reports an upgrade hint alongside other hits. Low-level raw search raises
+`SearchIndexUpgradeRequired` until maintenance commits. `Memory.search_raw()` returns
 original records for matching captions. `memory_get` reads the original evidence through a virtual path.
 
 ## Storage and connections

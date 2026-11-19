@@ -19,6 +19,8 @@ review them when changing retention.
 Raw recall indexes a text projection that removes serialized image blocks and attachment placeholders before ranking.
 Keep that projection separate from evidence reads so historic raw records stay available. SQLite rebuilds the raw FTS
 projection by version, and PostgreSQL builds a versioned expression index alongside any existing legacy index.
+Building over historical rows can block unrelated agents' writes. Hosts run `db upgrade-index` during deployment.
+While pending, explicit search reports partial coverage and automatic atom recall stays available.
 
 ## ADR-003: Extractor has no persistence side effects (Accepted)
 
