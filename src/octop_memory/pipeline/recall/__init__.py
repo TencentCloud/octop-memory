@@ -331,6 +331,7 @@ def recall_for_prompt(
     weights: tuple[float, float, float, float, float] | None = None,
     per_entity_cap: int = 3,
     suppress_threshold: float = 0.85,
+    min_token_coverage: float = 0.0,
     total_budget_tokens: int = 1500,
     total_budget_ms: int = 200,
     cache: object | None = None,
@@ -361,6 +362,8 @@ def recall_for_prompt(
     7. diversify: ≤ ``per_entity_cap`` per entity
     8. suppress near-duplicates via Jaccard (D44-A rule path)
     9. budget enforcement: token-count via static char proxy (D45-A)
+    9b. relevance floor: drop a hit whose share of matched query
+        tokens is below ``min_token_coverage`` (0.0 disables the floor)
     10. push recall hits to active stack (D41a-A)
     11. render markdown block + cache the result
 
@@ -381,6 +384,7 @@ def recall_for_prompt(
             weights=weights,
             per_entity_cap=per_entity_cap,
             suppress_threshold=suppress_threshold,
+            min_token_coverage=min_token_coverage,
             total_budget_tokens=total_budget_tokens,
             total_budget_ms=total_budget_ms,
             cache=cache,
@@ -404,6 +408,7 @@ def _recall_for_prompt_impl(
     weights: tuple[float, float, float, float, float] | None,
     per_entity_cap: int,
     suppress_threshold: float,
+    min_token_coverage: float,
     total_budget_tokens: int,
     total_budget_ms: int,
     cache: object | None,
@@ -514,12 +519,16 @@ def _recall_for_prompt_impl(
     budget = make_budget_state(total_tokens=total_budget_tokens or DEFAULT_TOTAL_TOKENS)
     accepted: list[RecallSnippet] = []
     hit_entity_ids: list[str] = []
+    floor = min_token_coverage if min_token_coverage > 0 else 0.0
+    query_tokens = frozenset(parsed.raw_tokens) if floor > 0 else frozenset()
     for ranked_snippet in suppressed.kept:
         if len(accepted) >= limit:
             break
         c = ranked_snippet.candidate
         text = c.text.strip()
         if not text:
+            continue
+        if floor > 0 and _token_coverage(query_tokens, text) < floor:
             continue
         bucket: str
         if c.layer == "atom":
@@ -555,6 +564,24 @@ def _recall_for_prompt_impl(
     if typed_cache is not None and cache_thread is not None:
         typed_cache.set(thread_id=cache_thread, query=query, value=result)
     return result
+
+
+def _token_coverage(query_tokens: frozenset[str], text: str) -> float:
+    """Share of query tokens that literally appear in the hit text.
+
+    Lexical overlap only: it is a cheap, backend-agnostic guard against
+    padding the prompt with hits that share no term with the question.
+    A query with no usable tokens (empty or stop-word only) is treated
+    as fully covered so the floor never blanks out such a query.
+    """
+    from octop_memory.pipeline.recall.parser import tokenize_text
+
+    if not query_tokens:
+        return 1.0
+    tokens = set(tokenize_text(text))
+    if not tokens:
+        return 0.0
+    return len(query_tokens & tokens) / len(query_tokens)
 
 
 def _role_for_layer(layer: str, *, importance: str) -> str:

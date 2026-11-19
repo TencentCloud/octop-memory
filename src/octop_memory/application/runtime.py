@@ -312,6 +312,7 @@ class MemoryRuntime:
                 cache=self._recall_cache,
                 raw_policy=raw_policy,
                 atom_only=atom_only,
+                min_token_coverage=_coerce_ratio(recall_cfg.get("min_token_coverage")),
             )
             for snip in result.snippets:
                 hits.append(
@@ -942,6 +943,17 @@ def _coerce_positive_int(value: Any, *, default: int, name: str) -> int:
     if ivalue < 1:
         raise ValueError(f"{name}: must be >= 1, got {ivalue}")
     return ivalue
+
+
+def _coerce_ratio(value: Any) -> float:
+    """Coerce a configured 0..1 ratio; anything unusable falls back to 0.0."""
+    if value is None:
+        return 0.0
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return ratio if 0.0 <= ratio <= 1.0 else 0.0
 
 
 def _coerce_positive_int_or_none(value: Any, *, name: str) -> int | None:
