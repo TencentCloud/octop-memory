@@ -1139,6 +1139,45 @@ class TestRawEventParity:
         backend.save_raw(_make_raw(id="miss", content="grocery shopping list"))
         assert {e.id for e in backend.search_raw("kubernetes")} == {"hit"}
 
+    def test_raw_image_search_indexes_and_ranks_only_caption_text(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        image = json.dumps(
+            {
+                "type": "image_url",
+                "workspace_path": "inbound/payloadonly.png",
+                "image_url": {"url": "data:image/png;base64,encodedpayload"},
+            }
+        )
+        pure_image = f"User sent an image.\n{image}\n[image]"
+        caption = "rolloutmemo deployment checklist"
+        mixed = f"{image}\nUser sent an image.\n{caption}"
+        backend.save_raw(_make_raw(id="mixed", content=mixed))
+        backend.save_raw_batch(
+            [
+                _make_raw(id="pure", content=pure_image),
+                _make_raw(id="placeholder", content="用户发送了图片。"),
+                _make_raw(id="other-caption", content='Different notes\n{"base64":"rolloutmemo","type":"image"}'),
+                _make_raw(id="unrelated-json", content='{"type":"image","description":"jsonexample"}'),
+            ]
+        )
+
+        assert backend.search_raw("workspace_path") == []
+        assert backend.search_raw("encodedpayload") == []
+        assert backend.search_raw("User sent an image") == []
+        assert [event.id for event in backend.search_raw("jsonexample")] == ["unrelated-json"]
+        assert [event.id for event in backend.search_raw("rolloutmemo", limit=1)] == ["mixed"]
+        assert [event.id for event in backend.search_raw("rolloutmemo")] == ["mixed"]
+
+        memory = Memory(namespace="raw_image", backend=backend)
+        service = MemoryService(memory, config={"recall": {"raw_policy": "always"}})
+        assert not service.search("encodedpayload")["hits"]
+        [hit] = service.search("rolloutmemo", max_results=1)["hits"]
+        assert hit["source_id"] == "mixed"
+        assert hit["snippet"] == caption
+        assert mixed in service.get(hit["path"])["excerpt"]
+        assert memory.get_raw("pure").content == pure_image
+
     def test_delete_before_returns_count(self, backend: Any) -> None:
         backend.save_raw(_make_raw(id="old", timestamp=_now() - timedelta(days=5)))
         backend.save_raw(_make_raw(id="new", timestamp=_now()))

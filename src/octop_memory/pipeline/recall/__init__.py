@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Literal
 
 from octop_memory.core import Memory
+from octop_memory.domain.raw_search import raw_search_text
 from octop_memory.domain.retention import MANUAL_DOCUMENTS_RECALL_KEY, is_runtime_error
 from octop_memory.pipeline.recall.rerank import RerankCandidate
 from octop_memory.pipeline.recall.suppress import manual_recall_policy
@@ -124,7 +125,7 @@ def _raw_to_snippet(event: RawEvent, *, per_snippet_chars: int) -> RecallSnippet
         source_id=event.id,
         timestamp_iso=event.timestamp.isoformat(),
         role_hint=_role_for_raw(event),
-        text=_truncate(event.content.strip(), per_snippet_chars),
+        text=_truncate(raw_search_text(event.content), per_snippet_chars),
         layer="raw",
     )
 
@@ -212,6 +213,8 @@ def recall_multi_source(
                 if e.id in raw_ids_in_atoms:
                     continue  # already covered by an accepted atom
                 snippet = _raw_to_snippet(e, per_snippet_chars=per_snippet_chars)
+                if not snippet.text:
+                    continue
                 if consumed + len(snippet.text) > total_chars:
                     break
                 consumed += len(snippet.text)

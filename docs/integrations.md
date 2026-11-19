@@ -300,6 +300,8 @@ Put shared behavior in `application/`; host adapters only translate hook/tool co
 Current adapters expose `memory_search(query, maxResults?, minScore?, corpus?)` and
 `memory_get(path, from?, lines?, corpus?)`. Search returns `hits[]`, reads return `path/excerpt`;
 follow the actual tool schema for corpus and fields.
+Raw events match and rank using text captions. Serialized image blocks and standalone image placeholders are excluded.
+Reading a raw virtual path through Memory returns the original evidence.
 
 Hermes `initialize` accepts `hermes_home`; provider methods and manifest event hooks are separate interfaces.
 `sync_turn` captures in the background, `prefetch` recalls synchronously, and `queue_prefetch` is currently a no-op.

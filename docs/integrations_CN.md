@@ -294,6 +294,7 @@ hermes octopmemory search "Python" -n 5 --corpus all
 共用业务逻辑放 `application/`；宿主层只转换 hook/tool contract。现有 OpenClaw/Hermes 适配暴露
 `memory_search(query, maxResults?, minScore?, corpus?)` 与 `memory_get(path, from?, lines?, corpus?)`。
 搜索结果含 `hits[]`，路径读取返回 `path/excerpt`；corpus 和字段以实际工具 schema 为准。
+原始事件用文字配文检索和排序，过滤序列化图片块和独占一行的图片占位语。通过 Memory 读取原始虚拟路径仍可取得原始证据。
 
 Hermes 的 `initialize` 必须接受 `hermes_home`；provider 方法和 manifest 事件 hook 是两类接口，不能混放。
 `sync_turn` 负责后台 capture，`prefetch` 同步召回，`queue_prefetch` 当前是 no-op；

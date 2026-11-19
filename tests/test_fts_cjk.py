@@ -15,7 +15,12 @@ import pytest
 
 from octop_memory import Memory
 from octop_memory.application.host_files import HostFilesIndex
-from octop_memory.storage.backends.fts_text import FTS_TEXT_VERSION, fts_match_phrase, segment_cjk
+from octop_memory.storage.backends.fts_text import (
+    FTS_TEXT_VERSION,
+    fts_match_phrase,
+    register_fts_functions,
+    segment_cjk,
+)
 from octop_memory.types import AtomCard
 
 
@@ -107,6 +112,36 @@ class TestChineseRecall:
 
 
 class TestLegacyMigration:
+    def test_legacy_raw_index_is_rebuilt_with_text_only(self, tmp_path: Path) -> None:
+        db = tmp_path / "legacy-raw.sqlite"
+        config = {"db_path": str(db)}
+        memory = Memory(namespace="t", backend="sqlite", backend_config=config)
+        image = '{"type":"image_url","workspace_path":"inbound/privateattachment.png"}'
+        raw = memory.add_raw(f"发布计划\n{image}", event_type="user_message")
+        pure = memory.add_raw(image, event_type="user_message")
+        memory.backend.close()
+
+        with sqlite3.connect(db) as legacy:
+            register_fts_functions(legacy)
+            legacy.execute("INSERT INTO t_raw_events_fts(t_raw_events_fts) VALUES ('delete-all')")
+            legacy.execute(
+                "INSERT INTO t_raw_events_fts(rowid, content) SELECT rowid, hm_cjk_seg(content) FROM t_raw_events"
+            )
+            legacy.execute("DELETE FROM t_meta WHERE key = 'raw_fts_text_version'")
+            assert legacy.execute(
+                "SELECT COUNT(*) FROM t_raw_events_fts WHERE t_raw_events_fts MATCH 'privateattachment'"
+            ).fetchone() == (2,)
+        legacy.close()
+
+        for _ in range(2):
+            memory = Memory(namespace="t", backend="sqlite", backend_config=config)
+            assert memory.search_raw("privateattachment") == []
+            assert [event.id for event in memory.search_raw("发布")] == [raw.id]
+            assert memory.get_raw(raw.id) == raw
+            assert memory.get_raw(pure.id) == pure
+            assert memory.backend._conn.execute("SELECT COUNT(*) FROM t_raw_events_fts_docsize").fetchone()[0] == 1
+            memory.backend.close()
+
     def test_v1_database_rebuilt_on_open(self, tmp_path: Path) -> None:
         db = tmp_path / "legacy.sqlite"
         m = Memory(namespace="t", backend="sqlite", backend_config={"db_path": str(db)})

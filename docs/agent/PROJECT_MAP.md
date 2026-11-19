@@ -253,8 +253,11 @@ OpenClaw hybrid prefetch sends `atomOnly: true`; Runtime then skips non-atom sou
 host-prefetched/returned results and prompt rendering to canonical atom paths. Explicit tools keep existing sources.
 Cache scope includes atom-only mode, raw policy, current session, and manual-document snapshots to prevent cross-mode reuse.
 With multi-source retrieval, raw fallback excludes raw when durable results exist rather than topping up the count;
-current session/thread scope excludes that conversation's raw. The legacy `recall_multi_source` helper is unchanged.
-`memory_get` reads the virtual path returned by search; hosts should not guess IDs.
+current session/thread scope excludes that conversation's raw.
+Both recall pipelines use the raw text projection for candidates and snippets. SQLite FTS5 and PostgreSQL GIN index
+that projection before matching, ranking, and limiting. Image-only events contribute no search text, and SQLite excludes
+them from BM25 statistics. Opening an existing store upgrades its derived raw index. `Memory.search_raw()` returns
+original records for matching captions. `memory_get` reads the original evidence through a virtual path.
 
 ## Storage and connections
 

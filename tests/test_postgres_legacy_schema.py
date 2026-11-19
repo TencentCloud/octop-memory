@@ -93,6 +93,54 @@ def _meta(dsn: str, key: str) -> str | None:
     return None if row is None else str(row[0])
 
 
+@pytest.mark.parametrize("without_btree_gin", [False, True])
+def test_raw_search_index_upgrade_keeps_original_events(
+    dsn: str, without_btree_gin: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+    image = '{"type":"input_image","file_id":"legacyimagepayload"}'
+    memory = _open(dsn, "legacy_raw_search")
+    try:
+        mixed = memory.add_raw(f"{image}\nlegacycaption", event_type="user_message")
+        pure = memory.add_raw(image, event_type="user_message")
+    finally:
+        memory.backend.close()
+
+    with psycopg.connect(dsn) as conn:
+        conn.execute("DROP INDEX IF EXISTS octop_memory.raw_events_text_v1_fts, octop_memory.raw_events_text_v1_fts_ns")
+        conn.execute("DROP FUNCTION octop_memory.raw_search_text_v1(text)")
+        conn.execute("CREATE INDEX raw_events_fts ON octop_memory.raw_events USING GIN (content_tsv)")
+        legacy_hits = conn.execute(
+            "SELECT id FROM octop_memory.raw_events "
+            "WHERE content_tsv @@ plainto_tsquery('simple', 'legacyimagepayload')"
+        ).fetchall()
+        assert {row[0] for row in legacy_hits} == {mixed.id, pure.id}
+
+    if without_btree_gin:
+        monkeypatch.setattr(PostgresMemoryBackend, "_enable_btree_gin", lambda self: False)
+    for _ in range(2):
+        memory = _open(dsn, "legacy_raw_search")
+        try:
+            assert memory.search_raw("legacyimagepayload") == []
+            assert [event.id for event in memory.search_raw("legacycaption")] == [mixed.id]
+            assert memory.get_raw(mixed.id) == mixed
+            assert memory.get_raw(pure.id) == pure
+        finally:
+            memory.backend.close()
+    with psycopg.connect(dsn) as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'octop_memory' AND tablename = 'raw_events'"
+            )
+        }
+    projected_indexes = indexes & {"raw_events_text_v1_fts", "raw_events_text_v1_fts_ns"}
+    assert len(projected_indexes) == 1
+    if without_btree_gin:
+        assert projected_indexes == {"raw_events_text_v1_fts"}
+
+
 def test_empty_namespace_is_migrated_on_open(dsn: str) -> None:
     _write(dsn, "agent_a", tag="a")
     _rename_to_legacy(dsn)

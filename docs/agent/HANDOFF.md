@@ -24,6 +24,12 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Raw image search
+
+- **Status** — Local change for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).
+- **⚠️ Recall/write path change** — Index and rank captions from raw events. Skip serialized image blocks and image-only placeholders before applying the result limit. Keep original records and virtual-path reads for evidence. Both stores upgrade derived indexes on open.
+- **Validation** — `make all` with disposable PostgreSQL 16 passed 1,636 tests with 12 skips. The raw image tests exercise SQLite, PostgreSQL, legacy indexes, and the unscoped PostgreSQL fallback. The 99 Harness tests for tools, service integration, and recall boundaries passed against installed Memory 1.0.5 and the local Memory source based on `c66e353` with Harness at `0c6a6c0` and its companion test update.
+
 ### Checkpoint retention
 
 The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.

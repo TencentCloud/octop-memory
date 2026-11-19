@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 显式记忆搜索按配文匹配和排序，纯图片不会占用结果名额。SQLite 和 PostgreSQL 启用新的检索索引，旧记录仍可按路径读取原文。
+
 ## [1.0.5] - 2026-11-17
 
 ### 新增

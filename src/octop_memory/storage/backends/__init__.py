@@ -146,7 +146,7 @@ class MemoryBackend(Protocol):
         ...
 
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
-        """Full-text search over raw events."""
+        """Match and rank text with image blocks excluded, returning original records."""
         ...
 
     def delete_raw_before(self, before: datetime) -> int:

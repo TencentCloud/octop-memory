@@ -374,7 +374,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         )
 
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
-        """FTS5 full-text search over raw event content."""
+        """Search the text of raw events and return the original records."""
         return self._backend.search_raw(query, limit=limit)
 
     def get_raw_events_by_ids(self, event_ids: list[str]) -> list[RawEvent]:

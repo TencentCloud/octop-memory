@@ -16,6 +16,9 @@ review parity when extending an API.
 L0 is append-only; Candidates/AtomCards retain raw references and verbatim quotations for tracing and re-extraction.
 Model rewrites do not replace valuable originals. Cost: evidence storage and privacy retention require separate management;
 review them when changing retention.
+Raw recall indexes a text projection that removes serialized image blocks and attachment placeholders before ranking.
+Keep that projection separate from evidence reads so historic raw records stay available. SQLite rebuilds the raw FTS
+projection by version, and PostgreSQL builds a versioned expression index alongside any existing legacy index.
 
 ## ADR-003: Extractor has no persistence side effects (Accepted)
 
