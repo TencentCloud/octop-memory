@@ -2120,6 +2120,15 @@ class TestEntityIdentityAndRecall:
         assert ids("Hermes Lite的维护窗口") == [lite.id]
         assert ids("Hermes2的维护窗口") == [v2.id]
 
+    def test_similar_name_candidates_match_a_literal_prefix(self, backend: Any) -> None:
+        subject = _make_entity(id="subject", canonical_name="_Hermes")
+        backend.save_entity(subject)
+        for name in ("_Hermes2", "_\U0010ffff", "Other"):
+            backend.save_entity(_make_entity(id=name, canonical_name=name))
+
+        candidates = backend.similar_name_candidates(subject, "_", limit=32)
+        assert {entity.canonical_name for entity in candidates} == {"_Hermes2", "_\U0010ffff"}
+
     def test_background_entity_review_has_durable_evidence(self, backend: Any) -> None:
         from dataclasses import replace
 

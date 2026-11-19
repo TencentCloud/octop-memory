@@ -1704,12 +1704,11 @@ class SqliteMemoryBackend:
 
     @locked_sqlite_operation
     def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
-        upper = prefix + "\U0010ffff"
         rows = self._conn.execute(
             f"""SELECT * FROM {self._ns}_entities WHERE entity_type = ? AND id <> ?
-                    AND lower(canonical_name) >= ? AND lower(canonical_name) < ?
+                    AND instr(lower(canonical_name), ?) = 1
                         ORDER BY lower(canonical_name), id LIMIT ?""",
-            (entity.entity_type, entity.id, prefix, upper, limit),
+            (entity.entity_type, entity.id, prefix, limit),
         ).fetchall()
         return [self._row_to_entity(row) for row in rows]
 

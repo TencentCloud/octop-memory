@@ -1846,13 +1846,12 @@ class PostgresMemoryBackend:
         return [self._row_to_atom(row) for row in rows]
 
     def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
-        upper = prefix + "\U0010ffff"
         with self._cursor() as cur:
             cur.execute(
                 """SELECT * FROM entities WHERE namespace = %s AND entity_type = %s AND id <> %s
-                    AND lower(canonical_name) >= %s AND lower(canonical_name) < %s
+                    AND starts_with(lower(canonical_name), %s)
                         ORDER BY lower(canonical_name), id LIMIT %s""",
-                (self._ns, entity.entity_type, entity.id, prefix, upper, limit),
+                (self._ns, entity.entity_type, entity.id, prefix, limit),
             )
             rows = cur.fetchall()
         return [self._row_to_entity(row) for row in rows]
