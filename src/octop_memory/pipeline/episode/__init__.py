@@ -98,6 +98,8 @@ class EpisodeExtractor:
         extractor_version: str = EPISODE_EXTRACTOR_VERSION,
         temperature: float = 0.0,
         max_tokens: int | None = DEFAULT_EXTRACT_MAX_TOKENS,
+        keep_rules: str | None = None,
+        skip_rules: str | None = None,
     ) -> None:
         self._llm = llm
         self._max_episodes = max_episodes
@@ -105,6 +107,8 @@ class EpisodeExtractor:
         self._temperature = temperature
         # ``None`` = unset by the caller — keep the built-in budget.
         self._max_tokens = DEFAULT_EXTRACT_MAX_TOKENS if max_tokens is None else max_tokens
+        self._keep_rules = keep_rules
+        self._skip_rules = skip_rules
 
     @property
     def extractor_version(self) -> str:
@@ -140,7 +144,12 @@ class EpisodeExtractor:
         if not parsed_input:
             return EpisodeExtractionResult(episodes=[])
 
-        prompt = render_episode_prompt(events_json, max_episodes=self._max_episodes)
+        prompt = render_episode_prompt(
+            events_json,
+            max_episodes=self._max_episodes,
+            keep_rules=self._keep_rules,
+            skip_rules=self._skip_rules,
+        )
         raw_event_index: dict[str, RawEvent] = {e.id: e for e in events}
 
         try:

@@ -46,6 +46,12 @@ DEFAULT_EXTRACTION_CFG = {
     # int caps the extraction / episode completions so a reasoning-heavy
     # model cannot run past the client read timeout (TencentCloud/Octop#1360).
     "max_tokens": None,
+    # Optional user/admin retention preferences (TencentCloud/Octop#2963):
+    # ``keep_rules`` describes information worth retaining as long-term memory,
+    # ``skip_rules`` describes information to ignore. ``None`` leaves the
+    # built-in extraction prompts untouched.
+    "keep_rules": None,
+    "skip_rules": None,
     "promote": True,
     "regen_pages": True,
     "page_regen_limit": 5,
@@ -54,6 +60,29 @@ DEFAULT_EXTRACTION_CFG = {
     # This value is no longer read.
     "journal_noop_heartbeat_minutes": 1440,
 }
+
+MAX_EXTRACTION_RULE_CHARS = 2000
+
+
+def normalize_extraction_rule(
+    value: Any,
+    *,
+    max_chars: int = MAX_EXTRACTION_RULE_CHARS,
+) -> str | None:
+    """Normalize an optional keep/skip extraction rule string.
+
+    Non-string or whitespace-only inputs collapse to ``None``. Overlong text is
+    truncated to *max_chars* so misconfigured rules cannot crowd out the prompt
+    schema or raw events.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > max_chars:
+        text = text[:max_chars].strip()
+    return text or None
 
 
 def coerce_runtime_config(config: MemoryRuntimeConfig | dict[str, Any] | None) -> MemoryRuntimeConfig:
