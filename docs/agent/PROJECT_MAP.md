@@ -66,6 +66,10 @@ Service configuration feeds Runtime tool search, capture, privacy, and extractio
 `MemoryService.recall()` directly calls prompt recall without forwarding all Runtime recall configuration.
 Automatic injection is atom-only; Runtime raw/host-file configuration does not widen it.
 Tool search retains its multi-source policies and file sources.
+`recall.min_token_coverage` (default 0.0, off) is the one relevance knob both paths share: Runtime
+`memory_search` reads it from Service configuration, `MemoryService.recall()` takes it as a parameter, and
+`recall_for_prompt()` drops any candidate whose matched-query-token share falls below it — so a query can
+return fewer than `limit` snippets, including none, instead of padding the list.
 
 ## Repository integration map
 

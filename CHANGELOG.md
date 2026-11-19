@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 召回可加相关性下限：配置 `recall.min_token_coverage`（默认 `0.0`，即关闭、行为不变）后，命中与当前问题的重合词占比低于阈值的条目不返回。一轮召回因此可以少于上限甚至为空，不再为了凑满固定条数而带入无关记忆；`memory_search` 与 `MemoryService.recall()` 都可生效。
+
 ### 修复
 
 - 显式记忆搜索按配文匹配和排序，纯图片不会占用结果名额。SQLite 和 PostgreSQL 的旧库通过 `octop-memory db upgrade-index` 在维护窗口升级。漏迁时搜索会提示升级，仍可记录对话、召回长期记忆和按路径读取原文。
