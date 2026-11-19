@@ -24,6 +24,10 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Configurable memory extraction rules
+
+⚠️ Recall/write path change. [Octop #2963](https://github.com/TencentCloud/Octop/issues/2963) adds optional keep and skip guidance to the Candidate and Episode prompts. The worktree based on `c951d7a` passed `make all` with a dedicated PostgreSQL database (1,663 passed, 12 skipped). The local Harness integration test captured both prompts through the real memory service. Package releases and consumer dependency updates are pending.
+
 ### Raw image search
 
 - **Status** — Under review in [Memory PR #54](https://github.com/TencentCloud/octop-memory/pull/54) for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).
