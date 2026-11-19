@@ -135,7 +135,10 @@ def gather_candidates(
                     break
                 if event.id in raw_seen_ids:
                     continue  # already covered by an accepted atom
-                out.append(from_raw(event, rank_index=kept))
+                candidate = from_raw(event, rank_index=kept)
+                if not candidate.text:
+                    continue
+                out.append(candidate)
                 kept += 1
             stopwatch.split("raw")
             continue

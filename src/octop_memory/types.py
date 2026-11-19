@@ -75,7 +75,8 @@ class RawEvent:
     - ``timestamp``: when the event happened (host-supplied if present,
       otherwise plugin local clock at capture time).
     - ``event_type``: the kind of event (see ``RawEventType``).
-    - ``content``: the searchable text body (FTS-indexed).
+    - ``content``: the original archived body. Raw search indexes its text
+      with serialized image blocks removed.
     - ``payload``: arbitrary structured fields (role / tool_name /
       target_file / token_usage / ...). NOT indexed by FTS.
     """

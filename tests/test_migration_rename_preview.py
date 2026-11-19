@@ -154,6 +154,19 @@ class TestApplyRename:
         plan2 = plan_rename(db, src_namespace="oc", dst_namespace="anything")
         assert plan2.steps == []
 
+    def test_copied_namespace_requires_its_own_search_index_upgrade(self, db: Path) -> None:
+        apply_rename(plan_rename(db, src_namespace="oc", dst_namespace="copied", mode="copy"))
+        source = SqliteMemoryBackend("oc", db)
+        dest = SqliteMemoryBackend("copied", db)
+        try:
+            assert source.raw_search_index_ready()
+            assert not dest.raw_search_index_ready()
+            assert dest.upgrade_search_index()
+            assert [event.id for event in dest.search_raw("Postgres")] == ["r1"]
+        finally:
+            source.close()
+            dest.close()
+
     def test_refuses_when_conflicts_without_overwrite(self, tmp_path: Path) -> None:
         db_path = tmp_path / "x.sqlite"
         m1 = Memory(namespace="oc", backend=SqliteMemoryBackend(namespace="oc", db_path=db_path))

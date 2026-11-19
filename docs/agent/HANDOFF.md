@@ -24,6 +24,12 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Raw image search
+
+- **Status** — Under review in [Memory PR #54](https://github.com/TencentCloud/octop-memory/pull/54) for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).
+- **⚠️ Recall/write path change** — Index and rank captions from raw events. Skip serialized image blocks and image-only placeholders before applying the result limit. Keep original records and virtual-path reads for evidence. Fresh stores initialize empty indexes. Existing stores require `db upgrade-index` during the deployment window.
+  Raw recall returns an actionable pending status while capture, evidence reads, and automatic atom recall continue.
+- **Validation** — `make all` with disposable PostgreSQL 16, the SQLite namespace-copy regression, and both GIN variants. On old stores created by `c66e353`, the actual Harness tool returned the upgrade hint with and without atom hits. Capture and original reads stayed available, and a live reader found old and pending-period captions after the CLI ran. The Harness tool, service and recall-boundary suites passed 101 cases against the proposed Memory source.
 ### Entity identity, lexical recall, and background review
 
 ⚠️ Recall/write path change on local branch `feat/entity-recall-dreaming`, based on `c66e353`.

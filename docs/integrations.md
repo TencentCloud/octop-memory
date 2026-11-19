@@ -294,12 +294,35 @@ and `topics/*.md`/`projects/*.md`. Custom allowlists use safe relative Markdown 
 Hits are SQLite index snapshots, even with PG memory; file indexing is not completed semantic document review.
 Migration uses core CLI `portable list-sources / pack / adopt / doctor`; exported `.hmpkg` contains memory and must not be committed.
 
+## Upgrading the raw search index
+
+Run the new CLI during the host upgrade, before resuming writers. Use the same database settings as the host.
+
+```bash
+octop-memory --backend sqlite --db "$MEMORY_DB" --namespace "$AGENT_NAMESPACE" db upgrade-index
+octop-memory --backend postgres --dsn "$MEMORY_DSN" db upgrade-index
+```
+
+Run once per SQLite file **and namespace**, or once per PostgreSQL database for all namespaces.
+SQLite holds the file's writer lock while rebuilding. Stop older SQLite processes before the upgrade
+and restart them with the new library, since the new triggers require its SQL functions.
+PostgreSQL blocks writes to the shared raw event table while building its GIN index.
+A failed rebuild rolls back and the same command can be retried. A repeat after success reports `already_current`.
+
+Fresh stores start with an empty current index. Opening an older store or searching it leaves the historical
+index pending. Capture, automatic atom recall and original path reads continue. Explicit `memory_search`
+returns available hits with a `warning` containing the upgrade command. With zero hits, `empty_reason`
+also carries the hint. After the upgrade commits, the next search can use captured turns, including those
+written while the upgrade was pending.
+
 ## Modifying adapters
 
 Put shared behavior in `application/`; host adapters only translate hook/tool contracts.
 Current adapters expose `memory_search(query, maxResults?, minScore?, corpus?)` and
 `memory_get(path, from?, lines?, corpus?)`. Search returns `hits[]`, reads return `path/excerpt`;
 follow the actual tool schema for corpus and fields.
+Raw events match and rank using text captions. Serialized image blocks and standalone image placeholders are excluded.
+Reading a raw virtual path through Memory returns the original evidence.
 
 Hermes `initialize` accepts `hermes_home`; provider methods and manifest event hooks are separate interfaces.
 `sync_turn` captures in the background, `prefetch` recalls synchronously, and `queue_prefetch` is currently a no-op.

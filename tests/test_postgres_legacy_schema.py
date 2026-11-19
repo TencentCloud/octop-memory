@@ -14,11 +14,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 psycopg = pytest.importorskip("psycopg")
 
-from octop_memory.core import Memory  # noqa: E402
-from octop_memory.storage.backends import postgres_legacy  # noqa: E402
+from octop_memory import Memory, MemoryService  # noqa: E402
+from octop_memory.adapters.cli import main  # noqa: E402
+from octop_memory.storage.backends import (  # noqa: E402
+    SearchIndexUpgradeRequired,
+    postgres_legacy,
+)
 from octop_memory.types import MemoryNode  # noqa: E402
 
 
@@ -91,6 +96,85 @@ def _meta(dsn: str, key: str) -> str | None:
     with psycopg.connect(dsn) as conn:
         row = conn.execute("SELECT value FROM octop_memory.meta WHERE key = %s", (key,)).fetchone()
     return None if row is None else str(row[0])
+
+
+@pytest.mark.parametrize("without_btree_gin", [False, True])
+def test_raw_search_index_upgrade_keeps_original_events(
+    dsn: str, without_btree_gin: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+    image = '{"type":"input_image","file_id":"legacyimagepayload"}'
+    memory = _open(dsn, "legacy_raw_search")
+    try:
+        mixed = memory.add_raw(f"{image}\nlegacycaption", event_type="user_message")
+        pure = memory.add_raw(image, event_type="user_message")
+    finally:
+        memory.backend.close()
+
+    with psycopg.connect(dsn) as conn:
+        conn.execute("DROP INDEX IF EXISTS octop_memory.raw_events_text_v1_fts, octop_memory.raw_events_text_v1_fts_ns")
+        conn.execute("DROP FUNCTION octop_memory.raw_search_text_v1(text)")
+        conn.execute("CREATE INDEX raw_events_fts ON octop_memory.raw_events USING GIN (content_tsv)")
+        legacy_hits = conn.execute(
+            "SELECT id FROM octop_memory.raw_events "
+            "WHERE content_tsv @@ plainto_tsquery('simple', 'legacyimagepayload')"
+        ).fetchall()
+        assert {row[0] for row in legacy_hits} == {mixed.id, pure.id}
+
+    if without_btree_gin:
+        monkeypatch.setattr(PostgresMemoryBackend, "_enable_btree_gin", lambda self: False)
+    memory = _open(dsn, "legacy_raw_search")
+    service = MemoryService(memory)
+    try:
+        assert not memory.raw_search_index_ready()
+        with pytest.raises(SearchIndexUpgradeRequired):
+            memory.search_raw("legacyimagepayload")
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT to_regprocedure('octop_memory.raw_search_text_v1(text)')").fetchone() == (None,)
+        service.capture_turn(user="pendingcaption sent during upgrade rollout", thread_id="writing")
+        assert memory.list_raw(thread_id="writing")[0].content.startswith("pendingcaption")
+        service.save("Durable fact about papercraft")
+        partial = service.search("papercraft")
+        assert partial["hits"][0]["layer"] == "atom" and "db upgrade-index" in partial["warning"]
+        assert service.recall("papercraft").snippets[0].layer == "atom"
+        assert "db upgrade-index" in service.search("pendingcaption", thread_id="reader")["empty_reason"]
+
+        with psycopg.connect(dsn) as writer, monkeypatch.context() as patch:
+            patch.setattr("octop_memory.storage.backends.postgres._DDL_LOCK_TIMEOUT", "100ms")
+            writer.execute("LOCK TABLE octop_memory.raw_events IN ROW EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                memory.upgrade_search_index()
+        assert not memory.raw_search_index_ready()
+        # Any namespace can maintain the shared index. Existing readers see it immediately.
+        args = ["--backend", "postgres", "--dsn", dsn, "--namespace", "another_agent", "db", "upgrade-index"]
+        for status in ("upgraded", "already_current"):
+            result = CliRunner().invoke(main, args)
+            assert result.exit_code == 0, result.output
+            assert status in result.output
+        assert service.search("pendingcaption", thread_id="reader")["hits"][0]["layer"] == "raw"
+    finally:
+        memory.backend.close()
+    for _ in range(2):
+        memory = _open(dsn, "legacy_raw_search")
+        try:
+            assert memory.search_raw("legacyimagepayload") == []
+            assert [event.id for event in memory.search_raw("legacycaption")] == [mixed.id]
+            assert memory.get_raw(mixed.id) == mixed
+            assert memory.get_raw(pure.id) == pure
+        finally:
+            memory.backend.close()
+    with psycopg.connect(dsn) as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'octop_memory' AND tablename = 'raw_events'"
+            )
+        }
+    projected_indexes = indexes & {"raw_events_text_v1_fts", "raw_events_text_v1_fts_ns"}
+    assert len(projected_indexes) == 1
+    if without_btree_gin:
+        assert projected_indexes == {"raw_events_text_v1_fts"}
 
 
 def test_empty_namespace_is_migrated_on_open(dsn: str) -> None:

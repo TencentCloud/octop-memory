@@ -289,11 +289,30 @@ hermes octopmemory search "Python" -n 5 --corpus all
 即使 memory backend 为 PG，该文件索引仍是独立 SQLite；索引命中不代表已完成手动文档语义审核。
 迁移使用核心 CLI 的 `portable list-sources / pack / adopt / doctor`；导出的 `.hmpkg` 含记忆数据，不提交到仓库。
 
+## 升级原始记忆搜索索引
+
+宿主升级时，使用新版 CLI 和宿主实际使用的数据库配置，在恢复写入前执行对应命令。
+
+```bash
+octop-memory --backend sqlite --db "$MEMORY_DB" --namespace "$AGENT_NAMESPACE" db upgrade-index
+octop-memory --backend postgres --dsn "$MEMORY_DSN" db upgrade-index
+```
+
+SQLite 按文件和命名空间各执行一次，重建期间占用整库文件的写锁。升级前先停止旧版本的 SQLite 写入进程，
+升级后用新版库重新启动，因为新触发器依赖新版库注册的 SQL 函数。
+PostgreSQL 每个数据库执行一次，所有命名空间共用。建索引期间，写入原始事件表的操作会等待。
+失败会回滚，可以重跑。成功后再次执行返回 `already_current`。
+
+新库自带当前版本的空索引。旧库漏迁仍可正常记录对话、自动召回长期记忆和按路径读取原文。
+显式 `memory_search` 会返回其他来源的可用结果，并在 `warning` 中提示升级命令。没有命中时，`empty_reason` 也会提示升级。
+升级一旦提交，下次搜索就能查到历史配文和漏迁期间新写入的文字。
+
 ## 修改适配器
 
 共用业务逻辑放 `application/`；宿主层只转换 hook/tool contract。现有 OpenClaw/Hermes 适配暴露
 `memory_search(query, maxResults?, minScore?, corpus?)` 与 `memory_get(path, from?, lines?, corpus?)`。
 搜索结果含 `hits[]`，路径读取返回 `path/excerpt`；corpus 和字段以实际工具 schema 为准。
+原始事件用文字配文检索和排序，过滤序列化图片块和独占一行的图片占位语。通过 Memory 读取原始虚拟路径仍可取得原始证据。
 
 Hermes 的 `initialize` 必须接受 `hermes_home`；provider 方法和 manifest 事件 hook 是两类接口，不能混放。
 `sync_turn` 负责后台 capture，`prefetch` 同步召回，`queue_prefetch` 当前是 no-op；
