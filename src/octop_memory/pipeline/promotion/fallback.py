@@ -122,7 +122,11 @@ def _promote_stale_needs_review(
         # to resolve / create the entity, mirroring the worker happy path
         # but with actor="rule" + reason flagging the fallback.
         downgraded = _downgrade_for_fallback(cand)
+        if cand.promotion_reason.startswith(("ambiguous entity name:", "possible entity alias ")):
+            continue
         entity_id = _resolve_or_create_entity(memory, downgraded, when=when)
+        if entity_id is None:
+            continue
         atom = build_atom_from_candidate(
             downgraded,
             atom_id=str(uuid.uuid4()),
@@ -181,7 +185,7 @@ def _downgrade_for_fallback(c: Candidate) -> Candidate:
     )
 
 
-def _resolve_or_create_entity(memory: Memory, c: Candidate, *, when: datetime) -> str:
+def _resolve_or_create_entity(memory: Memory, c: Candidate, *, when: datetime) -> str | None:
     """Mini version of check 3 happy path (no LLM). Returns entity_id.
 
     Mirrors the User singleton rule from ``check_entity``: if the candidate
@@ -195,14 +199,13 @@ def _resolve_or_create_entity(memory: Memory, c: Candidate, *, when: datetime) -
             return existing_users[0].id
 
     normalized = normalize_alias(c.subject_name)
-    if normalized:
-        hit = memory.find_entity_by_alias(normalized)
-        if hit is not None:
-            return hit.id
-    if c.subject_name.strip():
-        by_name = memory.find_entity_by_name(c.subject_name, entity_type=c.subject_entity_type)
-        if by_name is not None:
-            return by_name.id
+    owners = [
+        e for e in memory.match_entity_names([normalized]).get(normalized, []) if e.entity_type == c.subject_entity_type
+    ]
+    if len(owners) > 1:
+        return None
+    if owners:
+        return owners[0].id
     new_id = str(uuid.uuid4())
     memory.add_entity(
         Entity(

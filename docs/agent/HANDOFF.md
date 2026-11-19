@@ -24,6 +24,18 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Entity identity, lexical recall, and background review
+
+⚠️ Recall/write path change on local branch `feat/entity-recall-dreaming`, based on `c66e353`.
+Typed writes and promotion retain ambiguous identity for review. The prompt pipeline combines entity-scoped and global topical evidence.
+A bounded background audit records legacy assignment and alias evidence. See ADR-046 and [retrieval risks](KNOWN_RISKS.md#retrieval-quality-and-validation).
+
+The frozen 115-atom replay contains 26 answerable and six unanswerable questions. On SQLite, hit@5 rose from 15 to 23, first hits from 13 to 22, and unwanted injections fell from five to one. Among 22 project-specific questions, five previously included a fact from an unrelated project and none do now. On dedicated PostgreSQL the same replay went from five to 23 hit@5, three to 22 first hits, four to one unwanted injections, and zero to zero questions with unrelated project facts. Both new backends retrieve both relationship facts held by a person. The remaining unwanted injection concerns the right project but supplies a signatory for a telephone question. These are retrieval measurements on synthetic atoms. Production behavior and large-database latency remain unmeasured.
+
+The full library gate passed with real PostgreSQL (1,638 passed, 12 skipped). The three Harness service, middleware and prompt replay suites passed all 96 cases against the local memory source with the dedicated PostgreSQL database. The ten-project same-field control retained 10/10 first hits before and after on SQLite.
+
+Reproduce per-question results with `python -m evals.recall.entity_cases` and the PostgreSQL variant in [TEST_MATRIX](TEST_MATRIX.md#validation-by-change-scope).
+
 ### Checkpoint retention
 
 The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.

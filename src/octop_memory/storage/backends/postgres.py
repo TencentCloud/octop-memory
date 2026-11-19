@@ -1521,6 +1521,64 @@ class PostgresMemoryBackend:
             rows = cur.fetchall()
         return [self._row_to_atom(r) for r in rows]
 
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        clauses = ["a.namespace = %s", "a.deprecated_at IS NULL"]
+        args: list[object] = [self._ns]
+        order = "a.occurred_at DESC"
+        join = ""
+        if terms:
+            # Existing tsvectors keep continuous Han text in a single lexeme. Match
+            # CJK phrases as literal substrings, and Latin words via the native index.
+            han = [term for term in terms if re.search(r"[㐀-鿿]", term)]
+            latin = [term for term in terms if term not in han]
+            query = " || ".join("phraseto_tsquery('simple', %s)" for _ in latin)
+            joins = []
+            scores = []
+            prefix: list[object] = []
+            matches = []
+            if latin:
+                joins.append(f"CROSS JOIN (SELECT {query} AS q) lexical")
+                prefix.extend(latin)
+                matches.append("a.fts_tsv @@ lexical.q")
+                scores.append("ts_rank(a.fts_tsv, lexical.q)")
+            if han:
+                joins.append("""CROSS JOIN LATERAL (
+                    SELECT coalesce(sum(length(t)),0) AS weight FROM unnest(%s::text[]) t
+                    WHERE strpos(a.assertion,t)>0 OR strpos(a.verbatim_quote,t)>0
+                       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.search_terms) term WHERE strpos(term,t)>0)
+                ) cjk""")
+                prefix.append(han)
+                matches.append("cjk.weight > 0")
+                scores.append("cjk.weight")
+            join = " ".join(joins)
+            args = prefix + args
+            clauses.append("(" + " OR ".join(matches) + ")")
+            order = "(" + " + ".join(scores) + ") DESC"
+        if entity_ids:
+            clauses.append("a.entity_id = ANY(%s)")
+            args.append(list(entity_ids))
+        if start is not None:
+            clauses.append("a.occurred_at >= %s")
+            args.append(start)
+        if end is not None:
+            clauses.append("a.occurred_at < %s")
+            args.append(end)
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT a.* FROM atoms a {join} WHERE {' AND '.join(clauses)} ORDER BY {order}, a.id LIMIT %s",
+                [*args, limit],
+            )
+            rows = cur.fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
     def search_atoms_by_time_range(
         self,
         *,
@@ -1681,7 +1739,7 @@ class PostgresMemoryBackend:
                     """SELECT * FROM entities
                         WHERE namespace = %s
                           AND LOWER(canonical_name) = LOWER(%s) AND entity_type = %s
-                        LIMIT 1""",
+                        LIMIT 2""",
                     (self._ns, canonical_name, entity_type),
                 )
             else:
@@ -1689,11 +1747,11 @@ class PostgresMemoryBackend:
                     """SELECT * FROM entities
                         WHERE namespace = %s
                           AND LOWER(canonical_name) = LOWER(%s)
-                        LIMIT 1""",
+                        LIMIT 2""",
                     (self._ns, canonical_name),
                 )
-            row = cur.fetchone()
-        return self._row_to_entity(row) if row else None
+            rows = cur.fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     def list_entities(
         self,
@@ -1777,17 +1835,60 @@ class PostgresMemoryBackend:
                 ),
             )
 
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM atoms WHERE namespace = %s AND id > %s AND deprecated_at IS NULL
+                        ORDER BY id LIMIT %s""",
+                (self._ns, after_id, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
+        upper = prefix + "\U0010ffff"
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM entities WHERE namespace = %s AND entity_type = %s AND id <> %s
+                    AND lower(canonical_name) >= %s AND lower(canonical_name) < %s
+                        ORDER BY lower(canonical_name), id LIMIT %s""",
+                (self._ns, entity.entity_type, entity.id, prefix, upper, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_entity(row) for row in rows]
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Find all owners, including legacy canonical names without alias rows."""
+        if not names:
+            return {}
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT a.alias AS matched_name, e.* FROM aliases a JOIN entities e
+                       ON (e.namespace, e.id) = (a.namespace, a.entity_id)
+                   WHERE a.namespace = %s AND a.alias = ANY(%s)
+                   UNION ALL
+                   SELECT lower(canonical_name) AS matched_name, e.* FROM entities e
+                   WHERE namespace = %s AND lower(canonical_name) = ANY(%s)""",
+                (self._ns, list(names), self._ns, list(names)),
+            )
+            rows = cur.fetchall()
+        matches: dict[str, dict[str, Entity]] = {}
+        for row in rows:
+            entity = self._row_to_entity(row)
+            matches.setdefault(row["matched_name"], {})[entity.id] = entity
+        return {name: list(owners.values()) for name, owners in matches.items()}
+
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         with self._cursor() as cur:
             cur.execute(
                 """SELECT e.* FROM aliases a
                     JOIN entities e ON e.namespace = a.namespace AND e.id = a.entity_id
                     WHERE a.namespace = %s AND a.alias = %s
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (self._ns, alias),
             )
-            row = cur.fetchone()
-        return self._row_to_entity(row) if row else None
+            rows = cur.fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     def list_aliases(
         self,
@@ -2071,13 +2172,14 @@ class PostgresMemoryBackend:
     # ------------------------------------------------------------------
 
     def append_journal(self, entry: JournalEntry) -> None:
+        duplicate = "ON CONFLICT (namespace,id) DO NOTHING" if entry.action == "entity_review" else ""
         with self._cursor() as cur:
             cur.execute(
-                """INSERT INTO journal
+                f"""INSERT INTO journal
                     (namespace, id, timestamp, action, actor,
                      target_entity_id, target_atom_id, target_candidate_id,
                      before, after, note)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) {duplicate}""",
                 (
                     self._ns,
                     entry.id,

@@ -163,7 +163,7 @@ class PromotionWorker:
         cands = self._memory.list_candidates(status="pending", limit=limit)
         return self.promote(cands)
 
-    def approve(self, candidate: Candidate) -> CandidateDecision:
+    def approve(self, candidate: Candidate, *, entity_id: str | None = None) -> CandidateDecision:
         """User override: write the atom without re-running demotion checks.
 
         Dashboard / CLI "采纳" for ``needs_review`` and ``conflict`` rows.
@@ -184,8 +184,8 @@ class PromotionWorker:
                 record = json.loads(self._memory.get_meta(MANUAL_DOCUMENTS_META_KEY) or "{}")
                 if record.get("revision") != candidate.payload["manual_revision"]:
                     raise ValueError("The manual document changed; review the current version before approving")
-                return self._approve_one(candidate)
-        return self._approve_one(candidate)
+                return self._approve_one(candidate, selected_id=entity_id)
+        return self._approve_one(candidate, selected_id=entity_id)
 
     # ------------------------------------------------------------------
     # Internal: per-candidate decision
@@ -226,19 +226,6 @@ class PromotionWorker:
                 canonical_name=entity_outcome.new_entity_canonical_name or candidate.subject_name,
                 entity_type=entity_outcome.new_entity_type or candidate.subject_entity_type,
             )
-        else:
-            # check_entity routed the candidate to an existing entity
-            # (entity_id). Check whether candidate.subject_name resolves to
-            # a *different* existing entity: if so, that entity is a
-            # duplicate of the current one, so migrate its atoms over.
-            subject_entity = self._memory.find_entity_by_name(
-                candidate.subject_name,
-                entity_type=candidate.subject_entity_type,
-            )
-            if subject_entity is not None and subject_entity.id != entity_id:
-                # Migrate subject_entity's atoms into the resolved entity_id.
-                self._memory.merge_entity(subject_entity.id, entity_id)
-
         # ---- check 4: duplicate -------------------------------------
         outcome = check_duplicate(
             candidate,
@@ -266,31 +253,38 @@ class PromotionWorker:
             entity_outcome=entity_outcome,
         )
 
-    def _approve_one(self, candidate: Candidate) -> CandidateDecision:
+    def _approve_one(self, candidate: Candidate, *, selected_id: str | None) -> CandidateDecision:
         """Force-promote after resolving the entity (and maybe superseding)."""
-        entity_outcome = check_entity(
-            candidate,
-            resolver=self._memory,
-            llm_hook=self._llm_hook,
-        )
-        entity_id: str | None
-        if entity_outcome.kind == "needs_review":
-            if candidate.target_entity_id:
-                entity_id = candidate.target_entity_id
-                entity_outcome = PromotionOutcome(
-                    kind="promote",
-                    reason="user-approved; reused target_entity_id",
-                    entity_id=entity_id,
+        # A reviewer's approval confirms the saved suggestion. Check its type
+        # again and reject stale suggestions contradicted by a current exact name.
+        entity_outcome = check_entity(candidate, resolver=self._memory)
+        target_id = selected_id or candidate.target_entity_id
+        target = self._memory.get_entity(target_id) if target_id else None
+        if selected_id and (target is None or target.entity_type != candidate.subject_entity_type):
+            raise ValueError("selected entity must exist and match the candidate type")
+        if (
+            target is not None
+            and target.entity_type == candidate.subject_entity_type
+            and (
+                selected_id
+                or (entity_outcome.kind == "needs_review" and not candidate.subject_name.strip())
+                or (
+                    candidate.promotion_reason.startswith("possible entity alias ")
+                    and entity_outcome.kind == "promote"
+                    and entity_outcome.new_entity_canonical_name is not None
                 )
-            else:
-                return self._apply_needs_review(candidate, entity_outcome)
-        else:
+            )
+        ):
+            entity_id = target.id
+        elif entity_outcome.kind == "needs_review":
+            return self._apply_needs_review(candidate, entity_outcome)
+        elif entity_outcome.entity_id is not None:
             entity_id = entity_outcome.entity_id
-            if entity_id is None:
-                entity_id = self._create_entity(
-                    canonical_name=entity_outcome.new_entity_canonical_name or candidate.subject_name,
-                    entity_type=entity_outcome.new_entity_type or candidate.subject_entity_type,
-                )
+        else:
+            entity_id = self._create_entity(
+                canonical_name=entity_outcome.new_entity_canonical_name or candidate.subject_name,
+                entity_type=entity_outcome.new_entity_type or candidate.subject_entity_type,
+            )
 
         duplicate = check_duplicate(
             candidate,
@@ -299,7 +293,14 @@ class PromotionWorker:
             llm_hook=self._llm_hook,
         )
         if duplicate is not None:
-            return self._apply_merge(candidate, duplicate, actor="user")
+            with self._memory.backend.transaction():
+                self._save_alias_if_needed(
+                    created_by="user",
+                    subject_name=candidate.subject_name,
+                    entity_id=entity_id,
+                    entity_type=candidate.subject_entity_type,
+                )
+                return self._apply_merge(candidate, duplicate, actor="user")
 
         conflict = check_conflict(
             candidate,
@@ -354,6 +355,7 @@ class PromotionWorker:
             status="needs_review",
             decided_by=None,
             decided_at=now,
+            target_entity_id=outcome.entity_id,
             promotion_reason=outcome.reason,
         )
         # No journal append for needs_review — it's a queue state, not
@@ -474,6 +476,7 @@ class PromotionWorker:
             # Idempotent at the DB layer (PRIMARY KEY (alias, entity_id) +
             # INSERT OR IGNORE), so re-running on the same candidate is safe.
             self._save_alias_if_needed(
+                created_by="user" if actor == "user" else "rule",
                 subject_name=candidate.subject_name,
                 entity_id=entity_id,
                 entity_type=candidate.subject_entity_type,
@@ -557,6 +560,7 @@ class PromotionWorker:
     def _save_alias_if_needed(
         self,
         *,
+        created_by: Literal["user", "rule"],
         subject_name: str,
         entity_id: str,
         entity_type: str,
@@ -564,15 +568,12 @@ class PromotionWorker:
         normalized = normalize_alias(subject_name)
         if not normalized:
             return
-        existing = self._memory.find_entity_by_alias(normalized)
-        if existing is not None and existing.id == entity_id:
-            return
         self._memory.add_alias(
             Alias(
                 alias=normalized,
                 entity_id=entity_id,
                 entity_type=entity_type,  # type: ignore[arg-type]
-                created_by="rule",
+                created_by=created_by,
                 created_at=self._clock.now(UTC),
             )
         )

@@ -322,3 +322,9 @@ Cost: callers must select an appropriate kind, and old hosts still produce Fact.
 bilingual guidance; unsupported memory versions fail typed saves explicitly without downgrading. Release/adopt the
 library API before consumer releases; local-source tests do not establish release availability. Review classification
 quality using real requests; any offline reclassification of historical records needs a separate preview and scope.
+
+## ADR-046: Typed entity identity and evidence-backed lexical retrieval (local implementation)
+
+A name or confirmed alias can identify an owner for writes when exactly one entity of the declared type matches.
+Same-type ambiguity and model-proposed aliases go to human review, including stale candidates. Retrieval keeps entity-local and global lexical candidates so a fact about a project can live under a person. Cross-owner admission checks the assertion or quotation for a unique reference to the requested entity.
+Background review records evidence of possible assignment errors, similar names and explicit alias declarations. A stable finding ID and transactional cursor support retries without changing historical ownership.

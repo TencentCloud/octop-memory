@@ -119,3 +119,14 @@ def show_cmd(ctx: click.Context, entity_id: str) -> None:
     for a in atoms:
         flag = " DEPR" if a.deprecated_at else "     "
         click.echo(f"  - {a.id[:8]}{flag}  [{a.importance:6s}]  {a.assertion[:80]}")
+
+
+@entity_group.command("dream")
+@click.option("--limit", default=20, type=click.IntRange(min=1))
+@click.pass_context
+def dream_cmd(ctx: click.Context, limit: int) -> None:
+    """Audit a batch of live atoms. Inspect findings with journal list --action entity_review."""
+    from octop_memory.pipeline.lifecycle.dreaming import run_entity_dreaming
+
+    scanned = run_entity_dreaming(get_memory(ctx), limit=limit)
+    click.echo(json.dumps({"atoms_scanned": scanned}) if ctx.obj.get("output_json") else f"Reviewed {scanned} atoms.")

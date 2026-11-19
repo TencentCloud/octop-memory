@@ -653,7 +653,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             self.mark_entity_page_dirty(entity.id, when=now)
             if created_entity:
                 normalized = normalize_alias(entity.canonical_name)
-                if normalized and self.find_entity_by_alias(normalized) is None:
+                if normalized:
                     self.add_alias(
                         Alias(
                             alias=normalized,
@@ -781,6 +781,17 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         limit: int = 10,
     ) -> list[AtomCard]:
         return self._backend.search_atoms(query, include_deprecated=include_deprecated, limit=limit)
+
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        return self._backend.search_atom_terms(terms, entity_ids=entity_ids, start=start, end=end, limit=limit)
 
     def search_atoms_by_time_range(
         self,
@@ -1008,6 +1019,10 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def add_alias(self, alias: Alias) -> None:
         self._backend.save_alias(alias)
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Return every owner of each normalized name or alias within this namespace."""
+        return self._backend.match_entity_names(names)
 
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Look up the entity that the given (already-normalized) alias resolves to."""
@@ -1427,7 +1442,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 payload={"metadata": dict(metadata) if metadata else {}},
             )
 
-            entity = self.find_entity_by_name(entity_name, entity_type="Fact")
+            key = normalize_alias(entity_name)
+            owners = [e for e in self.match_entity_names([key]).get(key, []) if e.entity_type == "Fact"]
+            if len(owners) > 1:
+                raise ValueError("ambiguous topic; supply entity_id through create_atom")
+            entity = owners[0] if owners else None
             if entity is None:
                 entity = Entity(
                     id=str(uuid.uuid4()),
@@ -1622,13 +1641,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 return existing_users[0], False
 
         normalized = normalize_alias(name)
-        if normalized:
-            aliased = self.find_entity_by_alias(normalized)
-            if aliased is not None:
-                return aliased, False
-        by_name = self.find_entity_by_name(name, entity_type=entity_type)
-        if by_name is not None:
-            return by_name, False
+        owners = [e for e in self.match_entity_names([normalized]).get(normalized, []) if e.entity_type == entity_type]
+        if len(owners) > 1:
+            raise ValueError("ambiguous entity name; supply entity_id")
+        if owners:
+            return owners[0], False
 
         now = datetime.now(UTC)
         entity = Entity(

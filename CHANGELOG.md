@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- 修复同名实体误挂。写入按实体类型和唯一名字或别名判断归属；有歧义的自动提炼候选进入审核。无向量召回合并实体内与全库主题结果，允许引用目标项目的跨实体事实。后台可按批审计历史归属和近似名称，记录原始证据供复核。
+
 ## [1.0.5] - 2026-11-17
 
 ### 新增

@@ -245,6 +245,10 @@ Ordinary page apply retains legacy backend signatures; explicit version conditio
 
 ## Recall and reads
 
+`pipeline/recall/names.py` resolves the longest known name or alias at each mention using one batched lookup. An ambiguous mention suppresses automatic atom injection. With a unique anchor, `multi_source._gather_atoms` searches both the owner's atoms and the global topic index. A global hit owned elsewhere must explicitly mention the requested entity in its assertion or quotation. Reciprocal rank fusion combines both lists before existing reranking and budgeting. A topic without an anchor searches globally. Date restrictions apply before the backend candidate limit.
+
+`pipeline/lifecycle/dreaming.py` audits a cursor-bounded page of active atoms. The idle worker, background `review_new_memory`, and CLI `entity dream` reuse it. Journal entries under `entity_review` identify the source atom, quote, owner and suggested matches. Inspect them with `journal list --action entity_review`. Name-only evidence cannot change ownership. Candidate approval accepts an explicit entity ID for reviewed ambiguities.
+
 Main pipeline: cache → parse → route → atom-only source restriction → gather → raw policy → rerank → diversify → suppress → budget → render.
 `recall_for_prompt(atom_only=True)` is the automatic-injection default, gathering atom and optional vector atom hits only.
 No atom match returns empty; raw, page_headline, and episode cannot fill the prompt. Service, Hermes prefetch, and CLI use this default.
