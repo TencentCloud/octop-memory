@@ -472,6 +472,7 @@ JournalAction = Literal[
     "gc_orphan_raw_event",
     "consolidate",
     "entity_merge",
+    "entity_review",
     "migration_in",
 ]
 

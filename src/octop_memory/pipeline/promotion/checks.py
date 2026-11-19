@@ -18,13 +18,15 @@ without touching the orchestration loop.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 from octop_memory.domain.alias import normalize_alias
 from octop_memory.domain.retention import is_runtime_error_candidate
-from octop_memory.types import AtomCard, Candidate, RawEvent
+from octop_memory.domain.search_terms import search_phrases
+from octop_memory.types import AtomCard, Candidate, Entity, RawEvent
 
 # ---------------------------------------------------------------------------
 # Negation-token dictionary used by check 5
@@ -249,18 +251,7 @@ def check_evidence(
 class EntityResolver(Protocol):
     """Duck-typed interface for entity / alias lookups."""
 
-    def find_entity_by_alias(self, alias: str) -> object | None:
-        """Return the entity this alias resolves to, or ``None``."""
-        ...
-
-    def find_entity_by_name(
-        self,
-        canonical_name: str,
-        *,
-        entity_type: str | None = None,
-    ) -> object | None:
-        """Return the entity with this canonical name, or ``None``."""
-        ...
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]: ...
 
     def list_entities(
         self,
@@ -286,21 +277,9 @@ def check_entity(
 ) -> PromotionOutcome:
     """Resolve which entity this candidate's atom should hang off.
 
-    Lookup order:
-    1. Normalized alias hit in the alias table → reuse that entity_id
-    2. Exact canonical_name match (case-insensitive, COLLATE NOCASE in
-       the SQL layer) within the same entity_type → reuse that entity_id
-    3. **(M2.5b)** LLM hook (if provided): collect up to
-       ``_LLM_ENTITY_RESOLVE_CANDIDATES`` existing entities of the same
-       entity_type and ask the hook to pick the same-entity match (or
-       None). One LLM call per candidate.
-    4. Otherwise → propose a new entity (caller will create it before
-       inserting the atom)
-
-    NOTE: ``check_entity`` always returns a non-None outcome — either
-    ``promote`` (with ``entity_id`` resolved) or ``promote`` (with
-    ``new_entity_canonical_name`` set). Callers downstream may still
-    flip the outcome to merge/conflict/needs_review.
+    Reuse the User singleton or one exact owner of the declared type.
+    Ambiguous exact names and model-suggested aliases enter review with
+    their evidence intact. Unmatched names start separate entities.
     """
     subject = candidate.subject_name.strip()
     if not subject:
@@ -331,25 +310,16 @@ def check_entity(
                 entity_id=getattr(existing_user, "id", None),
             )
 
-    # 1. Alias table hit (worker may have populated it on previous runs)
-    aliased = resolver.find_entity_by_alias(normalized)
-    if aliased is not None:
+    owners = [
+        e
+        for e in resolver.match_entity_names([normalized]).get(normalized, [])
+        if e.entity_type == candidate.subject_entity_type
+    ]
+    if len(owners) > 1:
+        return PromotionOutcome(kind="needs_review", reason=f"ambiguous entity name: {subject!r}")
+    if owners:
         return PromotionOutcome(
-            kind="promote",
-            reason=f"entity resolved via alias {normalized!r}",
-            entity_id=getattr(aliased, "id", None),
-        )
-
-    # 2. Canonical-name exact (NOCASE) hit on same entity_type
-    by_name = resolver.find_entity_by_name(
-        subject,
-        entity_type=candidate.subject_entity_type,
-    )
-    if by_name is not None:
-        return PromotionOutcome(
-            kind="promote",
-            reason=f"entity resolved by canonical_name {subject!r}",
-            entity_id=getattr(by_name, "id", None),
+            kind="promote", reason=f"entity resolved by name or alias {normalized!r}", entity_id=owners[0].id
         )
 
     # 3. LLM disambiguation (M2.5b) — one call total per candidate.
@@ -378,8 +348,8 @@ def check_entity(
                 # member id (treated as uncertain). Both fall through.
                 if picked is not None and picked in allowed_ids:
                     return PromotionOutcome(
-                        kind="promote",
-                        reason=f"entity resolved via LLM same-entity check on {subject!r}",
+                        kind="needs_review",
+                        reason=f"possible entity alias {subject!r}; review match with {picked}",
                         entity_id=picked,
                         llm_calls=1,
                     )
@@ -400,6 +370,8 @@ def check_entity(
 
 class AtomLookup(Protocol):
     """Duck-typed interface for finding existing atoms within an entity."""
+
+    def get_entity(self, entity_id: str) -> Entity | None: ...
 
     def list_atoms(
         self,
@@ -493,7 +465,13 @@ def check_duplicate(
     # cross-entity detection is done for those.
     if candidate.subject_entity_type == "User":
         cross_atom = atom_lookup.find_atom_by_signature(sig)
-        if cross_atom is not None and cross_atom.entity_id != entity_id:
+        owner = atom_lookup.get_entity(cross_atom.entity_id) if cross_atom is not None else None
+        if (
+            cross_atom is not None
+            and cross_atom.entity_id != entity_id
+            and owner is not None
+            and owner.entity_type == "User"
+        ):
             return PromotionOutcome(
                 kind="merge",
                 reason=(
@@ -678,11 +656,12 @@ def build_atom_from_candidate(
       pass the earliest timestamp among the underlying raw_events, so it
       reflects when the event actually happened rather than when it was
       extracted.
-    - ``search_terms`` = ``[subject_name]``. The FTS index already covers
-      assertion + verbatim_quote; this small list adds back the entity
-      hint that pure assertion text might miss for short atoms.
+    - The index includes the subject and optional lexical paraphrases. The
+      assertion and its supporting quote remain the evidence for this atom.
     """
     when = now or datetime.now(UTC)
+    terms = [candidate.subject_name] if candidate.subject_name else []
+    terms.extend(search_phrases(candidate.payload.get("search_phrases"), subject=candidate.subject_name))
     return AtomCard(
         id=atom_id,
         entity_id=entity_id,
@@ -691,7 +670,7 @@ def build_atom_from_candidate(
         assertion=candidate.assertion,
         verbatim_quote=candidate.verbatim_quote,
         quote_event_id=candidate.quote_event_id,
-        search_terms=[candidate.subject_name] if candidate.subject_name else [],
+        search_terms=terms,
         occurred_at=occurred_at or candidate.created_at,
         confidence=candidate.confidence,
         importance=candidate.importance,

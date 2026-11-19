@@ -19,7 +19,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from octop_memory.domain.retention import is_runtime_error
-from octop_memory.pipeline.recall.parser import ParsedQuery
+from octop_memory.pipeline.recall.fields import FieldLookup, field_lookup
+from octop_memory.pipeline.recall.parser import ParsedQuery, topic_terms
 from octop_memory.pipeline.recall.rerank import (
     RerankCandidate,
     from_atom,
@@ -175,7 +176,7 @@ def gather_candidates(
             vector_budget = min(DEFAULT_ATOM_BUDGET_MS, max(1, stopwatch.remaining_ms))
             try:
                 vector_atoms = with_deadline(
-                    lambda: _gather_vector_atoms(memory, parsed, limit=per_source_limit),
+                    lambda: _gather_vector_atoms(memory, parsed, limit=per_source_limit, anchor_ids=entity_anchor_ids),
                     stage="vector",
                     budget_ms=vector_budget,
                 )
@@ -248,83 +249,72 @@ def _gather_atoms(
     limit: int,
     anchor_ids: Sequence[str] = (),
 ) -> list[AtomCard]:
-    """Pick the right atom-search variant based on parsed hints.
-
-    Order of preference:
-    1. ``anchor_ids`` set → fetch the most recent atoms for those
-       entities directly (no FTS). Critical for co-reference queries
-       like "那个项目最近怎么样" where the surface text has no
-       searchable token for the entity.
-    2. Time window present → ``search_atoms_by_time_range``
-       (entity_id used as additional filter if exactly one anchor).
-    3. Otherwise → per-token FTS, merged + deduped by atom id.
-
-    Anchor + time window: combine — fetch each anchor's atoms inside
-    the time window and merge.
-
-    The per-token approach avoids SQLite FTS5's phrase-match trap:
-    the M2.9 ``search_atoms`` wraps the whole query in quotes which
-    only matches exact phrases, useless for natural-language queries
-    like "Hermes 现在怎么样". By splitting into the parser's already-
-    extracted word tokens we get OR-style matching at the cost of a
-    few extra cheap SQLite calls — well within the per-source 50ms
-    budget.
-    """
-    if anchor_ids:
-        out: dict[str, AtomCard] = {}
-        if parsed.time_window is not None:
-            for eid in anchor_ids:
-                for atom in memory.search_atoms_by_time_range(
-                    start=parsed.time_window.start,
-                    end=parsed.time_window.end,
-                    entity_id=eid,
-                    limit=limit,
-                ):
-                    out.setdefault(atom.id, atom)
-        else:
-            for eid in anchor_ids:
-                for atom in memory.list_atoms(entity_id=eid, limit=limit):
-                    out.setdefault(atom.id, atom)
-        # Mix in topical hits as well so anchor-narrowed recall isn't
-        # blind to other useful matches (e.g. when anchors come from
-        # a stale stack but the query still has good FTS tokens).
-        for atom in _per_token_atom_search(memory, parsed, limit=limit):
-            out.setdefault(atom.id, atom)
-        return list(out.values())[:limit]
-
-    if parsed.time_window is not None:
-        return memory.search_atoms_by_time_range(
-            start=parsed.time_window.start,
-            end=parsed.time_window.end,
-            limit=limit,
-        )
-    return _per_token_atom_search(memory, parsed, limit=limit)
+    """Score topical matches before truncating the entity and global pools."""
+    topic = parsed.topic if parsed.topic is not None else parsed.text
+    lookup = field_lookup(topic)
+    terms = topic_terms(parsed)
+    if lookup:
+        terms = lookup.expand(topic, terms)
+    start = parsed.time_window.start if parsed.time_window else None
+    end = parsed.time_window.end if parsed.time_window else None
+    if not terms:
+        if not anchor_ids and not parsed.time_window:
+            return []
+        return memory.search_atom_terms((), entity_ids=anchor_ids, start=start, end=end, limit=limit)
+    global_hits = memory.search_atom_terms(terms, start=start, end=end, limit=limit)
+    if not anchor_ids:
+        return [atom for atom in global_hits if not lookup or lookup.evidence(atom.assertion)]
+    local_hits = memory.search_atom_terms(terms, entity_ids=anchor_ids, start=start, end=end, limit=limit)
+    allowed = _scoped_atom_ids(memory, [*global_hits, *local_hits], anchor_ids, lookup)
+    eligible = [atom for atom in global_hits if atom.id in allowed]
+    local_hits = [atom for atom in local_hits if atom.id in allowed]
+    # Equal source weights. A candidate retrieved through both paths gets
+    # both contributions; either path can contribute an older fact.
+    scores: dict[str, float] = {}
+    atoms: dict[str, AtomCard] = {}
+    for hits in (eligible, local_hits):
+        for rank, atom in enumerate(hits, 1):
+            atoms[atom.id] = atom
+            scores[atom.id] = scores.get(atom.id, 0.0) + 1.0 / (60 + rank)
+    return [atoms[aid] for aid in sorted(scores, key=lambda aid: -scores[aid])[:limit]]
 
 
-def _per_token_atom_search(
+def _scoped_atom_ids(
     memory: Memory,
-    parsed: ParsedQuery,
-    *,
-    limit: int,
-) -> list[AtomCard]:
-    """Run :meth:`Memory.search_atoms` once per token and merge results."""
-    seen: dict[str, tuple[int, int, AtomCard]] = {}  # atom_id -> (token_idx, atom_idx, atom)
-    tokens = parsed.raw_tokens or (parsed.text,)
-    for token_idx, token in enumerate(tokens):
-        if not token.strip():
+    hits: Sequence[AtomCard],
+    anchor_ids: Sequence[str],
+    lookup: FieldLookup | None,
+) -> set[str]:
+    from octop_memory.domain.alias import normalize_alias
+    from octop_memory.pipeline.recall.names import mention_owners, mentions
+
+    allowed: set[str] = set()
+    inspect: dict[str, tuple[bool, list[str]]] = {}
+    for aid, atom in {a.id: a for a in hits}.items():
+        local = atom.entity_id in anchor_ids
+        if local and not lookup:
+            allowed.add(aid)
             continue
-        try:
-            atoms = memory.search_atoms(token, limit=limit * 2)
-        except DRIVER_ERRORS as exc:
-            _log.warning("recall atom search failed for token %r: %s", token, exc, exc_info=True)
+        evidence = lookup.evidence(atom.assertion) if lookup else (atom.assertion + " / " + atom.verbatim_quote,)
+        if evidence:
+            inspect[aid] = (local, [normalize_alias(clause) for clause in evidence])
+
+    if not inspect:
+        return allowed
+    owners = mention_owners(memory, [c for _, clauses in inspect.values() for c in clauses])
+    anchor_types = set()
+    if lookup and any(e.id not in anchor_ids for matches in owners.values() for e in matches):
+        anchor_types = {entity.entity_type for eid in anchor_ids if (entity := memory.get_entity(eid)) is not None}
+
+    for aid, (local, clauses) in inspect.items():
+        names = [name for clause in clauses for _, _, name in mentions(clause, owners)]
+        if anchor_types and any(
+            e.entity_type in anchor_types and e.id not in anchor_ids for name in names for e in owners[name]
+        ):
             continue
-        for atom_idx, atom in enumerate(atoms):
-            if atom.id not in seen:
-                seen[atom.id] = (token_idx, atom_idx, atom)
-    # Lower (token_idx, atom_idx) is better — ranks tokens that appear
-    # earlier higher, which roughly maps to "more specific match".
-    ranked = sorted(seen.values(), key=lambda kv: (kv[0], kv[1]))
-    return [item[2] for item in ranked[:limit]]
+        if local or any(len(owners[name]) == 1 and owners[name][0].id in anchor_ids for name in names):
+            allowed.add(aid)
+    return allowed
 
 
 def _per_token_raw_search(
@@ -333,7 +323,7 @@ def _per_token_raw_search(
     *,
     limit: int,
 ) -> list[RawEvent]:
-    """Same approach as :func:`_per_token_atom_search` but for raw events."""
+    """Merge per-token raw-event hits in query order and deduplicate by event ID."""
     seen: dict[str, tuple[int, int, RawEvent]] = {}
     tokens = parsed.raw_tokens or (parsed.text,)
     for token_idx, token in enumerate(tokens):
@@ -405,6 +395,7 @@ def _gather_vector_atoms(
     parsed: ParsedQuery,
     *,
     limit: int,
+    anchor_ids: Sequence[str] = (),
 ) -> list[AtomCard]:
     """Recall AtomCards via vector semantic search.
 
@@ -444,6 +435,12 @@ def _gather_vector_atoms(
         except DRIVER_ERRORS:
             _log.warning("recall vector atom fetch failed for %r", atom_id, exc_info=True)
             continue
+    lookup = field_lookup(parsed.topic if parsed.topic is not None else parsed.text)
+    if lookup and atoms:
+        if not anchor_ids:
+            return [atom for atom in atoms if lookup.evidence(atom.assertion)]
+        allowed = _scoped_atom_ids(memory, atoms, anchor_ids, lookup)
+        return [atom for atom in atoms if atom.id in allowed]
     return atoms
 
 

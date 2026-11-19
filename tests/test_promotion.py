@@ -256,6 +256,9 @@ class TestCheckDuplicateCrossEntity:
     def test_cross_entity_exact_duplicate_detected(self, memory: Memory) -> None:
         """A cross-entity exact duplicate is detected as merge, with entity_id
         pointing at the entity that already has the atom."""
+        from octop_memory.types import Entity
+
+        memory.add_entity(Entity("ent-A", "User", "old user", [], 1, _now()))
         atom = AtomCard(
             id="atom-cross",
             entity_id="ent-A",  # exists under ent-A

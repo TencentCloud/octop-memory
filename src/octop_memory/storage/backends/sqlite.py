@@ -1508,6 +1508,41 @@ class SqliteMemoryBackend:
         return [self._row_to_atom(r) for r in rows]
 
     @locked_sqlite_operation
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        ns = self._ns
+        clauses = ["a.deprecated_at IS NULL"]
+        params: list[object] = []
+        table = f"{ns}_atoms a"
+        order = "a.occurred_at DESC"
+        if terms:
+            table += f" JOIN {ns}_atoms_fts f ON a.rowid = f.rowid"
+            clauses.append(f"f.{ns}_atoms_fts MATCH ?")
+            params.append(" OR ".join(fts_match_phrase(term) for term in terms))
+            order = "rank"
+        if entity_ids:
+            clauses.append("a.entity_id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(list(entity_ids)))
+        if start is not None:
+            clauses.append("a.occurred_at >= ?")
+            params.append(start.isoformat())
+        if end is not None:
+            clauses.append("a.occurred_at < ?")
+            params.append(end.isoformat())
+        rows = self._conn.execute(
+            f"SELECT a.* FROM {table} WHERE {' AND '.join(clauses)} ORDER BY {order}, a.id LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    @locked_sqlite_operation
     def search_atoms_by_time_range(
         self,
         *,
@@ -1585,20 +1620,20 @@ class SqliteMemoryBackend:
     ) -> Entity | None:
         ns = self._ns
         if entity_type is not None:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 f"""SELECT * FROM {ns}_entities
                     WHERE canonical_name = ? COLLATE NOCASE AND entity_type = ?
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (canonical_name, entity_type),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 f"""SELECT * FROM {ns}_entities
                     WHERE canonical_name = ? COLLATE NOCASE
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (canonical_name,),
-            ).fetchone()
-        return self._row_to_entity(row) if row else None
+            ).fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     @locked_sqlite_operation
     def list_entities(
@@ -1685,6 +1720,47 @@ class SqliteMemoryBackend:
         self._commit()
 
     @locked_sqlite_operation
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]:
+        rows = self._conn.execute(
+            f"""SELECT * FROM {self._ns}_atoms WHERE id > ? AND deprecated_at IS NULL
+                        ORDER BY id LIMIT ?""",
+            (after_id, limit),
+        ).fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    @locked_sqlite_operation
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
+        rows = self._conn.execute(
+            f"""SELECT * FROM {self._ns}_entities WHERE entity_type = ? AND id <> ?
+                    AND instr(lower(canonical_name), ?) = 1
+                        ORDER BY lower(canonical_name), id LIMIT ?""",
+            (entity.entity_type, entity.id, prefix, limit),
+        ).fetchall()
+        return [self._row_to_entity(row) for row in rows]
+
+    @locked_sqlite_operation
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Find all owners, including legacy canonical names without alias rows."""
+        if not names:
+            return {}
+        ns = self._ns
+        keys = json.dumps(list(names))
+        rows = self._conn.execute(
+            f"""SELECT a.alias AS matched_name, e.* FROM {ns}_aliases a
+                JOIN {ns}_entities e ON e.id = a.entity_id
+                WHERE a.alias IN (SELECT value FROM json_each(?))
+                UNION ALL
+                SELECT lower(canonical_name) AS matched_name, e.* FROM {ns}_entities e
+                WHERE canonical_name COLLATE NOCASE IN (SELECT value FROM json_each(?))""",
+            (keys, keys),
+        ).fetchall()
+        matches: dict[str, dict[str, Entity]] = {}
+        for row in rows:
+            entity = self._row_to_entity(row)
+            matches.setdefault(row["matched_name"], {})[entity.id] = entity
+        return {name: list(owners.values()) for name, owners in matches.items()}
+
+    @locked_sqlite_operation
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Resolve a (normalized) alias to its entity, or ``None`` if not found.
 
@@ -1693,14 +1769,14 @@ class SqliteMemoryBackend:
         can decide their own normalization scheme.
         """
         ns = self._ns
-        row = self._conn.execute(
+        rows = self._conn.execute(
             f"""SELECT e.* FROM {ns}_aliases a
                 JOIN {ns}_entities e ON a.entity_id = e.id
                 WHERE a.alias = ?
-                LIMIT 1""",
+                LIMIT 2""",
             (alias,),
-        ).fetchone()
-        return self._row_to_entity(row) if row else None
+        ).fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     @locked_sqlite_operation
     def list_aliases(
@@ -2007,13 +2083,14 @@ class SqliteMemoryBackend:
     @locked_sqlite_operation
     def append_journal(self, entry: JournalEntry) -> None:
         """Append a journal entry. Pipeline rows are expired by ``delete_journal``."""
+        duplicate = "ON CONFLICT(id) DO NOTHING" if entry.action == "entity_review" else ""
         ns = self._ns
         self._conn.execute(
             f"""INSERT INTO {ns}_journal
                 (id, timestamp, action, actor,
                  target_entity_id, target_atom_id, target_candidate_id,
                  before, after, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) {duplicate}""",
             (
                 entry.id,
                 entry.timestamp.isoformat(),

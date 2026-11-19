@@ -25,7 +25,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -463,6 +463,8 @@ def _recall_for_prompt_impl(
         for s in decision.sources
         if (not atom_only or s in {"atom", "vector"}) and (s != "raw" or raw_policy != "never")
     )
+    parsed = replace(parsed, topic=decision.topic)
+    sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
 
     if not sources:
         return RecallResult(snippets=[], rendered="")

@@ -87,6 +87,12 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
 
 ## Retrieval quality and validation
 
+- An unseen spelling can leave only a global topic match. Short overlapping terms may match the correct project but the wrong property. Widely paraphrased questions can still return no answer. The checked-in entity replay measures these separately.
+
+- Field rules cover file size limits, log/backup retention, weekly/monthly document formats, phone numbers and email addresses. Unrecognized fields use topical recall. Supported fields may abstain on unusual units, roles or values appearing only in a quote. Generated search phrases are optional indexing hints. Their quality depends on the extractor. The frozen replay uses legacy atoms and is a development regression set. Large concurrent workloads and real-world paraphrase coverage remain unmeasured.
+- Background entity review compares up to 32 same-type names sharing the initial normalized character for each owner reviewed. It can miss other spellings or owners with no live atoms. Findings cite evidence and require human resolution. An old assertion with internally consistent but incorrect source labels can escape detection.
+- PostgreSQL also matches Chinese substrings in legacy unsegmented atom text. The synthetic replay exercises this path but does not measure large-namespace latency under concurrent load.
+
 - Atom-only injection removes raw/page fallback, not low-value or off-topic atoms already promoted. Relevance admission,
   independent durable-value checks, and negative-query evaluation remain follow-up work. No additional model call is introduced.
 - Hermes captures raw without automatic extraction; its prefetch stays empty until canonical atoms exist through save or promotion.
