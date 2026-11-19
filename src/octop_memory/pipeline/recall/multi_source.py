@@ -19,7 +19,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from octop_memory.domain.retention import is_runtime_error
-from octop_memory.pipeline.recall.parser import ParsedQuery
+from octop_memory.pipeline.recall.fields import FieldLookup, field_lookup
+from octop_memory.pipeline.recall.parser import ParsedQuery, topic_terms
 from octop_memory.pipeline.recall.rerank import (
     RerankCandidate,
     from_atom,
@@ -172,7 +173,7 @@ def gather_candidates(
             vector_budget = min(DEFAULT_ATOM_BUDGET_MS, max(1, stopwatch.remaining_ms))
             try:
                 vector_atoms = with_deadline(
-                    lambda: _gather_vector_atoms(memory, parsed, limit=per_source_limit),
+                    lambda: _gather_vector_atoms(memory, parsed, limit=per_source_limit, anchor_ids=entity_anchor_ids),
                     stage="vector",
                     budget_ms=vector_budget,
                 )
@@ -246,11 +247,11 @@ def _gather_atoms(
     anchor_ids: Sequence[str] = (),
 ) -> list[AtomCard]:
     """Score topical matches before truncating the entity and global pools."""
-    from octop_memory.domain.alias import normalize_alias
-    from octop_memory.pipeline.recall.names import mention_owners, mentions
-    from octop_memory.pipeline.recall.parser import topic_terms
-
+    topic = parsed.topic if parsed.topic is not None else parsed.text
+    lookup = field_lookup(topic)
     terms = topic_terms(parsed)
+    if lookup:
+        terms = lookup.expand(topic, terms)
     start = parsed.time_window.start if parsed.time_window else None
     end = parsed.time_window.end if parsed.time_window else None
     if not terms:
@@ -259,22 +260,11 @@ def _gather_atoms(
         return memory.search_atom_terms((), entity_ids=anchor_ids, start=start, end=end, limit=limit)
     global_hits = memory.search_atom_terms(terms, start=start, end=end, limit=limit)
     if not anchor_ids:
-        return global_hits
+        return [atom for atom in global_hits if not lookup or lookup.evidence(atom.assertion)]
     local_hits = memory.search_atom_terms(terms, entity_ids=anchor_ids, start=start, end=end, limit=limit)
-    # Other entities may own a relevant relationship. Require an unambiguous
-    # mention of the requested object in the assertion or supporting quotation.
-    outside = {
-        atom.id: normalize_alias(atom.assertion + " / " + atom.verbatim_quote)
-        for atom in global_hits
-        if atom.entity_id not in anchor_ids
-    }
-    owners = mention_owners(memory, list(outside.values())) if outside else {}
-    related = {
-        aid
-        for aid, text in outside.items()
-        if any(len(owners[name]) == 1 and owners[name][0].id in anchor_ids for _, _, name in mentions(text, owners))
-    }
-    eligible = [atom for atom in global_hits if atom.entity_id in anchor_ids or atom.id in related]
+    allowed = _scoped_atom_ids(memory, [*global_hits, *local_hits], anchor_ids, lookup)
+    eligible = [atom for atom in global_hits if atom.id in allowed]
+    local_hits = [atom for atom in local_hits if atom.id in allowed]
     # Equal source weights. A candidate retrieved through both paths gets
     # both contributions; either path can contribute an older fact.
     scores: dict[str, float] = {}
@@ -284,6 +274,44 @@ def _gather_atoms(
             atoms[atom.id] = atom
             scores[atom.id] = scores.get(atom.id, 0.0) + 1.0 / (60 + rank)
     return [atoms[aid] for aid in sorted(scores, key=lambda aid: -scores[aid])[:limit]]
+
+
+def _scoped_atom_ids(
+    memory: Memory,
+    hits: Sequence[AtomCard],
+    anchor_ids: Sequence[str],
+    lookup: FieldLookup | None,
+) -> set[str]:
+    from octop_memory.domain.alias import normalize_alias
+    from octop_memory.pipeline.recall.names import mention_owners, mentions
+
+    allowed: set[str] = set()
+    inspect: dict[str, tuple[bool, list[str]]] = {}
+    for aid, atom in {a.id: a for a in hits}.items():
+        local = atom.entity_id in anchor_ids
+        if local and not lookup:
+            allowed.add(aid)
+            continue
+        evidence = lookup.evidence(atom.assertion) if lookup else (atom.assertion + " / " + atom.verbatim_quote,)
+        if evidence:
+            inspect[aid] = (local, [normalize_alias(clause) for clause in evidence])
+
+    if not inspect:
+        return allowed
+    owners = mention_owners(memory, [c for _, clauses in inspect.values() for c in clauses])
+    anchor_types = set()
+    if lookup and any(e.id not in anchor_ids for matches in owners.values() for e in matches):
+        anchor_types = {entity.entity_type for eid in anchor_ids if (entity := memory.get_entity(eid)) is not None}
+
+    for aid, (local, clauses) in inspect.items():
+        names = [name for clause in clauses for _, _, name in mentions(clause, owners)]
+        if anchor_types and any(
+            e.entity_type in anchor_types and e.id not in anchor_ids for name in names for e in owners[name]
+        ):
+            continue
+        if local or any(len(owners[name]) == 1 and owners[name][0].id in anchor_ids for name in names):
+            allowed.add(aid)
+    return allowed
 
 
 def _per_token_raw_search(
@@ -364,6 +392,7 @@ def _gather_vector_atoms(
     parsed: ParsedQuery,
     *,
     limit: int,
+    anchor_ids: Sequence[str] = (),
 ) -> list[AtomCard]:
     """Recall AtomCards via vector semantic search.
 
@@ -403,6 +432,12 @@ def _gather_vector_atoms(
         except DRIVER_ERRORS:
             _log.warning("recall vector atom fetch failed for %r", atom_id, exc_info=True)
             continue
+    lookup = field_lookup(parsed.topic if parsed.topic is not None else parsed.text)
+    if lookup and atoms:
+        if not anchor_ids:
+            return [atom for atom in atoms if lookup.evidence(atom.assertion)]
+        allowed = _scoped_atom_ids(memory, atoms, anchor_ids, lookup)
+        return [atom for atom in atoms if atom.id in allowed]
     return atoms
 
 

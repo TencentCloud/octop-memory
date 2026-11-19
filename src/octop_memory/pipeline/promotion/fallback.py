@@ -182,6 +182,7 @@ def _downgrade_for_fallback(c: Candidate) -> Candidate:
         decided_at=c.decided_at,
         decided_by=c.decided_by,
         session_id=c.session_id,
+        payload=dict(c.payload),
     )
 
 

@@ -712,6 +712,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         deprecated.
         """
         from octop_memory.domain.alias import normalize_alias
+        from octop_memory.domain.search_terms import search_phrases
 
         text = assertion.strip()
         if not text:
@@ -730,6 +731,14 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         now = datetime.now(UTC)
         new_atom: AtomCard
         with self._backend.transaction():
+            # A correction can change the topic. Discard inferred phrases from the
+            # previous assertion and retain its subject and imported index terms.
+            source = self.get_candidate(old.candidate_id)
+            inferred = (
+                set(search_phrases(source.payload.get("search_phrases"), subject=source.subject_name))
+                if source
+                else set()
+            )
             new_atom = AtomCard(
                 id=str(uuid.uuid4()),
                 entity_id=old.entity_id,
@@ -738,7 +747,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 assertion=text,
                 verbatim_quote=old.verbatim_quote,
                 quote_event_id=old.quote_event_id,
-                search_terms=list(old.search_terms),
+                search_terms=[term for term in old.search_terms if term not in inferred],
                 occurred_at=old.occurred_at,
                 confidence=old.confidence,
                 importance=old.importance,

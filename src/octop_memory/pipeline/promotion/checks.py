@@ -25,6 +25,7 @@ from typing import Literal, Protocol
 
 from octop_memory.domain.alias import normalize_alias
 from octop_memory.domain.retention import is_runtime_error_candidate
+from octop_memory.domain.search_terms import search_phrases
 from octop_memory.types import AtomCard, Candidate, Entity, RawEvent
 
 # ---------------------------------------------------------------------------
@@ -655,11 +656,12 @@ def build_atom_from_candidate(
       pass the earliest timestamp among the underlying raw_events, so it
       reflects when the event actually happened rather than when it was
       extracted.
-    - ``search_terms`` = ``[subject_name]``. The FTS index already covers
-      assertion + verbatim_quote; this small list adds back the entity
-      hint that pure assertion text might miss for short atoms.
+    - The index includes the subject and optional lexical paraphrases. The
+      assertion and its supporting quote remain the evidence for this atom.
     """
     when = now or datetime.now(UTC)
+    terms = [candidate.subject_name] if candidate.subject_name else []
+    terms.extend(search_phrases(candidate.payload.get("search_phrases"), subject=candidate.subject_name))
     return AtomCard(
         id=atom_id,
         entity_id=entity_id,
@@ -668,7 +670,7 @@ def build_atom_from_candidate(
         assertion=candidate.assertion,
         verbatim_quote=candidate.verbatim_quote,
         quote_event_id=candidate.quote_event_id,
-        search_terms=[candidate.subject_name] if candidate.subject_name else [],
+        search_terms=terms,
         occurred_at=occurred_at or candidate.created_at,
         confidence=candidate.confidence,
         importance=candidate.importance,

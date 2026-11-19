@@ -2142,3 +2142,107 @@ class TestEntityIdentityAndRecall:
         assert {r.id for r in memory.list_journal(action="entity_review")} == {r.id for r in findings}
         assert memory.get_atom("legacy-wrong").entity_id == person.id
         assert memory.find_entity_by_alias("信使") is None
+
+
+class TestLexicalFieldRecall:
+    def test_only_returns_numbers_for_the_queried_project_and_role(self, backend: Any) -> None:
+        from dataclasses import replace
+
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="contacts", backend=backend)
+        service = MemoryService(memory)
+        signer, alder, _ = memory.create_atom(
+            "签字人是小周，电话是 010-55501234。", entity_name="青杉", entity_type="Project"
+        )
+        memory.create_atom("负责人电话暂缺，工单号为 12345678。", entity_id=alder.id)
+        owner, _, _ = memory.create_atom("牵头人的手机号为 13800001234。", entity_name="白桦", entity_type="Project")
+        memory.add_atom(replace(signer, id="tag-no-value", assertion="小周负责验收。", search_terms=["负责人电话"]))
+        cross, _, _ = memory.create_atom(
+            "青杉完成验收。白桦项目负责人的座机是 010-55504321。", entity_name="联络员", entity_type="Person"
+        )
+
+        def hits(question: str) -> set[str]:
+            return {s.source_id for s in service.recall(question).snippets}
+
+        assert hits("青杉的负责人电话是多少") == set()
+        assert hits("青杉的签字人电话是多少") == {signer.id}
+        assert hits("白桦的负责人电话是多少") == {owner.id, cross.id}
+        assert not hits("白桦的法务部电话是多少")
+
+        actual, _, _ = memory.create_atom("项目经理是小郑，联系电话是 +86 10 5550 6789。", entity_id=alder.id)
+        assert hits("青杉的责任人手机号是多少") == {actual.id}
+        assert hits("联系青杉的责任人要拨哪个号码") == {actual.id}
+        mail, _, _ = memory.create_atom("客服邮箱是 help@example.test。", entity_id=alder.id)
+        assert hits("青杉的服务台邮箱是什么") == {mail.id}
+        assert not hits("青杉的负责人邮箱是什么")
+
+    def test_paraphrases_retain_subject_units_and_document_type(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="fields", backend=backend)
+        service = MemoryService(memory)
+        size, project, _ = memory.create_atom("单个附件不得超过 48 MiB。", entity_name="雨燕", entity_type="Project")
+        count, _, _ = memory.create_atom("一次最多上传三个文件。", entity_id=project.id)
+        backup, _, _ = memory.create_atom("备份将在七天后删除。", entity_id=project.id)
+        memory.create_atom("运行记录每七天巡检一次。", entity_id=project.id)
+        monthly, _, _ = memory.create_atom("月报统一使用 CSV。", entity_id=project.id)
+        memory.create_atom("周报由行政组归档。", entity_id=project.id)
+        memory.create_atom("附件上限是 200 MB。", entity_name="苍鹭", entity_type="Project")
+
+        def hits(question: str) -> set[str]:
+            return {s.source_id for s in service.recall(question).snippets}
+
+        assert hits("雨燕上传的文件可以多大") == {size.id}
+        assert hits("雨燕的备份保存多长时间") == {backup.id}
+        assert hits("雨燕的日志会保留几周") == set()
+        assert hits("雨燕每月工作汇总是什么格式") == {monthly.id}
+        assert hits("雨燕每周小结应该用什么格式") == set()
+        assert count.id in hits("雨燕一次最多上传几个文件")
+
+    def test_log_compound_survives_more_than_one_candidate_pool(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="retention", backend=backend)
+        fact, project, _ = memory.create_atom("服务日志保留四十天。", entity_name="银杏", entity_type="Project")
+        for i in range(45):
+            memory.create_atom(f"日志巡检的第{i}批记录已核对。", entity_id=project.id)
+        result = MemoryService(memory).recall("银杏的运行记录留存多少天")
+        assert [s.source_id for s in result.snippets] == [fact.id]
+
+    def test_extracted_paraphrase_is_an_index_key_only(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.pipeline.extractor import CandidateExtractor
+        from octop_memory.pipeline.promotion import PromotionWorker
+        from octop_memory.ports.llm.mock import MockLLMClient
+
+        memory = Memory(namespace="phrases", backend=backend)
+        service = MemoryService(memory)
+        raw = memory.add_raw("红色标签的工单先处理。", event_type="user_message")
+        item = {
+            "title": "工单优先级",
+            "candidate_type": "Decision",
+            "assertion": raw.content,
+            "verbatim_quote": raw.content,
+            "quote_event_id": raw.id,
+            "source_refs": [raw.id],
+            "subject": {"name": "榆树", "entity_type": "Project"},
+            "confidence": "high",
+            "importance": "high",
+            "recommended_action": "promote",
+            "search_phrases": ["榆树", "故障分诊", "故障分诊", "55512345", "队列顺序", "紧急分流", "第四条忽略"],
+        }
+        model = MockLLMClient(default_response=json.dumps({"candidates": [item]}, ensure_ascii=False))
+        result = CandidateExtractor(llm=model).extract([raw])
+        assert result.llm_calls == 1
+        memory.add_candidate(result.candidates[0])
+        decision = PromotionWorker(memory).promote_pending().decisions[0]
+        atom = decision.atom
+        assert atom is not None and atom.search_terms == ["榆树", "故障分诊", "队列顺序", "紧急分流"]
+        hits = service.recall("故障分诊").snippets
+        assert [(s.source_id, s.text) for s in hits] == [(atom.id, raw.content)]
+        assert memory.find_entity_by_alias("故障分诊") is None
+        corrected = memory.replace_atom(atom.id, assertion="表单现已统一归档。")
+        assert corrected is not None and corrected.search_terms == ["榆树"]
+        assert service.recall("故障分诊").snippets == []
+        assert len(model.calls) == 1

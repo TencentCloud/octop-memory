@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from octop_memory.domain.search_terms import search_phrases
 from octop_memory.pipeline.extractor.prompts import EXTRACTOR_VERSION, NEGATION_TOKENS
 from octop_memory.types import (
     Candidate,
@@ -281,6 +282,7 @@ def _map_candidate_dict(
     if quote_truncated:
         warnings.append("verbatim_quote: truncated to 200 chars (model output exceeded max)")
 
+    phrases = search_phrases(item.get("search_phrases"), subject=subject_name)
     candidate = Candidate(
         id=str(uuid.uuid4()),  # worker-assigned, NOT from LLM
         raw_event_ids=source_refs,
@@ -300,6 +302,7 @@ def _map_candidate_dict(
         extractor_version=extractor_version,
         created_at=datetime.now(UTC),
         session_id=session_id,
+        payload={"search_phrases": phrases} if phrases else {},
     )
     return candidate, warnings
 

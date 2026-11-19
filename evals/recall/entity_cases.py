@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import random
+import statistics
 import tempfile
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import perf_counter_ns
 
 from octop_memory import Memory
 from octop_memory.domain.alias import normalize_alias
@@ -121,7 +125,31 @@ def seed(mem, extra):
     return {aid: eid for aid, eid, _, _ in facts}
 
 
-def evaluate(memory, extra):
+def timed_replay(memory, runs):
+    """Warm database, uncached prompt recall. Context setup is outside the timed region."""
+    samples = []
+    for sweep in range(runs + 1):
+        indexes = list(range(len(QUESTIONS)))
+        random.Random(481 + sweep).shuffle(indexes)
+        for index in indexes:
+            _, question, _, ctx, _ = QUESTIONS[index]
+            thread = f"timed-{index}" if ctx else None
+            if ctx:
+                memory.upsert_active_entity(thread, ctx, source="manual", when=NOW)
+            start = perf_counter_ns()
+            recall_for_prompt(memory, question, thread_id=thread, now=NOW)
+            elapsed = (perf_counter_ns() - start) / 1_000_000
+            if sweep:
+                samples.append(elapsed)
+    return {
+        "samples": len(samples),
+        "p50_ms": statistics.median(samples),
+        "p95_ms": sorted(samples)[math.ceil(len(samples) * 0.95) - 1],
+        "samples_ms": samples,
+    }
+
+
+def evaluate(memory, extra, timing_runs=0):
     assert memory.vector_index is None
     owners = seed(memory, extra)
     referenced_projects = {"y1": "h", "y2": "s"}
@@ -138,7 +166,7 @@ def evaluate(memory, extra):
         rows.append(
             dict(group=group, question=question, gold=gold, project=project, hits=hits, off_project=off_project)
         )
-    return dict(
+    report = dict(
         atoms=len(owners),
         project_questions=sum(r["project"] is not None for r in rows),
         questions_with_off_project_hits=sum(bool(r["off_project"]) for r in rows),
@@ -147,15 +175,22 @@ def evaluate(memory, extra):
         false_injections=sum(not r["gold"] and bool(r["hits"]) for r in rows),
         questions=rows,
     )
+    if timing_runs:
+        report["latency"] = timed_replay(memory, timing_runs)
+    return report
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", help="Dedicated PostgreSQL test database (creates synthetic namespaces).")
+    parser.add_argument("--timing-runs", type=int, default=0, help="Timed shuffled sweeps per corpus after warmup.")
+    parser.add_argument("--extra-per-project", type=int, nargs="+", default=[0, 32], help="Distractors per project.")
     args = parser.parse_args()
+    if min(args.extra_per_project) < 0 or args.timing_runs < 0:
+        parser.error("counts must be non-negative")
     reports = []
     with tempfile.TemporaryDirectory() as temp:
-        for noise in (0, 32):
+        for noise in args.extra_per_project:
             ns = f"replay_{uuid.uuid4().hex[:12]}"
             if args.dsn:
                 from octop_memory.storage.backends.postgres import PostgresMemoryBackend
@@ -164,7 +199,7 @@ if __name__ == "__main__":
             else:
                 backend = SqliteMemoryBackend(namespace=ns, db_path=Path(temp) / f"{ns}.sqlite")
             try:
-                reports.append(evaluate(Memory(namespace=ns, backend=backend), noise))
+                reports.append(evaluate(Memory(namespace=ns, backend=backend), noise, args.timing_runs))
             finally:
                 try:
                     if args.dsn:
