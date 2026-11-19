@@ -169,12 +169,18 @@ class MemoryRuntime:
         return manual_document_review_status(self._memory, documents)
 
     def review_new_memory(self, *, max_atoms: int = 20) -> dict[str, Any] | None:
-        """Check one background batch against current owner files.
+        """Audit entity assignments and check one background batch against current owner files.
 
         Callers on a chat turn must not wait for this. The host drains a
         bounded batch after the save returns. An explicit
         ``reconcile_manual_documents`` call still uses its own limit.
         """
+        from octop_memory.pipeline.lifecycle.dreaming import run_entity_dreaming
+
+        try:
+            run_entity_dreaming(self._memory, limit=max_atoms)
+        except REPORTABLE_ERRORS:
+            logger.warning("Entity review after memory write is unavailable", exc_info=True)
         provider = self._manual_documents_provider
         if provider is None:
             return None

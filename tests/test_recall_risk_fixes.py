@@ -28,13 +28,13 @@ def mem(tmp_path: Path) -> Memory:
 
 class TestRecallSourceWarning:
     def test_atom_search_failure_logs_warning(self, mem: Memory) -> None:
-        """When search_atoms raises, a warning should be logged and recall should degrade to empty rather than crash."""
+        """A failed term query logs a warning and produces no atom candidates."""
         mem.store("正常内容", topic="测试")
 
         parsed = ParsedQuery(text="测试", raw_tokens=["测试"])
 
         with (
-            patch.object(mem, "search_atoms", side_effect=RuntimeError("db locked")),
+            patch.object(mem, "search_atom_terms", side_effect=RuntimeError("db locked")),
             patch("octop_memory.pipeline.recall.multi_source._log") as mock_log,
         ):
             candidates = gather_candidates(mem, parsed, sources=("atom",))
@@ -43,8 +43,7 @@ class TestRecallSourceWarning:
             # A warning was logged.
             mock_log.warning.assert_called_once()
             call_args = mock_log.warning.call_args[0]
-            assert "atom search failed" in call_args[0]
-            assert "测试" in str(call_args[1])
+            assert "atom gather failed" in call_args[0]
 
     def test_raw_search_failure_logs_warning(self, mem: Memory) -> None:
         """When search_raw raises, a warning should be logged and recall should degrade to empty rather than crash."""
@@ -68,7 +67,7 @@ class TestRecallSourceWarning:
 
         parsed = ParsedQuery(text="原始事件", raw_tokens=["原始事件"])
 
-        with patch.object(mem, "search_atoms", side_effect=RuntimeError("db error")):
+        with patch.object(mem, "search_atom_terms", side_effect=RuntimeError("db error")):
             candidates = gather_candidates(mem, parsed, sources=("atom", "raw"))
             # The raw source can still recall.
             raw_candidates = [c for c in candidates if c.layer == "raw"]
@@ -221,3 +220,17 @@ class TestPageHeadlineGather:
         parsed = ParsedQuery(text="随便问问", raw_tokens=["随便", "问问"])
         decision = route(mem, parsed)
         assert "page_headline" not in decision.sources
+
+
+def test_failed_entity_lookup_does_not_inject_global_atoms(mem: Memory, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sqlite3
+
+    from octop_memory.pipeline.recall import recall_for_prompt
+
+    mem.create_atom("采购预算是三万元", entity_name="星河", entity_type="Project")
+
+    def fail_lookup(*args: object) -> None:
+        raise sqlite3.OperationalError("name lookup unavailable")
+
+    monkeypatch.setattr(mem, "match_entity_names", fail_lookup)
+    assert not recall_for_prompt(mem, "星河的采购预算").snippets

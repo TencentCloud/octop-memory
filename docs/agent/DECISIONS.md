@@ -322,3 +322,15 @@ Cost: callers must select an appropriate kind, and old hosts still produce Fact.
 bilingual guidance; unsupported memory versions fail typed saves explicitly without downgrading. Release/adopt the
 library API before consumer releases; local-source tests do not establish release availability. Review classification
 quality using real requests; any offline reclassification of historical records needs a separate preview and scope.
+
+## ADR-046: Typed entity identity and evidence-backed lexical retrieval (local implementation)
+
+A name or confirmed alias can identify an owner for writes when exactly one entity of the declared type matches.
+Same-type ambiguity and model-proposed aliases go to human review, including stale candidates. Retrieval keeps entity-local and global lexical candidates so a fact about a project can live under a person. Cross-owner admission checks the assertion or quotation for a unique reference to the requested entity.
+Background review records evidence of possible assignment errors, similar names and explicit alias declarations. A stable finding ID and transactional cursor support retries without changing historical ownership.
+
+## ADR-047: Index alternate wording and require evidence for requested fields (local implementation)
+
+The original assertion remains the prompt evidence. Extractor v2.5 may emit up to three alternate topic phrases in its existing response. Promotion carries them into the atom's existing lexical index. They have no authority to link entities or supply a requested value. On correction the new assertion discards the old generated phrases.
+
+For recognized subject/field combinations, query expansion uses both existing lexical routes and preserves the complete recognized subject before ranking. A field-specific check admits only assertions with the requested value and scope. This supports old atoms without reindexing. Empty recall is appropriate when the correct type of evidence is absent. New fields need positive examples and close negative controls on both backends.

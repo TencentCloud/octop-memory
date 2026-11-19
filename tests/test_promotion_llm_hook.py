@@ -200,9 +200,8 @@ def _make_candidate(
     )
 
 
-def test_hook_merges_split_entities_into_one(memory: Memory) -> None:
-    """The dogfood case: 'Project' and 'Project database' should land
-    on the same entity if the LLM hook says they're the same."""
+def test_model_suggestion_requires_explicit_approval(memory: Memory) -> None:
+    """A shared name prefix alone cannot move a fact or merge its entities."""
     from octop_memory.pipeline.promotion import PromotionWorker
 
     ev = memory.add_raw(content="raw", event_type="user_message")
@@ -211,9 +210,8 @@ def test_hook_merges_split_entities_into_one(memory: Memory) -> None:
     c1 = _make_candidate("c1", subject_name="Project", raw_event_id=ev.id)
     memory.add_candidate(c1)  # type: ignore[arg-type]
 
-    # Second candidate: subject = "Project database". Without LLM the
-    # rule path would create a brand-new entity. With the hook, LLM says
-    # "same as ent_id_of_first_entity" → both atoms hang on ONE entity.
+    # The model proposes linking this longer name to the first project.
+    # The alias becomes authoritative only after the reviewer confirms it.
     c2 = _make_candidate(
         "c2",
         subject_name="Project database",
@@ -240,13 +238,17 @@ def test_hook_merges_split_entities_into_one(memory: Memory) -> None:
     worker_with_hook = PromotionWorker(memory, llm_hook=hook)
     result = worker_with_hook.promote([c2])  # type: ignore[arg-type]
 
-    # Both candidates now hang on the same entity.
-    assert result.promoted == 1
+    assert result.needs_review == 1
     assert result.llm_calls == 1
-    only_entity = memory.list_entities(entity_type="Project")
-    assert len(only_entity) == 1
-    assert only_entity[0].id == seeded_id
-    assert only_entity[0].atom_count == 2  # one from each candidate
+    pending = memory.get_candidate("c2")
+    assert pending is not None and pending.target_entity_id == seeded_id
+    assert len(memory.list_atoms(entity_id=seeded_id)) == 1
+    approved = worker_no_hook.approve(pending)
+    assert approved.atom is not None and approved.atom.entity_id == seeded_id
+    assert any(
+        a.alias == "project database" and a.created_by == "user" for a in memory.list_aliases(entity_id=seeded_id)
+    )
+    assert len(memory.list_entities(entity_type="Project")) == 1
 
 
 def test_hook_uncertain_falls_through_to_new_entity(memory: Memory) -> None:

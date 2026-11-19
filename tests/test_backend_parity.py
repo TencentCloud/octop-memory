@@ -2050,3 +2050,208 @@ class TestMemoryNodeParity:
         )
         assert backend.delete_node("root", cascade=True) is True
         assert backend.get_node("branch") is None
+
+
+class TestEntityIdentityAndRecall:
+    def test_typed_writes_and_ambiguous_legacy_owners(self, backend: Any) -> None:
+        from dataclasses import replace
+
+        from octop_memory import Memory
+        from octop_memory.pipeline.promotion import PromotionWorker
+        from octop_memory.pipeline.promotion.checks import check_entity
+        from octop_memory.pipeline.promotion.fallback import run_fallback_pass
+
+        memory = Memory(namespace="entities", backend=backend)
+        project_atom, project, _ = memory.create_atom("发布在下周", entity_name="青禾", entity_type="Project")
+        _, person, _ = memory.create_atom("下周入职", entity_name="青禾", entity_type="Person")
+        assert project.id != person.id and memory.find_entity_by_alias("青禾") is None
+        candidate = memory.get_candidate(project_atom.candidate_id)
+        assert candidate is not None
+        assert check_entity(candidate, resolver=memory).entity_id == project.id
+        assert check_entity(replace(candidate, subject_entity_type="Person"), resolver=memory).entity_id == person.id
+        assert memory.find_entity_by_name("青禾") is None
+        assert memory.find_entity_by_name("青禾", entity_type="Person").id == person.id
+        twin = replace(project, id="other-project")
+        memory.add_entity(twin)
+        assert memory.find_entity_by_name("青禾", entity_type="Project") is None
+        with pytest.raises(ValueError, match="ambiguous"):
+            memory.create_atom("增加一个副本", entity_name="青禾", entity_type="Project")
+        pending = replace(candidate, id="pending", status="pending", assertion="增加一个副本", target_entity_id=None)
+        memory.add_candidate(pending)
+        decision = PromotionWorker(memory).promote([pending])
+        assert decision.needs_review == 1
+        pending = memory.get_candidate("pending")
+        assert pending is not None
+        stale = datetime.now(UTC) - timedelta(days=10)
+        memory.update_candidate_status(pending.id, status="needs_review", decided_at=stale)
+        run_fallback_pass(memory)
+        assert memory.get_candidate("pending").status == "needs_review"
+        with pytest.raises(ValueError, match="candidate type"):
+            PromotionWorker(memory).approve(pending, entity_id=person.id)
+        approved = PromotionWorker(memory).approve(pending, entity_id=twin.id)
+        assert approved.atom is not None and approved.atom.entity_id == twin.id
+        assert memory.get_atom(project_atom.id).entity_id == project.id
+
+    def test_longest_known_name_and_cross_entity_evidence(self, backend: Any) -> None:
+        from octop_memory import Memory
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        memory = Memory(namespace="entities", backend=backend)
+        base, _, _ = memory.create_atom("采购预算为三万元", entity_name="星河", entity_type="Project")
+        plus, project, _ = memory.create_atom("采购预算为五万元", entity_name="星河二期", entity_type="Project")
+        memory.add_alias(Alias("云帆", project.id, "Project", "user", datetime.now(UTC)))
+        other, _, _ = memory.create_atom("星河二期的交接材料归档在蓝柜", entity_name="小林", entity_type="Person")
+        for i in range(21):
+            memory.create_atom(f"巡检批次 {i} 已归档", entity_id=project.id)
+
+        def ids(q: str) -> list[str]:
+            return [s.source_id for s in recall_for_prompt(memory, q).snippets]
+
+        assert ids("星河二期的采购预算是多少") == [plus.id]
+        assert ids("星河的采购预算是多少") == [base.id]
+        assert plus.id in ids("云帆采购预算")
+        assert other.id in ids("星河二期交接材料在哪")
+        assert other.id not in ids("星河的交接材料在哪")
+        assert other.id in ids("交接材料")
+        classic, _, _ = memory.create_atom("维护窗口在周一", entity_name="Hermes", entity_type="Project")
+        lite, _, _ = memory.create_atom("维护窗口在周二", entity_name="Hermes Lite", entity_type="Project")
+        v2, _, _ = memory.create_atom("维护窗口在周三", entity_name="Hermes2", entity_type="Project")
+        assert ids("Hermes 的维护窗口") == [classic.id]
+        assert ids("Hermes Lite的维护窗口") == [lite.id]
+        assert ids("Hermes2的维护窗口") == [v2.id]
+
+    def test_similar_name_candidates_match_a_literal_prefix(self, backend: Any) -> None:
+        subject = _make_entity(id="subject", canonical_name="_Hermes")
+        backend.save_entity(subject)
+        for name in ("_Hermes2", "_\U0010ffff", "Other"):
+            backend.save_entity(_make_entity(id=name, canonical_name=name))
+
+        candidates = backend.similar_name_candidates(subject, "_", limit=32)
+        assert {entity.canonical_name for entity in candidates} == {"_Hermes2", "_\U0010ffff"}
+
+    def test_background_entity_review_has_durable_evidence(self, backend: Any) -> None:
+        from dataclasses import replace
+
+        from octop_memory import Memory, MemoryService
+        from octop_memory.pipeline.lifecycle.dreaming import run_entity_dreaming
+
+        memory = Memory(namespace="entities", backend=backend)
+        atom, project, _ = memory.create_atom("我们内部把Hermes叫信使。", entity_name="Hermes", entity_type="Project")
+        memory.create_atom("测试发布", entity_name="Hermes2", entity_type="Project")
+        _, person, _ = memory.create_atom("明天入职", entity_name="青禾", entity_type="Person")
+        memory.add_atom(replace(atom, id="legacy-wrong", entity_id=person.id))
+        MemoryService(memory).review_new_memory()
+        findings = memory.list_journal(action="entity_review")
+        assert {"alias_declaration", "similar_name", "assignment_mismatch"} <= {r.note for r in findings}
+        suggestion = next(r for r in findings if r.note == "alias_declaration")
+        assert suggestion.target_entity_id == project.id and suggestion.target_atom_id == atom.id
+        assert suggestion.after["alias"] == "信使" and suggestion.after["quote_event_id"] == atom.quote_event_id
+        for _ in range(6):
+            run_entity_dreaming(memory, limit=1)
+        assert {r.id for r in memory.list_journal(action="entity_review")} == {r.id for r in findings}
+        assert memory.get_atom("legacy-wrong").entity_id == person.id
+        assert memory.find_entity_by_alias("信使") is None
+
+
+class TestLexicalFieldRecall:
+    def test_only_returns_numbers_for_the_queried_project_and_role(self, backend: Any) -> None:
+        from dataclasses import replace
+
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="contacts", backend=backend)
+        service = MemoryService(memory)
+        signer, alder, _ = memory.create_atom(
+            "签字人是小周，电话是 010-55501234。", entity_name="青杉", entity_type="Project"
+        )
+        memory.create_atom("负责人电话暂缺，工单号为 12345678。", entity_id=alder.id)
+        owner, _, _ = memory.create_atom("牵头人的手机号为 13800001234。", entity_name="白桦", entity_type="Project")
+        memory.add_atom(replace(signer, id="tag-no-value", assertion="小周负责验收。", search_terms=["负责人电话"]))
+        cross, _, _ = memory.create_atom(
+            "青杉完成验收。白桦项目负责人的座机是 010-55504321。", entity_name="联络员", entity_type="Person"
+        )
+
+        def hits(question: str) -> set[str]:
+            return {s.source_id for s in service.recall(question).snippets}
+
+        assert hits("青杉的负责人电话是多少") == set()
+        assert hits("青杉的签字人电话是多少") == {signer.id}
+        assert hits("白桦的负责人电话是多少") == {owner.id, cross.id}
+        assert not hits("白桦的法务部电话是多少")
+
+        actual, _, _ = memory.create_atom("项目经理是小郑，联系电话是 +86 10 5550 6789。", entity_id=alder.id)
+        assert hits("青杉的责任人手机号是多少") == {actual.id}
+        assert hits("联系青杉的责任人要拨哪个号码") == {actual.id}
+        mail, _, _ = memory.create_atom("客服邮箱是 help@example.test。", entity_id=alder.id)
+        assert hits("青杉的服务台邮箱是什么") == {mail.id}
+        assert not hits("青杉的负责人邮箱是什么")
+
+    def test_paraphrases_retain_subject_units_and_document_type(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="fields", backend=backend)
+        service = MemoryService(memory)
+        size, project, _ = memory.create_atom("单个附件不得超过 48 MiB。", entity_name="雨燕", entity_type="Project")
+        count, _, _ = memory.create_atom("一次最多上传三个文件。", entity_id=project.id)
+        backup, _, _ = memory.create_atom("备份将在七天后删除。", entity_id=project.id)
+        memory.create_atom("运行记录每七天巡检一次。", entity_id=project.id)
+        monthly, _, _ = memory.create_atom("月报统一使用 CSV。", entity_id=project.id)
+        memory.create_atom("周报由行政组归档。", entity_id=project.id)
+        memory.create_atom("附件上限是 200 MB。", entity_name="苍鹭", entity_type="Project")
+
+        def hits(question: str) -> set[str]:
+            return {s.source_id for s in service.recall(question).snippets}
+
+        assert hits("雨燕上传的文件可以多大") == {size.id}
+        assert hits("雨燕的备份保存多长时间") == {backup.id}
+        assert hits("雨燕的日志会保留几周") == set()
+        assert hits("雨燕每月工作汇总是什么格式") == {monthly.id}
+        assert hits("雨燕每周小结应该用什么格式") == set()
+        assert count.id in hits("雨燕一次最多上传几个文件")
+
+    def test_log_compound_survives_more_than_one_candidate_pool(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+
+        memory = Memory(namespace="retention", backend=backend)
+        fact, project, _ = memory.create_atom("服务日志保留四十天。", entity_name="银杏", entity_type="Project")
+        for i in range(45):
+            memory.create_atom(f"日志巡检的第{i}批记录已核对。", entity_id=project.id)
+        result = MemoryService(memory).recall("银杏的运行记录留存多少天")
+        assert [s.source_id for s in result.snippets] == [fact.id]
+
+    def test_extracted_paraphrase_is_an_index_key_only(self, backend: Any) -> None:
+        from octop_memory import Memory, MemoryService
+        from octop_memory.pipeline.extractor import CandidateExtractor
+        from octop_memory.pipeline.promotion import PromotionWorker
+        from octop_memory.ports.llm.mock import MockLLMClient
+
+        memory = Memory(namespace="phrases", backend=backend)
+        service = MemoryService(memory)
+        raw = memory.add_raw("红色标签的工单先处理。", event_type="user_message")
+        item = {
+            "title": "工单优先级",
+            "candidate_type": "Decision",
+            "assertion": raw.content,
+            "verbatim_quote": raw.content,
+            "quote_event_id": raw.id,
+            "source_refs": [raw.id],
+            "subject": {"name": "榆树", "entity_type": "Project"},
+            "confidence": "high",
+            "importance": "high",
+            "recommended_action": "promote",
+            "search_phrases": ["榆树", "故障分诊", "故障分诊", "55512345", "队列顺序", "紧急分流", "第四条忽略"],
+        }
+        model = MockLLMClient(default_response=json.dumps({"candidates": [item]}, ensure_ascii=False))
+        result = CandidateExtractor(llm=model).extract([raw])
+        assert result.llm_calls == 1
+        memory.add_candidate(result.candidates[0])
+        decision = PromotionWorker(memory).promote_pending().decisions[0]
+        atom = decision.atom
+        assert atom is not None and atom.search_terms == ["榆树", "故障分诊", "队列顺序", "紧急分流"]
+        hits = service.recall("故障分诊").snippets
+        assert [(s.source_id, s.text) for s in hits] == [(atom.id, raw.content)]
+        assert memory.find_entity_by_alias("故障分诊") is None
+        corrected = memory.replace_atom(atom.id, assertion="表单现已统一归档。")
+        assert corrected is not None and corrected.search_terms == ["榆树"]
+        assert service.recall("故障分诊").snippets == []
+        assert len(model.calls) == 1

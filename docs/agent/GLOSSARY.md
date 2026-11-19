@@ -29,5 +29,6 @@ Core terminology only; see [PROJECT_MAP](PROJECT_MAP.md) for modules and data fl
 | namespace | Memory isolation identity: SQLite table prefix or namespace key in PostgreSQL's shared schema |
 | checkpoint_ns | LangGraph execution-flow namespace, distinct from the memory namespace |
 | retention / vacuum | Deleting history according to retention rules / maintaining physical storage space; not interchangeable |
+| Entity dreaming | Bounded background review of active atoms, ownership evidence and possible aliases. Findings live in the decision journal under `entity_review`. |
 | VectorIndex | Optional retrieval augmentation; does not replace the relational backend |
 | ADR | Design decision with a stable number, rationale, costs, and supersession relationships |

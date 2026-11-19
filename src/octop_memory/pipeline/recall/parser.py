@@ -55,8 +55,7 @@ class ParsedQuery:
     """The raw query text, stripped of leading / trailing whitespace."""
 
     entity_hints: tuple[str, ...] = ()
-    """Normalized strings to match against entity aliases. The router
-    feeds these to ``find_entity_by_alias`` one at a time."""
+    """Normalized fragments retained for callers inspecting the parsed query."""
 
     time_window: TimeWindow | None = None
     """If the query mentioned a relative or absolute time, the resolved
@@ -68,6 +67,9 @@ class ParsedQuery:
 
     raw_tokens: tuple[str, ...] = field(default_factory=tuple)
     """Lowercased word-tokens (for FTS rendering / debug)."""
+
+    topic: str | None = None
+    """Query text with resolved entity mentions removed by the router."""
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +247,26 @@ def _entity_hints(query: str) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+# Common question scaffolding and broad overview requests carry no subject
+# evidence. Dates are handled by the structured time window.
+_SCAFFOLD = re.compile(
+    r"那个项目|这个项目|前面那个|进度怎么样|进度\s*$|最近怎么样|现在怎么样|怎么样|什么时候|为什么|"
+    r"是什么|是多少|什么|哪个|怎么|多少|多久|是否|了吗|聊过|我们|最近|上个月|上星期|上周|"
+    r"昨天|今天|本周|这周|上次|刚才|进展如何|的|呢|吗|谁|"
+    r"\b(?:that project|this project|that one|this one|the one|last week|last month|"
+    r"yesterday|today|what|which|when|who|how|was|were|is|are|the|it|about)\b",
+    re.I,
+)
+
+
+def topic_terms(parsed: ParsedQuery) -> tuple[str, ...]:
+    text = parsed.topic if parsed.topic is not None else parsed.text
+    if parsed.time_window:
+        text = _ISO_DATE_RE.sub(" ", text)
+    text = _SCAFFOLD.sub(" ", text)
+    return tuple(dict.fromkeys((*_word_tokens(text), *re.findall(r"(?<!\w)\d+(?!\w)", text))))[:96]
 
 
 def parse_query(query: str, *, now: datetime | None = None) -> ParsedQuery:

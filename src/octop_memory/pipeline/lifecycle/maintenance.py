@@ -26,6 +26,7 @@ from octop_memory.pipeline.lifecycle.checkpoint_gc import (
     CheckpointGcStats,
     prune_checkpoints,
 )
+from octop_memory.pipeline.lifecycle.dreaming import run_entity_dreaming
 from octop_memory.pipeline.lifecycle.gc import GcStats, run_gc
 from octop_memory.pipeline.lifecycle.vacuum import (
     MAINTENANCE_INCREMENTAL_VACUUM_PAGES,
@@ -68,6 +69,8 @@ class IdleMaintenanceStats:
     prune: CheckpointGcStats | None = None
     gc: GcStats | None = None
     vacuum: VacuumStats | None = None
+    entities_reviewed_atoms: int = 0
+    entity_review_error: str | None = None
     prune_error: str | None = None
     gc_error: str | None = None
     vacuum_error: str | None = None
@@ -119,6 +122,11 @@ def run_idle_maintenance(
         stats.vacuum_error = f"{type(exc).__name__}: {exc}"
         _LOG.warning("idle maintenance: nudge_vacuum failed", exc_info=True)
 
+    try:
+        stats.entities_reviewed_atoms = run_entity_dreaming(memory)
+    except REPORTABLE_ERRORS as exc:
+        stats.entity_review_error = str(exc)
+        _LOG.warning("Idle entity review failed", exc_info=True)
     return stats
 
 

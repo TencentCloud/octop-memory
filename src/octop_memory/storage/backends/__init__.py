@@ -286,6 +286,16 @@ class MemoryBackend(Protocol):
         """FTS over assertion + verbatim_quote + search_terms."""
         ...
 
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]: ...
+
     def search_atoms_by_time_range(
         self,
         *,
@@ -496,6 +506,12 @@ class MemoryBackend(Protocol):
     def save_alias(self, alias: Alias) -> None:
         """Insert a new alias mapping. Duplicate (alias, entity_id) is a no-op."""
         ...
+
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]: ...
+
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]: ...
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]: ...
 
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Look up the entity that the given alias resolves to."""

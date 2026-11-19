@@ -25,7 +25,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -455,6 +455,7 @@ def _recall_for_prompt_impl(
     # 2-3. Parse + route -----------------------------------------------
     parsed = parse_query(query, now=pin)
     decision = route(memory, parsed, thread_id=thread_id)
+    parsed = replace(parsed, topic=decision.topic)
     sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
 
     if not sources:
