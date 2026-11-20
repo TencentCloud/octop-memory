@@ -109,6 +109,16 @@ and 17 skips. Its PG approval tests exercise both scheduled deferral and explici
 - **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
 - **Continuation:** PR #41 awaits a future release/adoption; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
 
+### Entity capacity report (read-only diagnostics)
+
+- **Status:** Implemented on `feat/entity-capacity-report` (local branch, not pushed); pending PR into develop. Unreleased. First step of the topic-capacity plan: diagnose before sharding.
+- **Problem:** Wide entities are invisible until they break. Page regeneration reads only the newest `DEFAULT_MAX_ATOMS_PER_REGEN = 50` atoms, and standing-stock consolidation skips entities above `DEFAULT_ATOM_SCAN_LIMIT = 200`, so a topic that grows past those windows silently loses summarization and deduplication while still being recalled.
+- **Scope and acceptance:** New read-only CLI command `octop-memory entity capacity-report` (`adapters/cli/entity_cmd.py`). Per entity it reports live atom count, summary coverage (`min(atoms, window) / atoms`), the shard count implied by `--threshold`, dirty page state, and page topics; aggregates capacity buckets and the atoms held by wide entities. Flags: `--threshold` (default 200), `--top`, `--regen-window` (default 50), `--scan-limit`, plus global `--json`. No writes to atoms, pages, journal, or LLM calls.
+- **⚠️ Recall/write path change:** None. Read-only inspection; no schema, storage, ranking, or write-path change.
+- **Key files:** `src/octop_memory/adapters/cli/entity_cmd.py`; `tests/test_cli_entity_capacity.py`; README/README_CN command notes.
+- **Validation:** `uv run pytest tests/test_cli_entity_capacity.py -q` -> 3 passed. Full gate: `uv run ruff check src tests`, `uv run ruff format --check src tests`, `uv run mypy --strict src`, `uv run pytest tests -q`.
+- **Continuation:** Follow-ups are the sharding + sectioned-summary change (page regeneration) and the consolidation bucketing change; both consume this report. Thresholds (hard 200 / soft 150) are proposals, not enforced by this command.
+
 ### Pre-1.0 PostgreSQL schema recovery
 
 - **Status:** [PR #48](https://github.com/TencentCloud/octop-memory/pull/48) merged into develop as `50127ac`.
