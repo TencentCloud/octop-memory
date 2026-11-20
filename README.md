@@ -211,6 +211,11 @@ Automatic prompt recall uses canonical `atom` facts only, including optional vec
 
 Named queries search the entity and the global topic index. A fact held by another owner can enter the results when its text explicitly names the target. An ambiguous name leaves automatic recall empty. In the background, `octop-memory entity dream --limit 20` audits one batch of existing atoms. Inspect evidence with `octop-memory journal list --action entity_review`.
 
+Capacity is inspectable before it degrades: `octop-memory entity capacity-report` is read-only and prints, per entity,
+the live atom count, how much of it a page regeneration can actually read (summary coverage), the shard count a
+threshold implies, and the buckets that put entities past the consolidator scan limit. It writes nothing and calls no model;
+`--json` returns the same report for tooling.
+
 For common value lookups such as a telephone number, attachment size limit or log retention period, lexical recall expands equivalent wording and checks that the fact supplies the requested value. The extractor can also index up to three alternative search phrases from its existing call. These phrases can retrieve a fact. The prompt cites the original assertion.
 
 Synthetic runtime failures are excluded from automatic capture, extraction and raw prompt fallback. octop-harness / Octop raise model errors into checkpoint task failures and display diagnostics separately; automatic team failure notifications are excluded from capture. Hosts that still create synthetic replies must mark them with `payload.octop_runtime_error=true`; online filtering uses structured provenance only. Agents decide when to call `memory_save`; approvals and manual saves are protected by their provenance, without intent or troubleshooting-value keyword lists. Automatic capture keeps its length policy with no intent-keyword exception; explicit saves bypass that capture policy. Original diagnostics remain inspectable by ID. `operations.retention.audit_runtime_errors(memory)` previews eligible records by default; even `apply=True` retires only automatic atoms whose evidence is entirely marked as runtime failures. The fixed legacy retry envelope only nominates `review_atom_ids` / `review_candidate_ids`; missing and mixed evidence stays unchanged for human review.

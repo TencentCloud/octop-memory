@@ -130,3 +130,157 @@ def dream_cmd(ctx: click.Context, limit: int) -> None:
 
     scanned = run_entity_dreaming(get_memory(ctx), limit=limit)
     click.echo(json.dumps({"atoms_scanned": scanned}) if ctx.obj.get("output_json") else f"Reviewed {scanned} atoms.")
+
+
+_CAPACITY_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
+    ("<=50", 0, 50),
+    ("51-150", 51, 150),
+    ("151-200", 151, 200),
+    ("201-300", 201, 300),
+    (">300", 301, None),
+)
+
+
+def _capacity_bucket(atom_count: int) -> str:
+    """Label one entity by its live atom count."""
+    for label, low, high in _CAPACITY_BUCKETS:
+        if atom_count >= low and (high is None or atom_count <= high):
+            return label
+    return "<=50"
+
+
+def _summary_coverage(atom_count: int, regen_window: int) -> float:
+    """Share of an entity's atoms that one page regeneration can read.
+
+    Page regeneration sends only the newest regen_window atoms, so
+    everything older never reaches the summary. 0.0 means nothing is
+    coverable in principle (empty entity).
+    """
+    if atom_count <= 0 or regen_window <= 0:
+        return 0.0
+    return min(atom_count, regen_window) / atom_count
+
+
+@entity_group.command("capacity-report")
+@click.option(
+    "--threshold",
+    default=200,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Per-entity atom count that triggers sharding.",
+)
+@click.option(
+    "--top",
+    "top_n",
+    default=20,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="How many of the widest entities to list.",
+)
+@click.option(
+    "--regen-window",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Atoms one page regeneration reads; defaults to DEFAULT_MAX_ATOMS_PER_REGEN (50).",
+)
+@click.option(
+    "--scan-limit",
+    default=10_000,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Upper bound on entities scanned in one pass.",
+)
+@click.pass_context
+def capacity_report_cmd(
+    ctx: click.Context,
+    threshold: int,
+    top_n: int,
+    regen_window: int | None,
+    scan_limit: int,
+) -> None:
+    """Report per-entity atom capacity and summary coverage (read-only).
+
+    Answers "which topics are too wide to summarize or deduplicate".
+    Nothing is written: no atoms, pages, journal entries or LLM calls.
+    Wide entities (> --threshold) are the ones the standing-stock
+    consolidator skips (DEFAULT_ATOM_SCAN_LIMIT = 200) and whose page
+    summary only ever sees the newest --regen-window atoms.
+    """
+    from octop_memory.pipeline.page.regenerator import DEFAULT_MAX_ATOMS_PER_REGEN
+
+    memory = get_memory(ctx)
+    window = regen_window or DEFAULT_MAX_ATOMS_PER_REGEN
+    entities = memory.list_entities(limit=scan_limit)
+    entities.sort(key=lambda e: (-e.atom_count, e.canonical_name.lower()))
+
+    total_atoms = sum(e.atom_count for e in entities)
+    buckets: dict[str, dict[str, int]] = {label: {"entities": 0, "atoms": 0} for label, _, _ in _CAPACITY_BUCKETS}
+    for entity in entities:
+        slot = buckets[_capacity_bucket(entity.atom_count)]
+        slot["entities"] += 1
+        slot["atoms"] += entity.atom_count
+
+    wide = [e for e in entities if e.atom_count > threshold]
+    wide_atoms = sum(e.atom_count for e in wide)
+
+    rows: list[dict[str, Any]] = []
+    for entity in wide[:top_n]:
+        page = memory.get_entity_page(entity.id)
+        rows.append(
+            {
+                "id": entity.id,
+                "canonical_name": entity.canonical_name,
+                "entity_type": entity.entity_type,
+                "atom_count": entity.atom_count,
+                "summary_coverage": round(_summary_coverage(entity.atom_count, window), 4),
+                "suggested_shards": max(1, -(-entity.atom_count // threshold)),
+                "page_dirty": bool(page.dirty) if page is not None else None,
+                "page_topics": list(page.topics) if page is not None else [],
+            }
+        )
+
+    wide_share = round(wide_atoms / total_atoms, 4) if total_atoms else 0.0
+    payload: dict[str, Any] = {
+        "entities_scanned": len(entities),
+        "total_atoms": total_atoms,
+        "threshold": threshold,
+        "regen_window": window,
+        "buckets": buckets,
+        "wide_entity_count": len(wide),
+        "wide_atom_count": wide_atoms,
+        "wide_atom_share": wide_share,
+        "wide_entities": rows,
+    }
+
+    if ctx.obj.get("output_json"):
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    click.echo(f"entities scanned : {len(entities)} (limit {scan_limit})")
+    click.echo(f"total atoms      : {total_atoms}")
+    click.echo(f"regen window     : {window} atoms per page")
+    click.echo(f"shard threshold  : {threshold} atoms per entity")
+    click.echo("")
+    click.echo("capacity buckets:")
+    for label, _, _ in _CAPACITY_BUCKETS:
+        slot = buckets[label]
+        click.echo(f"  {label:<9} entities={slot['entities']:>5}  atoms={slot['atoms']:>7}")
+    click.echo("")
+    share = wide_share * 100
+    click.echo(f"wide entities (>{threshold}): {len(wide)} entities, {wide_atoms} atoms ({share:.1f}% of all atoms)")
+    if not rows:
+        click.echo("no entity exceeds the threshold - nothing to shard.")
+        return
+    click.echo("")
+    click.echo(f"{'entity':<32}{'type':<10}{'atoms':>7}{'cover':>8}{'shards':>8}  {'dirty':<6}topics")
+    for row in rows:
+        topics = ", ".join(row["page_topics"][:3]) or "-"
+        dirty = "yes" if row["page_dirty"] else ("-" if row["page_dirty"] is None else "no")
+        click.echo(
+            f"{row['canonical_name'][:32]:<32}"
+            f"{row['entity_type']:<10}"
+            f"{row['atom_count']:>7}"
+            f"{row['summary_coverage'] * 100:>7.1f}%"
+            f"{row['suggested_shards']:>8}  "
+            f"{dirty:<6}{topics}"
+        )
