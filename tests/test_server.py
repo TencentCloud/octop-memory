@@ -115,6 +115,54 @@ def test_tool_scope_is_enforced(tmp_path):
         store.close()
 
 
+def test_capture_retry_is_idempotent(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    registry = SpaceRegistry(store, {})
+    mcp = mcp_module.build_mcp(registry, store)
+    capture = mcp._tool_manager._tools["memory_capture"].fn
+
+    space_token = mcp_module._current_space.set("alpha")
+    scope_token = mcp_module._current_scopes.set(("read", "write"))
+    client_token = mcp_module._current_client.set("codex")
+    events = [{"event_type": "user_message", "content": "幂等测试", "payload": {"src_key": "f1:1"}}]
+    try:
+        import asyncio
+
+        first = asyncio.run(capture(events=events, source="codex", session_id="s1"))
+        second = asyncio.run(capture(events=events, source="codex", session_id="s1"))
+        assert first["accepted"] == 1
+        assert second["accepted"] == 0
+        assert second["skipped_duplicates"] == 1
+        rows = registry.call("alpha", lambda memory: memory.list_raw(session_id="s1", limit=10))
+        assert len(rows) == 1
+    finally:
+        mcp_module._current_client.reset(client_token)
+        mcp_module._current_scopes.reset(scope_token)
+        mcp_module._current_space.reset(space_token)
+        store.close()
+
+
+def test_review_tools_require_review_scope(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    registry = SpaceRegistry(store, {})
+    mcp = mcp_module.build_mcp(registry, store)
+    reject = mcp._tool_manager._tools["memory_reject"].fn
+
+    space_token = mcp_module._current_space.set("alpha")
+    scope_token = mcp_module._current_scopes.set(("read", "write"))
+    try:
+        import asyncio
+
+        with pytest.raises(PermissionError):
+            asyncio.run(reject(candidate_ids=["c1"]))
+    finally:
+        mcp_module._current_scopes.reset(scope_token)
+        mcp_module._current_space.reset(space_token)
+        store.close()
+
+
 def test_legacy_migration_preserves_plaintext(tmp_path):
     octop_db = tmp_path / "octop.db"
     plain = "omcp_legacy_plain"

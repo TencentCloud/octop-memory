@@ -43,6 +43,11 @@ Your host manages agent execution and model scheduling; Octop Memory handles cap
 
 <a id="highlights"></a>
 
+## Standalone service
+
+See [SERVER.md](SERVER.md) for `octop-memory serve` (HTTP MCP +
+spaces + tokens + admin API + legacy token migration).
+
 ## ✨ Highlights
 
 | | What stands out | What you get |
