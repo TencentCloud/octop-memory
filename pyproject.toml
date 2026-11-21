@@ -45,6 +45,14 @@ langgraph-postgres = [
 
 cli = ["click>=8.0"]
 
+# Standalone HTTP MCP service
+server = [
+    "click>=8.0",
+    "mcp>=1.2,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
 # Local visualization dashboard
 dashboard = [
     "click>=8.0",
@@ -149,6 +157,8 @@ ignore = ["PLC0415"]
 "src/octop_memory/pipeline/extractor/prompts.py" = ["E501"]
 # Raising the runtime minimum does not require rewriting the existing TypeVar API.
 "src/octop_memory/pipeline/recall/timeout.py" = ["UP047"]
+# FastAPI dependency defaults are the documented pattern.
+"src/octop_memory/server/admin.py" = ["B008"]
 
 [tool.mypy]
 strict = true

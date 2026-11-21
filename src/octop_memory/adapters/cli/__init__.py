@@ -104,7 +104,18 @@ def main(
         ctx.obj["dsn"] = dsn or ""
 
 
+from octop_memory.adapters.cli.server_cmd import (
+    auth_group,
+    serve,
+    space_group,
+    token_group,
+)
+
 main.add_command(config_group)
+main.add_command(serve)
+main.add_command(space_group)
+main.add_command(token_group)
+main.add_command(auth_group)
 main.add_command(memory_group)
 main.add_command(raw_group)
 main.add_command(candidate_group)
