@@ -50,6 +50,11 @@ class TokenAuthMiddleware:
         # pick one of its granted spaces explicitly, otherwise the primary one.
         allowed = await asyncio.to_thread(self._control.allowed_spaces, token)
         requested = headers.get("x-octop-space", "").strip()
+        # Backward compatibility: legacy Octop clients sent the expert id, and
+        # each migrated expert lives in ``octop-expert-<agent_id>``.
+        agent_hint = headers.get("x-octop-agent-id", "").strip()
+        if not requested and agent_hint:
+            requested = f"octop-expert-{agent_hint}"
         space_id, scopes = token.space_id, token.scopes
         if requested:
             match = next((item for item in allowed if item[0] == requested), None)
