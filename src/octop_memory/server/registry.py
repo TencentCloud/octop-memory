@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from contextlib import suppress
@@ -13,6 +14,7 @@ from octop_memory.server.config import resolve_space
 from octop_memory.server.control import ControlStore, Space
 
 T = TypeVar("T")
+logger = logging.getLogger("octop_memory.server")
 
 
 class SpaceRegistry:
@@ -21,6 +23,9 @@ class SpaceRegistry:
     def __init__(self, control: ControlStore, config: dict[str, Any] | None = None) -> None:
         self._control = control
         self._config = config or load_config()
+        self._runtime_config: dict[str, Any] = {}
+        if isinstance(self._config.get("llm"), dict):
+            self._runtime_config["llm"] = self._config["llm"]
         self._memories: dict[str, Memory] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
@@ -41,11 +46,25 @@ class SpaceRegistry:
         )
 
     def _open(self, space: Space) -> Memory:
-        return Memory(
+        memory = Memory(
             namespace=space.space_id,
             backend=space.backend,
             backend_config=space.backend_config,
         )
+        # Older SQLite files may predate the current raw-search index. Rebuilding
+        # on open keeps `memory_search` usable without a manual maintenance step;
+        # PG skips it because the rebuild takes a database-wide write lock.
+        if space.backend == "sqlite" and self._config.get("server", {}).get(
+            "auto_upgrade_index", True
+        ):
+            with suppress(Exception):
+                memory.upgrade_search_index()
+        return memory
+
+    @property
+    def runtime_config(self) -> dict[str, Any]:
+        """Runtime options (LLM etc.) shared by every space."""
+        return self._runtime_config
 
     def call(self, space_id: str, fn: Callable[[Memory], T]) -> T:
         with self._guard:

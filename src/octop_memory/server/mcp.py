@@ -64,7 +64,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
     mcp.settings.streamable_http_path = "/"
 
     def _runtime(memory: Any) -> MemoryRuntime:
-        return MemoryRuntime(memory)
+        return MemoryRuntime(memory, config=registry.runtime_config)
 
     @mcp.tool()
     async def memory_search(
@@ -345,7 +345,12 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
                     {
                         "candidate_id": row.id,
                         "status": row.status,
-                        "content": row.content,
+                        "title": row.title,
+                        "assertion": row.assertion,
+                        "type": row.candidate_type,
+                        "importance": row.importance,
+                        "confidence": row.confidence,
+                        "session_id": row.session_id,
                     }
                     for row in rows
                 ],
