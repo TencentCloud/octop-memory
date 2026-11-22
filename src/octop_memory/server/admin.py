@@ -136,7 +136,6 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
                     "revoked_at": t.revoked_at,
                     "disabled_clients": t.disabled_clients,
                     "client_stats": t.client_stats,
-                    "group_id": t.group_id,
                 }
                 for t in control.list_tokens(space_id)
             ]
@@ -260,7 +259,6 @@ def _token_payload(token: Any) -> dict[str, Any]:
         "client_name": token.client_name,
         "scopes": token.scopes,
         "token_hint": token.token_hint,
-        "group_id": token.group_id,
         "space_id": token.space_id,
         "disabled_clients": token.disabled_clients,
         "client_stats": token.client_stats,
