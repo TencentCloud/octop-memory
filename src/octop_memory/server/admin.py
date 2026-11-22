@@ -31,17 +31,6 @@ class TokenUpdate(BaseModel):
     space_id: str | None = None
 
 
-class GroupCreate(BaseModel):
-    name: str
-    clients: list[str]
-    scopes: list[str] = ["read", "write"]
-    extra_space_ids: list[str] = []
-
-
-class GroupClientAdd(BaseModel):
-    client_name: str
-
-
 class CodeExchange(BaseModel):
     code: str
 
@@ -201,100 +190,6 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         require_space(session, token.space_id)
         return {"revoked": control.revoke(token_id)}
 
-    @app.get(f"{API_PREFIX}/spaces/{{space_id}}/access-groups")
-    def list_groups(
-        space_id: str, session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        require_space(session, space_id)
-        return {
-            "groups": [
-                {
-                    "group_id": group["group_id"],
-                    "name": group["name"],
-                    "space_id": group["space_id"],
-                    "scopes": group["scopes"],
-                    "created_at": group["created_at"],
-                    "tokens": [_token_payload(token) for token in group["tokens"]],
-                }
-                for group in control.list_access_groups(space_id)
-            ]
-        }
-
-    @app.post(f"{API_PREFIX}/spaces/{{space_id}}/access-groups")
-    def create_group(
-        space_id: str,
-        body: GroupCreate,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        require_space(session, space_id)
-        if control.get_space(space_id) is None:
-            raise HTTPException(status_code=404, detail="space not found")
-        group_id, created = control.create_access_group(
-            space_id,
-            body.name,
-            body.scopes,
-            body.clients,
-            extra_space_ids=body.extra_space_ids,
-        )
-        return {
-            "group_id": group_id,
-            "name": body.name,
-            "space_id": space_id,
-            "tokens": [
-                {
-                    **_token_payload(token),
-                    "token": plaintext,
-                }
-                for token, plaintext in created
-            ],
-        }
-
-    @app.post(f"{API_PREFIX}/access-groups/{{group_id}}/clients")
-    def add_group_client(
-        group_id: str,
-        body: GroupClientAdd,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        _require_group(control, session, group_id)
-        try:
-            fresh, plaintext = control.add_group_client(group_id, body.client_name)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="group not found") from exc
-        return {**_token_payload(fresh), "token": plaintext}
-
-    @app.post(f"{API_PREFIX}/access-groups/{{group_id}}/clients/{{client_name}}/rotate")
-    def rotate_group_client(
-        group_id: str,
-        client_name: str,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        _require_group(control, session, group_id)
-        token = control.group_token(group_id, client_name)
-        if token is None:
-            raise HTTPException(status_code=404, detail="client not found in group")
-        fresh, plaintext = control.rotate(token.token_id)
-        return {**_token_payload(fresh), "token": plaintext}
-
-    @app.delete(f"{API_PREFIX}/access-groups/{{group_id}}/clients/{{client_name}}")
-    def revoke_group_client(
-        group_id: str,
-        client_name: str,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        _require_group(control, session, group_id)
-        token = control.group_token(group_id, client_name)
-        if token is None:
-            raise HTTPException(status_code=404, detail="client not found in group")
-        return {"revoked": control.revoke(token.token_id), "client_name": client_name}
-
-    @app.delete(f"{API_PREFIX}/access-groups/{{group_id}}")
-    def delete_group(
-        group_id: str,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
-        _require_group(control, session, group_id)
-        return {"revoked": control.delete_access_group(group_id)}
-
     @app.get(f"{API_PREFIX}/spaces/{{space_id}}/clients")
     def clients(space_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:
         require_space(session, space_id)
@@ -328,13 +223,6 @@ def _token_payload(token: Any) -> dict[str, Any]:
         "last_used_at": token.last_used_at,
         "revoked_at": token.revoked_at,
     }
-
-
-def _require_group(control: ControlStore, session: Session, group_id: str) -> Any:
-    for group in control.list_access_groups(session.space_id):
-        if group["group_id"] == group_id:
-            return group
-    raise HTTPException(status_code=404, detail="group not found in this space")
 
 
 __all__ = ["build_admin_app"]
