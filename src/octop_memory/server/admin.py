@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -29,6 +30,20 @@ class TokenUpdate(BaseModel):
     scopes: list[str] | None = None
     disabled_clients: list[str] | None = None
     space_id: str | None = None
+
+
+class TokenImportBody(BaseModel):
+    token_hash: str
+    token_hint: str
+    client_name: str
+    scopes: list[str] = ["read", "write"]
+    disabled_clients: list[str] = []
+    created_at: str
+    last_used_at: str | None = None
+    revoked_at: str | None = None
+    client_stats: dict[str, Any] = {}
+    octop_token_id: str = ""
+    extra_space_ids: list[str] = []
 
 
 class CodeExchange(BaseModel):
@@ -167,6 +182,44 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         if updated is None:
             raise HTTPException(status_code=404, detail="token not found")
         return _token_payload(updated)
+
+    @app.post(f"{API_PREFIX}/spaces/{{space_id}}/tokens/import")
+    def import_token(
+        space_id: str,
+        body: TokenImportBody,
+        session: Session = Depends(require_session),
+    ) -> dict[str, Any]:
+        require_space(session, space_id)
+        if control.get_space(space_id) is None:
+            raise HTTPException(status_code=404, detail="space not found")
+        if control.token_by_hash(body.token_hash) is not None:
+            raise HTTPException(status_code=409, detail="token already migrated")
+        token = control.import_token(
+            space_id=space_id,
+            client_name=body.client_name,
+            scopes=body.scopes,
+            token_hash=body.token_hash,
+            token_hint=body.token_hint,
+            created_at=body.created_at,
+            last_used_at=body.last_used_at,
+            revoked_at=body.revoked_at,
+            octop_token_id=body.octop_token_id,
+        )
+        for extra in body.extra_space_ids:
+            if extra != space_id:
+                control.add_grant(token.token_id, extra, body.scopes)
+        if body.disabled_clients or body.client_stats:
+            control.update_token(
+                token.token_id,
+                disabled_clients=body.disabled_clients or None,
+            )
+            if body.client_stats:
+                with control._lock, control._conn:
+                    control._conn.execute(
+                        "UPDATE memory_space_tokens SET client_stats=? WHERE token_id=?",
+                        (json.dumps(body.client_stats, ensure_ascii=False), token.token_id),
+                    )
+        return {"token_id": token.token_id, "space_id": space_id}
 
     @app.post(f"{API_PREFIX}/tokens/{{token_id}}/rotate")
     def rotate(token_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:
