@@ -63,6 +63,13 @@ class TokenAuthMiddleware:
                 return
             space_id, scopes = match
         client = headers.get("x-octop-client", "").strip()[:64] or token.client_name
+        if client and client in token.disabled_clients:
+            await _json(
+                send,
+                403,
+                {"error": f"client {client!r} is disabled for this token"},
+            )
+            return
         if client:
             await asyncio.to_thread(self._control.record_client, token.token_id, client)
         values: list[tuple[ContextVar[Any], CtxToken[Any]]] = [

@@ -120,11 +120,16 @@ def auth_group() -> None:
 
 
 @auth_group.command("code")
-@click.option("--space", "space_id", required=True)
+@click.option("--space", "space_id", default=None)
+@click.option("--all", "all_spaces", is_flag=True, help="Manage every space (terminal access).")
 @click.option("--ttl", "ttl", default=600, type=int, help="Code lifetime in seconds.")
-def auth_code(space_id: str, ttl: int) -> None:
+def auth_code(space_id: str | None, all_spaces: bool, ttl: int) -> None:
     control = _control()
-    if control.get_space(space_id) is None:
+    if all_spaces:
+        space_id = "*"
+    if not space_id:
+        raise click.ClickException("pass --space <id> or --all")
+    if space_id != "*" and control.get_space(space_id) is None:
         raise click.ClickException(f"space {space_id!r} not found")
     click.echo(json.dumps({"code": control.create_admin_code(space_id, ttl), "space_id": space_id}))
 

@@ -16,6 +16,7 @@ class SpaceCreate(BaseModel):
     space_id: str
     display_name: str = ""
     backend: str | None = None
+    backend_config: dict[str, Any] | None = None
 
 
 class TokenCreate(BaseModel):
@@ -26,6 +27,8 @@ class TokenCreate(BaseModel):
 class TokenUpdate(BaseModel):
     client_name: str | None = None
     scopes: list[str] | None = None
+    disabled_clients: list[str] | None = None
+    space_id: str | None = None
 
 
 class GroupCreate(BaseModel):
@@ -60,7 +63,8 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         return session
 
     def require_space(session: Session, space_id: str) -> None:
-        if session.space_id != space_id:
+        # ``*`` is an all-spaces management session (terminal access from Octop).
+        if session.space_id not in {"*", space_id}:
             raise HTTPException(status_code=403, detail="session is bound to another space")
 
     @app.get("/healthz")
@@ -99,8 +103,10 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         if existing is not None:
             raise HTTPException(status_code=409, detail="space already exists")
         backend = body.backend or "sqlite"
-        if backend == "sqlite":
-            config: dict[str, Any] = {"db_path": f"~/.octop-memory/spaces/{body.space_id}.db"}
+        if body.backend_config:
+            config = dict(body.backend_config)
+        elif backend == "sqlite":
+            config = {"db_path": f"~/.octop-memory/spaces/{body.space_id}.db"}
         elif backend == "postgres":
             config = {"dsn": "postgresql://localhost/octop_memory"}
         else:
@@ -117,12 +123,16 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
             "tokens": [
                 {
                     "token_id": t.token_id,
+                    "space_id": space_id,
                     "client_name": t.client_name,
                     "scopes": t.scopes,
                     "token_hint": t.token_hint,
                     "created_at": t.created_at,
                     "last_used_at": t.last_used_at,
                     "revoked_at": t.revoked_at,
+                    "disabled_clients": t.disabled_clients,
+                    "client_stats": t.client_stats,
+                    "group_id": t.group_id,
                 }
                 for t in control.list_tokens(space_id)
             ]
@@ -141,6 +151,33 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
             "token": plaintext,
             "token_hint": token.token_hint,
         }
+
+    @app.patch(f"{API_PREFIX}/tokens/{{token_id}}")
+    def patch_token(
+        token_id: str,
+        body: TokenUpdate,
+        session: Session = Depends(require_session)
+    ) -> dict[str, Any]:
+        token = control.get_token(token_id)
+        if token is None:
+            raise HTTPException(status_code=404, detail="token not found")
+        require_space(session, token.space_id)
+        if (
+            body.space_id is not None
+            and body.space_id != token.space_id
+            and control.get_space(body.space_id) is None
+        ):
+            raise HTTPException(status_code=404, detail="target space not found")
+        updated = control.update_token(
+            token_id,
+            client_name=body.client_name,
+            scopes=body.scopes,
+            disabled_clients=body.disabled_clients,
+            space_id=body.space_id,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="token not found")
+        return _token_payload(updated)
 
     @app.post(f"{API_PREFIX}/tokens/{{token_id}}/rotate")
     def rotate(token_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:
@@ -284,6 +321,9 @@ def _token_payload(token: Any) -> dict[str, Any]:
         "scopes": token.scopes,
         "token_hint": token.token_hint,
         "group_id": token.group_id,
+        "space_id": token.space_id,
+        "disabled_clients": token.disabled_clients,
+        "client_stats": token.client_stats,
         "created_at": token.created_at,
         "last_used_at": token.last_used_at,
         "revoked_at": token.revoked_at,

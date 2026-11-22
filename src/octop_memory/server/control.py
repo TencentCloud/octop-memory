@@ -56,6 +56,7 @@ class Token:
     last_used_at: str | None
     revoked_at: str | None
     client_stats: dict[str, Any]
+    disabled_clients: list[str]
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,8 @@ class ControlStore:
                   created_at TEXT NOT NULL,
                   last_used_at TEXT,
                   revoked_at TEXT,
-                  client_stats TEXT NOT NULL DEFAULT '{}'
+                  client_stats TEXT NOT NULL DEFAULT '{}',
+                  disabled_clients TEXT NOT NULL DEFAULT '[]'
                 );
                 CREATE INDEX IF NOT EXISTS idx_tokens_space ON memory_space_tokens(space_id);
                 CREATE TABLE IF NOT EXISTS memory_space_grants (
@@ -151,6 +153,11 @@ class ControlStore:
             if "group_id" not in columns:
                 self._conn.execute(
                     "ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT"
+                )
+            if "disabled_clients" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE memory_space_tokens ADD COLUMN disabled_clients"
+                    " TEXT NOT NULL DEFAULT '[]'"
                 )
 
     # ── spaces ────────────────────────────────────────────────────────────
@@ -215,8 +222,9 @@ class ControlStore:
             self._conn.execute(
                 "INSERT INTO memory_space_tokens"
                 " (token_id, space_id, client_name, scopes, token_hash, token_hint,"
-                "  created_at, last_used_at, revoked_at, client_stats, group_id)"
-                " VALUES (?,?,?,?,?,?,?,NULL,NULL,'{}',?)",
+                "  created_at, last_used_at, revoked_at, client_stats, group_id,"
+                "  disabled_clients)"
+                " VALUES (?,?,?,?,?,?,?,NULL,NULL,'{}',?,'[]')",
                 (
                     token_id,
                     space_id,
@@ -300,6 +308,7 @@ class ControlStore:
             last_used_at=row["last_used_at"],
             revoked_at=row["revoked_at"],
             client_stats=json.loads(row["client_stats"] or "{}"),
+            disabled_clients=json.loads(_row_get(row, "disabled_clients") or "[]"),
         )
 
     def authenticate(self, plaintext: str) -> Token | None:
@@ -356,6 +365,8 @@ class ControlStore:
         *,
         client_name: str | None = None,
         scopes: Iterable[str] | None = None,
+        disabled_clients: Iterable[str] | None = None,
+        space_id: str | None = None,
     ) -> Token | None:
         token = self.get_token(token_id)
         if token is None:
@@ -370,6 +381,19 @@ class ControlStore:
                 self._conn.execute(
                     "UPDATE memory_space_tokens SET scopes=? WHERE token_id=?",
                     (json.dumps(sorted(set(scopes))), token_id),
+                )
+            if disabled_clients is not None:
+                self._conn.execute(
+                    "UPDATE memory_space_tokens SET disabled_clients=? WHERE token_id=?",
+                    (json.dumps(sorted(set(disabled_clients))), token_id),
+                )
+            if space_id is not None:
+                self._conn.execute(
+                    "UPDATE memory_space_tokens SET space_id=? WHERE token_id=?",
+                    (space_id, token_id),
+                )
+                self._conn.execute(
+                    "DELETE FROM memory_space_grants WHERE token_id=?", (token_id,)
                 )
         return self.get_token(token_id)
 
