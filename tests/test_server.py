@@ -219,6 +219,7 @@ def test_legacy_migration_preserves_plaintext(tmp_path):
     spec = importlib.util.spec_from_file_location("migrate_octop_tokens", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     migrate = module.main
 
