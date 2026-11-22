@@ -28,6 +28,12 @@ from octop_memory.adapters.cli.page_cmd import page_group
 from octop_memory.adapters.cli.portable_cmd import portable_group
 from octop_memory.adapters.cli.raw_cmd import raw_group
 from octop_memory.adapters.cli.recall_cmd import recall_cmd
+from octop_memory.adapters.cli.server_cmd import (
+    auth_group,
+    serve,
+    space_group,
+    token_group,
+)
 from octop_memory.adapters.cli.thread_cmd import thread_group
 
 # dashboard is only available when the [dashboard] extra is installed
@@ -103,13 +109,6 @@ def main(
     else:
         ctx.obj["dsn"] = dsn or ""
 
-
-from octop_memory.adapters.cli.server_cmd import (
-    auth_group,
-    serve,
-    space_group,
-    token_group,
-)
 
 main.add_command(config_group)
 main.add_command(serve)

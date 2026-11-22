@@ -67,17 +67,13 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         return MemoryRuntime(memory, config=registry.runtime_config)
 
     @mcp.tool()
-    async def memory_search(
-        query: str, corpus: str = "all", max_results: int = 8
-    ) -> dict[str, Any]:
+    async def memory_search(query: str, corpus: str = "all", max_results: int = 8) -> dict[str, Any]:
         """Search this space's memory (atoms, sessions, wiki)."""
         _require("read")
         space = _current_space.get()
 
         def _run(memory: Any) -> dict[str, Any]:
-            return _runtime(memory).memory_search(
-                {"query": query, "corpus": corpus, "maxResults": max_results}
-            )
+            return _runtime(memory).memory_search({"query": query, "corpus": corpus, "maxResults": max_results})
 
         return await asyncio.to_thread(registry.call, space, _run)
 
@@ -136,18 +132,14 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         payload: list[dict[str, Any]] = []
         if events is not None:
             if len(events) > 200:
-                raise ValueError(
-                    f"[batch_too_large] events={len(events)} limit=200; send smaller batches"
-                )
+                raise ValueError(f"[batch_too_large] events={len(events)} limit=200; send smaller batches")
             payload = [dict(event) for event in events]
         else:
             base = {"source": source, "source_host": client, "caller": client}
             if content.strip():
                 payload.append({"event_type": "user_message", "content": content, "payload": base})
             if assistant:
-                payload.append(
-                    {"event_type": "assistant_message", "content": assistant, "payload": base}
-                )
+                payload.append({"event_type": "assistant_message", "content": assistant, "payload": base})
         if not payload:
             raise ValueError("content and assistant are both empty; nothing to record")
         if dry_run:
@@ -184,12 +176,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
                 normalized.append(event)
             if not normalized:
                 raise ValueError("events is empty after dropping blank entries")
-            known = {
-                _raw_key(raw)
-                for raw in memory.list_raw(
-                    session_id=effective_session, user=client, limit=5000
-                )
-            }
+            known = {_raw_key(raw) for raw in memory.list_raw(session_id=effective_session, user=client, limit=5000)}
             fresh = [event for event in normalized if event["payload"]["octop_event_key"] not in known]
             duplicates = len(normalized) - len(fresh)
             if not fresh:
@@ -241,9 +228,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
 
         def _run(memory: Any) -> dict[str, Any]:
             rows = (
-                memory.search_raw(query, limit=limit)
-                if query
-                else memory.list_raw(session_id=session_id, limit=limit)
+                memory.search_raw(query, limit=limit) if query else memory.list_raw(session_id=session_id, limit=limit)
             )
             return {
                 "events": [
@@ -262,9 +247,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         return await asyncio.to_thread(registry.call, space, _run)
 
     @mcp.tool()
-    async def memory_extract(
-        session_id: str, promote: bool = False, max_candidates: int = 50
-    ) -> dict[str, Any]:
+    async def memory_extract(session_id: str, promote: bool = False, max_candidates: int = 50) -> dict[str, Any]:
         """Run L0 → L1/L2/L3 extraction for one session in this space."""
         _require("review")
         space = _current_space.get()

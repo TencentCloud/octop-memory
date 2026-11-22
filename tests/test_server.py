@@ -163,6 +163,35 @@ def test_review_tools_require_review_scope(tmp_path):
         store.close()
 
 
+def test_access_group_disables_one_terminal_only(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    store.create_space("beta", "Beta", "sqlite", {"db_path": str(tmp_path / "b.db")})
+    group_id, created = store.create_access_group(
+        "alpha", "my terminals", ["read", "write"], ["codex", "cursor"], extra_space_ids=["beta"]
+    )
+    codex = next(token for token, _ in created if token.client_name == "codex")
+    cursor = next(token for token, _ in created if token.client_name == "cursor")
+    plaintexts = {token.client_name: plain for token, plain in created}
+
+    assert store.authenticate(plaintexts["codex"]).token_id == codex.token_id
+    assert {space for space, _ in store.allowed_spaces(codex)} == {"alpha", "beta"}
+
+    assert store.revoke(cursor.token_id) is True
+    assert store.authenticate(plaintexts["cursor"]) is None
+    assert store.authenticate(plaintexts["codex"]).token_id == codex.token_id
+
+    rotated, fresh = store.rotate(codex.token_id)
+    assert store.authenticate(plaintexts["codex"]) is None
+    assert store.authenticate(fresh).token_id == rotated.token_id
+    assert rotated.group_id == group_id
+
+    groups = store.list_access_groups("alpha")
+    assert len(groups) == 1
+    assert {token.client_name for token in groups[0]["tokens"]} == {"codex", "cursor"}
+    store.close()
+
+
 def test_legacy_migration_preserves_plaintext(tmp_path):
     octop_db = tmp_path / "octop.db"
     plain = "omcp_legacy_plain"
@@ -178,8 +207,7 @@ def test_legacy_migration_preserves_plaintext(tmp_path):
     )
     conn.execute("INSERT INTO agents VALUES ('A1',1,'Expert A')")
     conn.execute(
-        "INSERT INTO memory_mcp_tokens VALUES ('old',1,'legacy','[\"A1\"]',?,?,?,"
-        "NULL,NULL)",
+        "INSERT INTO memory_mcp_tokens VALUES ('old',1,'legacy','[\"A1\"]',?,?,?,NULL,NULL)",
         (hashlib.sha256(plain.encode()).hexdigest(), plain[-4:], "2026-11-01T00:00:00+00:00"),
     )
     conn.commit()
@@ -188,9 +216,7 @@ def test_legacy_migration_preserves_plaintext(tmp_path):
     from tools.migrate_octop_tokens import main as migrate
 
     config = tmp_path / "config.json"
-    config.write_text(
-        json.dumps({"control": {"sqlite": {"db_path": str(tmp_path / "control.db")}}})
-    )
+    config.write_text(json.dumps({"control": {"sqlite": {"db_path": str(tmp_path / "control.db")}}}))
     assert migrate(["--octop-db", str(octop_db), "--config", str(config)]) == 0
 
     store = ControlStore(tmp_path / "control.db")

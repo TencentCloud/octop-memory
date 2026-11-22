@@ -54,9 +54,7 @@ class SpaceRegistry:
         # Older SQLite files may predate the current raw-search index. Rebuilding
         # on open keeps `memory_search` usable without a manual maintenance step;
         # PG skips it because the rebuild takes a database-wide write lock.
-        if space.backend == "sqlite" and self._config.get("server", {}).get(
-            "auto_upgrade_index", True
-        ):
+        if space.backend == "sqlite" and self._config.get("server", {}).get("auto_upgrade_index", True):
             with suppress(Exception):
                 memory.upgrade_search_index()
         return memory

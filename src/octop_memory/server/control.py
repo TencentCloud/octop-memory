@@ -22,6 +22,13 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _new_token() -> str:
     return "omcp_" + secrets.token_urlsafe(32)
 
@@ -44,6 +51,7 @@ class Token:
     client_name: str
     scopes: list[str]
     token_hint: str
+    group_id: str | None
     created_at: str
     last_used_at: str | None
     revoked_at: str | None
@@ -121,6 +129,13 @@ class ControlStore:
                   scopes TEXT NOT NULL,
                   expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS memory_access_groups (
+                  group_id TEXT PRIMARY KEY,
+                  space_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  scopes TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS memory_token_map (
                   octop_token_id TEXT PRIMARY KEY,
                   memory_token_id TEXT NOT NULL,
@@ -129,6 +144,14 @@ class ControlStore:
                 );
                 """
             )
+            columns = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")
+            }
+            if "group_id" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT"
+                )
 
     # ── spaces ────────────────────────────────────────────────────────────
     def create_space(
@@ -156,16 +179,12 @@ class ControlStore:
 
     def get_space(self, space_id: str) -> Space | None:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memory_spaces WHERE space_id=?", (space_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memory_spaces WHERE space_id=?", (space_id,)).fetchone()
         return self._space(row) if row else None
 
     def list_spaces(self) -> list[Space]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM memory_spaces ORDER BY created_at"
-            ).fetchall()
+            rows = self._conn.execute("SELECT * FROM memory_spaces ORDER BY created_at").fetchall()
         return [self._space(row) for row in rows]
 
     @staticmethod
@@ -182,7 +201,12 @@ class ControlStore:
 
     # ── tokens ────────────────────────────────────────────────────────────
     def create_token(
-        self, space_id: str, client_name: str, scopes: Iterable[str]
+        self,
+        space_id: str,
+        client_name: str,
+        scopes: Iterable[str],
+        *,
+        group_id: str | None = None,
     ) -> tuple[Token, str]:
         plaintext = _new_token()
         token_id = "mt_" + secrets.token_hex(8)
@@ -191,8 +215,8 @@ class ControlStore:
             self._conn.execute(
                 "INSERT INTO memory_space_tokens"
                 " (token_id, space_id, client_name, scopes, token_hash, token_hint,"
-                "  created_at, last_used_at, revoked_at, client_stats)"
-                " VALUES (?,?,?,?,?,?,?,NULL,NULL,'{}')",
+                "  created_at, last_used_at, revoked_at, client_stats, group_id)"
+                " VALUES (?,?,?,?,?,?,?,NULL,NULL,'{}',?)",
                 (
                     token_id,
                     space_id,
@@ -201,6 +225,7 @@ class ControlStore:
                     _hash(plaintext),
                     plaintext[-4:],
                     _now(),
+                    group_id,
                 ),
             )
         return self.get_token(token_id), plaintext  # type: ignore[return-value]
@@ -246,9 +271,7 @@ class ControlStore:
 
     def get_token(self, token_id: str) -> Token | None:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memory_space_tokens WHERE token_id=?", (token_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memory_space_tokens WHERE token_id=?", (token_id,)).fetchone()
         return self._token(row) if row else None
 
     def list_tokens(self, space_id: str) -> list[Token]:
@@ -261,9 +284,7 @@ class ControlStore:
 
     def token_by_hash(self, token_hash: str) -> Token | None:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memory_space_tokens WHERE token_hash=?", (token_hash,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memory_space_tokens WHERE token_hash=?", (token_hash,)).fetchone()
         return self._token(row) if row else None
 
     @staticmethod
@@ -274,6 +295,7 @@ class ControlStore:
             client_name=row["client_name"],
             scopes=json.loads(row["scopes"] or "[]"),
             token_hint=row["token_hint"],
+            group_id=_row_get(row, "group_id"),
             created_at=row["created_at"],
             last_used_at=row["last_used_at"],
             revoked_at=row["revoked_at"],
@@ -292,9 +314,7 @@ class ControlStore:
                 "SELECT space_id, scopes FROM memory_space_grants WHERE token_id=?",
                 (token.token_id,),
             ).fetchall()
-        return [(token.space_id, token.scopes)] + [
-            (row["space_id"], json.loads(row["scopes"] or "[]")) for row in rows
-        ]
+        return [(token.space_id, token.scopes)] + [(row["space_id"], json.loads(row["scopes"] or "[]")) for row in rows]
 
     def add_grant(self, token_id: str, space_id: str, scopes: Iterable[str]) -> None:
         with self._lock, self._conn:
@@ -369,6 +389,109 @@ class ControlStore:
                 (json.dumps(stats, ensure_ascii=False), _now(), token_id),
             )
 
+    # ── access groups (one token per terminal) ───────────────────────────
+    def create_access_group(
+        self,
+        space_id: str,
+        name: str,
+        scopes: Iterable[str],
+        clients: Iterable[str],
+        *,
+        extra_space_ids: Iterable[str] = (),
+    ) -> tuple[str, list[tuple[Token, str]]]:
+        group_id = "mg_" + secrets.token_hex(8)
+        scopes_list = sorted(set(scopes))
+        clients_list = [client.strip() for client in clients if client.strip()]
+        if not clients_list:
+            raise ValueError("access group needs at least one client")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO memory_access_groups VALUES (?,?,?,?,?)",
+                (group_id, space_id, name, json.dumps(scopes_list), _now()),
+            )
+        created: list[tuple[Token, str]] = []
+        for client in clients_list:
+            token, plaintext = self.create_token(
+                space_id, client, scopes_list, group_id=group_id
+            )
+            for extra in extra_space_ids:
+                if extra != space_id:
+                    self.add_grant(token.token_id, extra, scopes_list)
+            created.append((token, plaintext))
+        return group_id, created
+
+    def list_access_groups(self, space_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM memory_access_groups WHERE space_id=? ORDER BY created_at",
+                (space_id,),
+            ).fetchall()
+        groups: list[dict[str, Any]] = []
+        for row in rows:
+            by_client: dict[str, Token] = {}
+            for token in self.list_tokens(space_id):
+                if token.group_id != row["group_id"]:
+                    continue
+                current = by_client.get(token.client_name)
+                if current is None or (current.revoked_at and not token.revoked_at):
+                    by_client[token.client_name] = token
+            tokens = sorted(by_client.values(), key=lambda item: item.client_name)
+            groups.append(
+                {
+                    "group_id": row["group_id"],
+                    "name": row["name"],
+                    "space_id": row["space_id"],
+                    "scopes": json.loads(row["scopes"] or "[]"),
+                    "created_at": row["created_at"],
+                    "tokens": tokens,
+                }
+            )
+        return groups
+
+    def group_token(self, group_id: str, client: str) -> Token | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM memory_space_tokens WHERE group_id=? AND client_name=?",
+                (group_id, client),
+            ).fetchone()
+        return self._token(row) if row else None
+
+    def add_group_client(
+        self, group_id: str, client: str
+    ) -> tuple[Token, str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM memory_access_groups WHERE group_id=?", (group_id,)
+            ).fetchone()
+            existing = self._conn.execute(
+                "SELECT token_id FROM memory_space_tokens"
+                " WHERE group_id=? AND client_name=? ORDER BY created_at DESC LIMIT 1",
+                (group_id, client),
+            ).fetchone()
+        if row is None:
+            raise KeyError(group_id)
+        if existing is not None:
+            # Re-enabling a disabled terminal rotates its token instead of
+            # creating a duplicate row in the group.
+            return self.rotate(existing["token_id"])
+        return self.create_token(
+            row["space_id"], client, json.loads(row["scopes"] or "[]"), group_id=group_id
+        )
+
+    def delete_access_group(self, group_id: str) -> int:
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT token_id FROM memory_space_tokens WHERE group_id=? AND revoked_at IS NULL",
+                (group_id,),
+            ).fetchall()
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE memory_space_tokens SET revoked_at=? WHERE token_id=?",
+                    (_now(), row["token_id"]),
+                )
+            self._conn.execute("DELETE FROM memory_access_groups WHERE group_id=?", (group_id,))
+        return len(rows)
+
     # ── admin sessions / codes ────────────────────────────────────────────
     def create_admin_code(self, space_id: str, ttl_seconds: int = 600) -> str:
         code = "mcode_" + secrets.token_urlsafe(24)
@@ -383,9 +506,7 @@ class ControlStore:
     def redeem_admin_code(self, code: str, session_ttl_seconds: int = 7 * 86400) -> tuple[str, Session]:
         code_hash = _hash(code)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memory_admin_codes WHERE code_hash=?", (code_hash,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memory_admin_codes WHERE code_hash=?", (code_hash,)).fetchone()
             if row is None or row["used_at"] is not None:
                 raise ValueError("invalid or used code")
             if row["expires_at"] < _now():
