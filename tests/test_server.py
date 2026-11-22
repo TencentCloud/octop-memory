@@ -213,7 +213,14 @@ def test_legacy_migration_preserves_plaintext(tmp_path):
     conn.commit()
     conn.close()
 
-    from tools.migrate_octop_tokens import main as migrate
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / "tools" / "migrate_octop_tokens.py"
+    spec = importlib.util.spec_from_file_location("migrate_octop_tokens", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    migrate = module.main
 
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"control": {"sqlite": {"db_path": str(tmp_path / "control.db")}}}))
