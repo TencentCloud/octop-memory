@@ -145,9 +145,7 @@ def control_group() -> None:
 def cleanup_groups(dry_run: bool) -> None:
     """Drop access-group leftovers from an older control DB."""
     control = _control()
-    click.echo(
-        json.dumps(control.cleanup_legacy_groups(dry_run=dry_run), ensure_ascii=False)
-    )
+    click.echo(json.dumps(control.cleanup_legacy_groups(dry_run=dry_run), ensure_ascii=False))
 
 
 @click.command("serve")

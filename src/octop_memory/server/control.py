@@ -394,10 +394,7 @@ class ControlStore:
             table = self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_access_groups'"
             ).fetchone()
-            columns = {
-                row[1]
-                for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")
-            }
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")}
         return {"table": table is not None, "group_id_column": "group_id" in columns}
 
     def cleanup_legacy_groups(self, *, dry_run: bool = False) -> dict[str, bool]:
@@ -411,9 +408,7 @@ class ControlStore:
             if state["group_id_column"]:
                 with suppress(sqlite3.OperationalError):
                     # Older SQLite: leaving the unused column is harmless.
-                    self._conn.execute(
-                        "ALTER TABLE memory_space_tokens DROP COLUMN group_id"
-                    )
+                    self._conn.execute("ALTER TABLE memory_space_tokens DROP COLUMN group_id")
         return {**self.legacy_group_schema(), "applied": True}
 
     # ── admin sessions / codes ────────────────────────────────────────────

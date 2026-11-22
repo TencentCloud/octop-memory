@@ -168,9 +168,7 @@ def test_cleanup_legacy_group_schema_is_optional(tmp_path):
     store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
     token, plaintext = store.create_token("alpha", "codex", ["read"])
     with store._lock, store._conn:
-        store._conn.execute(
-            "CREATE TABLE memory_access_groups (group_id TEXT PRIMARY KEY, space_id TEXT)"
-        )
+        store._conn.execute("CREATE TABLE memory_access_groups (group_id TEXT PRIMARY KEY, space_id TEXT)")
         store._conn.execute("ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT")
     assert store.legacy_group_schema() == {"table": True, "group_id_column": True}
 
