@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from contextvars import Token as CtxToken
 from typing import Any
+
+from starlette.types import Receive, Scope, Send
 
 from octop_memory._config_io import load_config
 from octop_memory.server.admin import build_admin_app
@@ -32,7 +35,7 @@ class TokenAuthMiddleware:
         self._app = app
         self._control = control
 
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self._app(scope, receive, send)
             return
@@ -85,7 +88,7 @@ class TokenAuthMiddleware:
                 var.reset(ctx_token)
 
 
-async def _json(send: Any, status: int, payload: dict[str, Any]) -> None:
+async def _json(send: Send, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
     await send(
         {
@@ -109,7 +112,7 @@ def build_app(config: dict[str, Any] | None = None) -> Any:
     manager = getattr(mcp, "_session_manager", None)
 
     @asynccontextmanager
-    async def lifespan(_app: Any):
+    async def lifespan(_app: Any) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
             if manager is not None:
                 await stack.enter_async_context(manager.run())

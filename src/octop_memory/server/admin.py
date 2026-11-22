@@ -51,9 +51,9 @@ class CodeExchange(BaseModel):
 
 
 def _bearer(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
+    auth = str(request.headers.get("authorization", "") or "")
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
+        return str(auth[7:].strip())
     return ""
 
 
