@@ -24,12 +24,13 @@ def space_group() -> None:
 @click.argument("space_id")
 @click.option("--name", default="", help="Display name.")
 @click.option("--backend", type=click.Choice(["sqlite", "postgres"]), default="sqlite")
-def space_create(space_id: str, name: str, backend: str) -> None:
+@click.option("--dsn", default=None, help="PostgreSQL DSN (backend=postgres).")
+def space_create(space_id: str, name: str, backend: str, dsn: str | None) -> None:
     control = _control()
     if control.get_space(space_id):
         raise click.ClickException(f"space {space_id!r} already exists")
     if backend == "postgres":
-        cfg = {"dsn": "postgresql://localhost/octop_memory"}
+        cfg = {"dsn": dsn or "postgresql://localhost/octop_memory"}
     else:
         cfg = {"db_path": f"~/.octop-memory/spaces/{space_id}.db"}
     control.create_space(space_id, name or space_id, backend, cfg, created_by="cli")
