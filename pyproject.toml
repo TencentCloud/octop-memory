@@ -68,6 +68,10 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "click>=8.0",
+    # The standalone server tests import FastMCP/FastAPI modules.
+    "mcp>=1.2,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
     "langgraph>=0.2",
     "langgraph-checkpoint>=2.0",
     "langgraph-checkpoint-sqlite>=2.0",
