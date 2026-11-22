@@ -178,6 +178,8 @@ module = [
     "psycopg_pool",
     "mcp",
     "mcp.*",
+    "starlette",
+    "starlette.*",
 ]
 ignore_missing_imports = true
 
