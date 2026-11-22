@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -139,8 +140,6 @@ class ControlStore:
                 """
             )
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")}
-            if "group_id" not in columns:
-                self._conn.execute("ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT")
             if "disabled_clients" not in columns:
                 self._conn.execute(
                     "ALTER TABLE memory_space_tokens ADD COLUMN disabled_clients TEXT NOT NULL DEFAULT '[]'"
@@ -387,6 +386,35 @@ class ControlStore:
                 "UPDATE memory_space_tokens SET client_stats=?, last_used_at=? WHERE token_id=?",
                 (json.dumps(stats, ensure_ascii=False), _now(), token_id),
             )
+
+    # ── optional legacy cleanup ───────────────────────────────────────────
+    def legacy_group_schema(self) -> dict[str, bool]:
+        """Whether an older control DB still carries access-group leftovers."""
+        with self._lock:
+            table = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_access_groups'"
+            ).fetchone()
+            columns = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")
+            }
+        return {"table": table is not None, "group_id_column": "group_id" in columns}
+
+    def cleanup_legacy_groups(self, *, dry_run: bool = False) -> dict[str, bool]:
+        """Drop the retired access-group table/column (optional maintenance)."""
+        state = self.legacy_group_schema()
+        if dry_run or not any(state.values()):
+            return {**state, "applied": False}
+        with self._lock, self._conn:
+            if state["table"]:
+                self._conn.execute("DROP TABLE IF EXISTS memory_access_groups")
+            if state["group_id_column"]:
+                with suppress(sqlite3.OperationalError):
+                    # Older SQLite: leaving the unused column is harmless.
+                    self._conn.execute(
+                        "ALTER TABLE memory_space_tokens DROP COLUMN group_id"
+                    )
+        return {**self.legacy_group_schema(), "applied": True}
 
     # ── admin sessions / codes ────────────────────────────────────────────
     def create_admin_code(self, space_id: str, ttl_seconds: int = 600) -> str:

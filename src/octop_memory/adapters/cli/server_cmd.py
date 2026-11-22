@@ -135,6 +135,21 @@ def auth_code(space_id: str | None, all_spaces: bool, ttl: int) -> None:
     click.echo(json.dumps({"code": control.create_admin_code(space_id, ttl), "space_id": space_id}))
 
 
+@click.group("control")
+def control_group() -> None:
+    """Optional maintenance for the control store."""
+
+
+@control_group.command("cleanup-groups")
+@click.option("--dry-run", is_flag=True)
+def cleanup_groups(dry_run: bool) -> None:
+    """Drop access-group leftovers from an older control DB."""
+    control = _control()
+    click.echo(
+        json.dumps(control.cleanup_legacy_groups(dry_run=dry_run), ensure_ascii=False)
+    )
+
+
 @click.command("serve")
 @click.option("--host", default=None)
 @click.option("--port", default=None, type=int)
@@ -153,4 +168,4 @@ def serve(host: str | None, port: int | None) -> None:
     )
 
 
-__all__ = ["auth_group", "serve", "space_group", "token_group"]
+__all__ = ["auth_group", "control_group", "serve", "space_group", "token_group"]

@@ -163,6 +163,26 @@ def test_review_tools_require_review_scope(tmp_path):
         store.close()
 
 
+def test_cleanup_legacy_group_schema_is_optional(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    token, plaintext = store.create_token("alpha", "codex", ["read"])
+    with store._lock, store._conn:
+        store._conn.execute(
+            "CREATE TABLE memory_access_groups (group_id TEXT PRIMARY KEY, space_id TEXT)"
+        )
+        store._conn.execute("ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT")
+    assert store.legacy_group_schema() == {"table": True, "group_id_column": True}
+
+    assert store.cleanup_legacy_groups(dry_run=True)["applied"] is False
+    assert store.legacy_group_schema() == {"table": True, "group_id_column": True}
+
+    assert store.cleanup_legacy_groups()["applied"] is True
+    assert store.legacy_group_schema() == {"table": False, "group_id_column": False}
+    assert store.authenticate(plaintext).token_id == token.token_id
+    store.close()
+
+
 def test_legacy_migration_preserves_plaintext(tmp_path):
     octop_db = tmp_path / "octop.db"
     plain = "omcp_legacy_plain"
