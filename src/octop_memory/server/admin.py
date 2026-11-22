@@ -157,20 +157,12 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         }
 
     @app.patch(f"{API_PREFIX}/tokens/{{token_id}}")
-    def patch_token(
-        token_id: str,
-        body: TokenUpdate,
-        session: Session = Depends(require_session)
-    ) -> dict[str, Any]:
+    def patch_token(token_id: str, body: TokenUpdate, session: Session = Depends(require_session)) -> dict[str, Any]:
         token = control.get_token(token_id)
         if token is None:
             raise HTTPException(status_code=404, detail="token not found")
         require_space(session, token.space_id)
-        if (
-            body.space_id is not None
-            and body.space_id != token.space_id
-            and control.get_space(body.space_id) is None
-        ):
+        if body.space_id is not None and body.space_id != token.space_id and control.get_space(body.space_id) is None:
             raise HTTPException(status_code=404, detail="target space not found")
         updated = control.update_token(
             token_id,

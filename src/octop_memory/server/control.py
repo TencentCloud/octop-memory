@@ -146,18 +146,12 @@ class ControlStore:
                 );
                 """
             )
-            columns = {
-                row[1]
-                for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")
-            }
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memory_space_tokens)")}
             if "group_id" not in columns:
-                self._conn.execute(
-                    "ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT"
-                )
+                self._conn.execute("ALTER TABLE memory_space_tokens ADD COLUMN group_id TEXT")
             if "disabled_clients" not in columns:
                 self._conn.execute(
-                    "ALTER TABLE memory_space_tokens ADD COLUMN disabled_clients"
-                    " TEXT NOT NULL DEFAULT '[]'"
+                    "ALTER TABLE memory_space_tokens ADD COLUMN disabled_clients TEXT NOT NULL DEFAULT '[]'"
                 )
 
     # ── spaces ────────────────────────────────────────────────────────────
@@ -392,9 +386,7 @@ class ControlStore:
                     "UPDATE memory_space_tokens SET space_id=? WHERE token_id=?",
                     (space_id, token_id),
                 )
-                self._conn.execute(
-                    "DELETE FROM memory_space_grants WHERE token_id=?", (token_id,)
-                )
+                self._conn.execute("DELETE FROM memory_space_grants WHERE token_id=?", (token_id,))
         return self.get_token(token_id)
 
     def record_client(self, token_id: str, client: str) -> None:
@@ -435,9 +427,7 @@ class ControlStore:
             )
         created: list[tuple[Token, str]] = []
         for client in clients_list:
-            token, plaintext = self.create_token(
-                space_id, client, scopes_list, group_id=group_id
-            )
+            token, plaintext = self.create_token(space_id, client, scopes_list, group_id=group_id)
             for extra in extra_space_ids:
                 if extra != space_id:
                     self.add_grant(token.token_id, extra, scopes_list)
@@ -480,13 +470,9 @@ class ControlStore:
             ).fetchone()
         return self._token(row) if row else None
 
-    def add_group_client(
-        self, group_id: str, client: str
-    ) -> tuple[Token, str]:
+    def add_group_client(self, group_id: str, client: str) -> tuple[Token, str]:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memory_access_groups WHERE group_id=?", (group_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memory_access_groups WHERE group_id=?", (group_id,)).fetchone()
             existing = self._conn.execute(
                 "SELECT token_id FROM memory_space_tokens"
                 " WHERE group_id=? AND client_name=? ORDER BY created_at DESC LIMIT 1",
@@ -498,9 +484,7 @@ class ControlStore:
             # Re-enabling a disabled terminal rotates its token instead of
             # creating a duplicate row in the group.
             return self.rotate(existing["token_id"])
-        return self.create_token(
-            row["space_id"], client, json.loads(row["scopes"] or "[]"), group_id=group_id
-        )
+        return self.create_token(row["space_id"], client, json.loads(row["scopes"] or "[]"), group_id=group_id)
 
     def delete_access_group(self, group_id: str) -> int:
         with self._lock, self._conn:
