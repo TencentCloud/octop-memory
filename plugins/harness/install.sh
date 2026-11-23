@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # octop-memory 终端接入（macOS / Linux）
 #
-#   ./install.sh --url https://<octop-host>/mcp/memory/ --token omcp_…
+#   ./install.sh --url https://<memory-host>/mcp/ --token omcp_…
 #
 # 也支持环境变量：OCTOP_MEMORY_URL / OCTOP_MEMORY_TOKEN / OCTOP_TERMINALS / OCTOP_PROJECT_DIR
 # 脚本只负责把安装器拉起来；token 不会写进仓库，只落在各终端 hook 目录的 config.json（0600）。
@@ -18,11 +18,11 @@ PROJECT="${OCTOP_PROJECT_DIR:-}"
 
 usage() {
   cat <<'USAGE'
-用法: install.sh --url <MCP 地址> [--token <omcp_…>] [--terminals a,b] [--project <dir>]
+用法: install.sh --url <MCP 地址> [--token <omcp_…>] [--terminals codex] [--project <dir>]
 
-  --url       必填，例如 https://octop.example.com/mcp/memory/
-  --token     用户级 MCP token；也可用环境变量 OCTOP_MEMORY_TOKEN
-  --terminals 逗号分隔：claude-code,codex,cursor,kiro,dsh（默认交互选择）
+  --url       必填，例如 https://memory.example.com/mcp/
+  --token     该接入端专用的空间 token；也可用环境变量 OCTOP_MEMORY_TOKEN
+  --terminals 单选：claude-code、codex、cursor、kiro 或 dsh（默认交互选择）
   --project   只装到这个项目目录（默认全局）
 USAGE
 }

@@ -1,10 +1,9 @@
 """Bootstrap a local terminal so it talks to this memory service.
 
 This module renders the installer scripts; the ``octop-memory-harness`` CLI runs them
-locally, so the credential is a **user-level MCP token** (``omcp_…``, created in Octop
-under ``/api/memory-mcp/tokens``) passed in by the person running it, never fetched::
+locally, so the credential is an MCP token issued for this installation passed in by the person running it, never fetched::
 
-    octop-memory-harness install --url https://<octop>/mcp/memory/ --token omcp_…
+    octop-memory-harness install --url https://<memory-host>/mcp/ --token omcp_…
     #   → 检测到：1) Claude Code  2) Kiro  3) DSH  4) Codex  5) Cursor
     #   → 要配置哪些？   MCP token: ****（不回显）
 
@@ -21,9 +20,9 @@ DSH native plugin this installer wrote (does not delete server-side memory)::
     octop-memory-harness uninstall --terminals cursor
 
 Nothing is assumed about where an installer runs. The script detects which terminals
-exist, asks which to configure, prompts for the MCP token and the expert id (reading
+exist, asks which one to configure, prompts for its MCP token (reading
 ``/dev/tty`` — a piped script must not consume its own stdin), then installs a copy of
-the hook scripts next to *each* terminal, in the directory that terminal uses, and
+the hook scripts in the selected terminal's own directory, and
 registers them in that terminal's own hook config:
 
 =========================  =========================================  =============================
@@ -44,8 +43,7 @@ plugin, links it into the selected profile's ``node_modules``, registers the
 up the legacy ``dsh-memory-share`` preset and the ``~/.dsh/hooks`` bridge so the two
 wirings never trigger twice.
 
-Each hook copy carries its own ``config.json`` (endpoint, token). The token is a user-level
-MCP token that is **bound to exactly one expert**, and it is the only credential: entries and
+Each installation has its own ``config.json`` (endpoint, token). The token is bound to one space, and it is the only credential: entries and
 hooks send ``Authorization: Bearer <token>`` and nothing else — no expert id header, because
 the token already says which expert the memory belongs to. The hook roles are fixed: **UserPromptSubmit / beforeSubmitPrompt → memory_search** (pull background in)
 and **Stop / stop → memory_capture** (ship the session transcript).
@@ -291,8 +289,6 @@ def _install_hooks(target, host):
         "url": HOOK_URL,
         "token": TOKEN,
         "tokenHeader": TOKEN_HEADER,
-        # 接入端标识：服务端按它统计/禁用「哪些客户端在用这个 token」。
-        "client": host,
     }
     _dump(target / "config.json", config, private=True)
     print(f"  ✓ hook 脚本（{host} 专用，含共享传输模块）+ config.json → {target}")
@@ -304,7 +300,7 @@ def _install_hooks(target, host):
 
 
 def _entry(transport=None):
-    # 用户级 MCP token 是唯一凭据：``Authorization: Bearer <token>``。
+    # 接入端专用 MCP token 是唯一凭据：``Authorization: Bearer <token>``。
     # token 绑定一个专家，「谁问的 / 落到哪个专家」全由它表达，不再有第二个身份头。
     headers = {
         "Authorization": f"Bearer {TOKEN}",
@@ -692,7 +688,7 @@ def _dsh_bundle_dir():
 
 
 def _dsh_native_config():
-    """原生插件的连接配置：与客户端 MCP 条目同一套语义（MCP 地址 + 用户级 MCP token）。
+    """原生插件的连接配置：与客户端 MCP 条目同一套语义（MCP 地址 + 接入端专用 MCP token）。
 
     ``tokenHeader`` 固定 ``Authorization``（值写成 ``Bearer <token>``）。token 绑定一个专家，
     插件不再需要（也不发送）任何专家标识头。
@@ -1087,7 +1083,7 @@ home = pathlib.Path(os.path.expanduser("~"))
 URL = os.environ["OCTOP_URL"]
 HOOK_URL = os.environ.get("OCTOP_HOOK_URL") or URL   # hooks 实际 POST 的地址（直连）
 TOKEN = os.environ["OCTOP_TOKEN"]
-# 用户级 MCP token 只有一个方言：``Authorization: Bearer <token>``（身份由 token 表达）。
+# 接入端专用 MCP token 只有一个方言：``Authorization: Bearer <token>``（身份由 token 表达）。
 TOKEN_HEADER = "Authorization"
 ENTRY_URL = URL
 NAME = os.environ["OCTOP_SERVER_NAME"]
@@ -1262,18 +1258,15 @@ NATIVE_NAME = "dsh-octop-memory"
 NATIVE_PACKAGE = "dsh-octop-memory@^0.1.7"
 NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.7"
 
-for terminal in os.environ["OCTOP_TERMINALS"].split(","):
-    terminal = terminal.strip()
-    if not terminal:
-        continue
-    print(f"· {terminal}")
-    {
-        "claude-code": do_claude_code,
-        "kiro": do_kiro,
-        "dsh": do_dsh,
-        "codex": do_codex,
-        "cursor": do_cursor,
-    }[terminal]()
+terminal = os.environ["OCTOP_TERMINALS"].strip()
+print(f"· {terminal}")
+{
+    "claude-code": do_claude_code,
+    "kiro": do_kiro,
+    "dsh": do_dsh,
+    "codex": do_codex,
+    "cursor": do_cursor,
+}[terminal]()
 
 print("  · hook 角色：用户提交时召回（CC / Codex 的 UserPromptSubmit，Cursor 的 beforeSubmitPrompt）；")
 print("    回合结束时上报会话 transcript（Stop / Cursor 的 stop）")
@@ -1334,10 +1327,10 @@ def render_setup_script(
     the hooks POST to, defaulting to ``mcp_url`` (a deployment that fronts the MCP mount
     with an ingress can point the entries elsewhere).
 
-    ``default_token`` is an **optional prefill** for the user-level MCP token — callers pass
+    ``default_token`` is an **optional prefill** for the installation's MCP token — callers pass
     an empty string, because the installer must never ship a credential of its own. The
     script falls back to ``OCTOP_MEMORY_TOKEN`` first and only then uses this value.
-    ``terminals`` (comma list) only prefills the terminal prompt.
+    ``terminals`` selects the single terminal for this credential.
 
     ``agent_id`` is accepted for backwards compatibility and **ignored**: the MCP token is
     bound to one expert, so there is no expert id to install (and no ``X-Octop-Agent-Id``).
@@ -1426,66 +1419,21 @@ ask() {{  # ask <提示> <默认值>
   if [ -n "$_answer" ]; then printf '%s' "$_answer"; else printf '%s' "$2"; fi
 }}
 
-# ---- 2) 选终端：交互式清单（↑↓ 移动 · 空格 选择 · a 全选 · 回车 确认）；
-#         没有 tty 或没有 python3 时回退到数字输入。
+# One credential is installed into one terminal.
 TERMINALS="${{OCTOP_TERMINALS:-$DEFAULT_TERMINALS}}"
 if [ -z "$TERMINALS" ] && [ "$HAS_TTY" = 1 ]; then
-  _picked=''
-  if command -v python3 >/dev/null 2>&1; then
-    set --
-    [ "$have_claude" = 1 ] && set -- "$@" "claude-code|Claude Code　（hook 装到 ~/.claude/hooks-events）"
-    [ "$have_kiro" = 1 ] && set -- "$@" "kiro|Kiro　（hook 装到 ~/.kiro/hooks）"
-    [ "$have_dsh" = 1 ] && set -- "$@" "dsh|DSH　（装原生插件 dsh-octop-memory）"
-    [ "$have_codex" = 1 ] && set -- "$@" "codex|Codex　（hook 装到 ~/.codex/hooks）"
-    [ "$have_cursor" = 1 ] && set -- "$@" "cursor|Cursor　（hook 装到 ~/.cursor/hooks）"
-    _picked="$(python3 - "$@" 2>/dev/null <<'OCTOP_SELECT'
-{_SELECT_PY}
-OCTOP_SELECT
-)" || _picked=''
-  fi
-  if [ -n "$_picked" ]; then
-    TERMINALS="$_picked"
-  else
-    # 回退：数字输入（1,2 / 1 3 / 12 / a=全部；回车 = 全部检测到的；选不中会重问）
-    _attempt=0
-    while [ -z "$TERMINALS" ] && [ "$_attempt" -lt 3 ]; do
-      _attempt=$((_attempt + 1))
-      printf '要配置哪些？(可多选：1,2 / 1 3 / 12 / a=全部，回车=全部检测到的): ' > /dev/tty
-      read -r _pick < /dev/tty || _pick=''
-      _chosen=''
-      case "$_pick" in
-        ''|a|A|all|ALL|全部) _chosen="$DETECTED" ;;
-        *)
-          for _n in $(printf '%s' "$_pick" | tr ',' ' '); do
-            case "$_n" in
-              [0-9][0-9]*) _items="$(printf '%s' "$_n" | fold -w1 | tr '\\n' ' ')" ;;
-              *) _items="$_n" ;;
-            esac
-            for _i in $_items; do
-              case "$_i" in
-                1) _add="$([ "$have_claude" = 1 ] && echo claude-code)" ;;
-                2) _add="$([ "$have_kiro" = 1 ] && echo kiro)" ;;
-                3) _add="$([ "$have_dsh" = 1 ] && echo dsh)" ;;
-                4) _add="$([ "$have_codex" = 1 ] && echo codex)" ;;
-                5) _add="$([ "$have_cursor" = 1 ] && echo cursor)" ;;
-                *) _add='' ;;
-              esac
-              if [ -z "$_add" ]; then
-                echo "  ? 已忽略：${{_i}}（未检测到或无法识别）" >&2
-              else
-                case ",$_chosen," in *",$_add,"*) ;; *) _chosen="$_chosen,$_add" ;; esac
-              fi
-            done
-          done
-          ;;
-      esac
-      TERMINALS="$(printf '%s' "$_chosen" | sed 's/^,//')"
-      [ -n "$TERMINALS" ] || echo "  ! 没有选中任何已检测到的终端，请重选（1-5，或 a=全部）" >&2
-    done
-  fi
+  _first="${{DETECTED# }}"
+  _first="${{_first%% *}}"
+  TERMINALS="$(ask "请选择一个终端（名称或编号，默认 $_first）: " "$_first")"
+  case "$TERMINALS" in
+    1) TERMINALS=claude-code ;; 2) TERMINALS=kiro ;; 3) TERMINALS=dsh ;;
+    4) TERMINALS=codex ;; 5) TERMINALS=cursor ;;
+  esac
 fi
-
-[ -n "$TERMINALS" ] || {{ echo "没有可配置的终端" >&2; exit 1; }}
+case "$TERMINALS" in
+  claude-code|kiro|dsh|codex|cursor) ;;
+  *) echo "每枚 token 只安装到一个终端，请用 --terminals 指定一个终端名称。" >&2; exit 1 ;;
+esac
 
 # ---- 2.5) 安装范围：全局（默认）还是只装到某个项目
 # 项目级只在项目里写「注册」（hooks 命令 / MCP 条目）；hook 脚本与 config.json（含 token）
@@ -1537,12 +1485,12 @@ if [ -n "$PROJECT_DIR" ]; then
 fi
 export OCTOP_PROJECT_DIR="$PROJECT_DIR"
 
-# ---- 3) 凭据：用户级 MCP token（omcp_…），条目与 hooks 共用同一份
+# ---- 3) 凭据：接入端专用 MCP token（omcp_…），条目与 hooks 共用同一份
 TOKEN="${{OCTOP_MEMORY_TOKEN:-}}"
 {default_token_block}
 if [ -z "$TOKEN" ] && [ "$HAS_TTY" = 1 ]; then
   stty -echo < /dev/tty 2>/dev/null || true
-  printf 'MCP token（omcp_…，在 Octop 的 /api/memory-mcp/tokens 创建；不回显）: ' > /dev/tty
+  printf '此终端专用的 MCP token（omcp_…，不回显）: ' > /dev/tty
   read -r _t < /dev/tty || _t=''
   stty echo < /dev/tty 2>/dev/null || true
   printf '\\n' > /dev/tty
@@ -2421,42 +2369,18 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     if ($slotDetected[$key]) { Write-Host ("  {0}) {1}" -f $key, $slotHint[$key]) }
   }
 
-  # ---- 2) 选终端（1,2 / 1 3 / 12 / a=全部；回车=全部检测到的；选不中会重问）
+  # One credential is installed into one terminal.
   $terminals = $env:OCTOP_TERMINALS
   if (-not $terminals) { $terminals = $DEFAULT_TERMINALS }
   if (-not $terminals -and $interactive) {
-    $attempt = 0
-    while (-not $terminals -and $attempt -lt 3) {
-      $attempt++
-      $pick = Read-Host '要配置哪些？(可多选：1,2 / 1 3 / 12 / a=全部，回车=全部检测到的)'
-      $chosen = @()
-      if (-not $pick -or $pick -match '^(?i)(a|all|全部)$') {
-        $chosen = @($detected)
-      }
-      else {
-        $tokens = @()
-        foreach ($token in ($pick -replace '[,\s]+', ' ').Split(' ')) {
-          if (-not $token) { continue }
-          if ($token -match '^[0-9]{2,}$') {
-            foreach ($char in $token.ToCharArray()) { $tokens += [string]$char }
-          }
-          else { $tokens += $token }
-        }
-        foreach ($token in $tokens) {
-          $index = 0
-          if (-not [int]::TryParse($token, [ref]$index) -or -not $slotDetected[$index]) {
-            Write-Host "  ? 已忽略：$token（未检测到或无法识别）"
-            continue
-          }
-          $name = $slotName[$index]
-          if ($chosen -notcontains $name) { $chosen += $name }
-        }
-      }
-      if ($chosen.Count -gt 0) { $terminals = ($chosen -join ',') }
-      else { Write-Host '  ! 没有选中任何已检测到的终端，请重选（1-5，或 a=全部）' -ForegroundColor Yellow }
-    }
+    $pick = Read-Host "请选择一个终端（名称或编号，默认 $($detected[0])）"
+    if (-not $pick) { $terminals = $detected[0] }
+    elseif ($pick -match '^[1-5]$') { $terminals = $slotName[[int]$pick] }
+    else { $terminals = $pick }
   }
-  if (-not $terminals) { throw '没有可配置的终端（非交互请先设 $env:OCTOP_TERMINALS）' }
+  if ($terminals -cnotin $slotName.Values) {
+    throw '每枚 token 只安装到一个终端，请用 --terminals 指定一个终端名称。'
+  }
 
   # ---- 2.5) 安装范围：全局（默认）还是只装到某个项目
   # 项目级只在项目里写「注册」（hooks 命令 / MCP 条目）；hook 脚本与 config.json（含 token）
@@ -2503,7 +2427,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     }
   }
 
-  # ---- 3) 凭据：用户级 MCP token（omcp_…），条目与 hooks 共用同一份
+  # ---- 3) 凭据：接入端专用 MCP token（omcp_…），条目与 hooks 共用同一份
   $localNote = ''
   $isLocal = @('127.0.0.1', 'localhost') -contains ([Uri]$HOOK_URL).Host
   if ($isLocal) { $localNote = '（本机实例）' }
@@ -2513,7 +2437,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     Write-Host '  · token：用安装链接预填的值（个人 MCP token）'
   }
   if (-not $token -and $interactive) {
-    $token = Read-Secret 'MCP token（omcp_…，在 Octop 的 /api/memory-mcp/tokens 创建；不回显）: '
+    $token = Read-Secret '此终端专用的 MCP token（omcp_…，不回显）: '
   }
   if (-not $token) { throw '缺少 MCP token：非交互运行时请先设 $env:OCTOP_MEMORY_TOKEN=<omcp_…>' }
   Write-Host "  · hook 直连：$HOOK_URL$localNote"

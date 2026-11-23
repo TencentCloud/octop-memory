@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from octop_memory._config_io import load_config
+from octop_memory.storage.backends.namespace import sqlite_database_path
 
 
 @dataclass(frozen=True)
@@ -33,29 +34,6 @@ class SpaceConfig:
     backend_config: dict[str, Any] = field(default_factory=dict)
 
 
-def _default_space(cfg: dict[str, Any], space_id: str, display_name: str = "") -> SpaceConfig:
-    backend = str(cfg.get("backend") or "sqlite")
-    if backend == "postgres":
-        section = cfg.get("postgres") or {}
-        return SpaceConfig(
-            space_id=space_id,
-            display_name=display_name or space_id,
-            backend="postgres",
-            backend_config={"dsn": section.get("dsn", "postgresql://localhost/octop_memory")},
-        )
-    section = cfg.get("sqlite") or {}
-    base = str(section.get("db_path") or "~/.octop-memory/memory.db")
-    # SQLite isolates spaces by file; keep the default single file untouched and
-    # put every other space next to it.
-    folder = Path(base).expanduser().parent
-    return SpaceConfig(
-        space_id=space_id,
-        display_name=display_name or space_id,
-        backend="sqlite",
-        backend_config={"db_path": str(folder / "spaces" / f"{space_id}.db")},
-    )
-
-
 def load_server_config(config: dict[str, Any] | None = None) -> tuple[ServerConfig, ControlConfig]:
     cfg = config or load_config()
     server = cfg.get("server") or {}
@@ -78,25 +56,36 @@ def load_server_config(config: dict[str, Any] | None = None) -> tuple[ServerConf
     )
 
 
-def resolve_space(cfg: dict[str, Any], space_id: str, display_name: str = "") -> SpaceConfig:
-    spaces = cfg.get("spaces") or {}
-    raw = spaces.get(space_id)
-    if not isinstance(raw, dict):
-        return _default_space(cfg, space_id, display_name)
-    backend = str(raw.get("backend") or cfg.get("backend") or "sqlite")
-    if backend == "postgres":
-        section = {**(cfg.get("postgres") or {}), **(raw.get("postgres") or {})}
-        return SpaceConfig(
-            space_id=space_id,
-            display_name=display_name or space_id,
-            backend="postgres",
-            backend_config={"dsn": section.get("dsn", "postgresql://localhost/octop_memory")},
-        )
-    section = {**(cfg.get("sqlite") or {}), **(raw.get("sqlite") or {})}
-    base = str(section.get("db_path") or f"~/.octop-memory/spaces/{space_id}.db")
-    return SpaceConfig(
-        space_id=space_id,
-        display_name=display_name or space_id,
-        backend="sqlite",
-        backend_config={"db_path": base},
-    )
+def resolve_space(
+    cfg: dict[str, Any],
+    space_id: str,
+    display_name: str = "",
+    *,
+    backend: str | None = None,
+    backend_config: dict[str, Any] | None = None,
+) -> SpaceConfig:
+    raw = (cfg.get("spaces") or {}).get(space_id)
+    space = raw if isinstance(raw, dict) else {}
+    selected = backend or space.get("backend") or cfg.get("backend") or "sqlite"
+    if selected not in ("sqlite", "postgres"):
+        raise ValueError("unknown space storage backend")
+    settings = {**(cfg.get(selected) or {}), **(space.get(selected) or {})}
+    overrides = backend_config or {}
+    if selected == "postgres":
+        if "db_path" in overrides:
+            raise ValueError("db_path requires the sqlite backend")
+        config = {**settings, **overrides}
+        config.setdefault("dsn", "postgresql://localhost/octop_memory")
+        if not isinstance(config["dsn"], str):
+            raise ValueError("PostgreSQL dsn must be a string")
+    else:
+        if overrides.keys() - {"db_path"}:
+            raise ValueError("SQLite backend_config accepts only db_path")
+        if isinstance(raw, dict):
+            path = settings.get("db_path") or f"~/.octop-memory/spaces/{space_id}.db"
+        else:
+            base = Path(settings.get("db_path") or "~/.octop-memory/memory.db").expanduser()
+            path = str(base.parent / "spaces" / f"{space_id}.db")
+        db = sqlite_database_path({"db_path": overrides.get("db_path", path)})
+        config = {"db_path": str(db) if str(db) == ":memory:" else str(db.resolve())}
+    return SpaceConfig(space_id, display_name or space_id, selected, config)

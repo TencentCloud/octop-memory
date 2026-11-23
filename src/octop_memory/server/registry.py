@@ -8,7 +8,6 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any, TypeVar
 
-from octop_memory._config_io import load_config
 from octop_memory.core import Memory
 from octop_memory.server.config import resolve_space
 from octop_memory.server.control import ControlStore, Space
@@ -22,7 +21,7 @@ class SpaceRegistry:
 
     def __init__(self, control: ControlStore, config: dict[str, Any] | None = None) -> None:
         self._control = control
-        self._config = config or load_config()
+        self._config = config or control.config
         self._runtime_config: dict[str, Any] = {}
         if isinstance(self._config.get("llm"), dict):
             self._runtime_config["llm"] = self._config["llm"]
@@ -46,8 +45,7 @@ class SpaceRegistry:
         )
 
     def _open(self, space: Space) -> Memory:
-        if space.backend == "postgres":
-            self._control.check_postgres_namespace(space.space_id)
+        self._control.check_storage_namespace(space.space_id, space.backend, space.backend_config, config=self._config)
         memory = Memory(
             namespace=space.space_id,
             backend=space.backend,

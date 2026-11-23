@@ -6,19 +6,22 @@ import asyncio
 import hashlib
 from contextlib import suppress
 from contextvars import ContextVar
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 
+from octop_memory.application.path_projection import raw_to_path
 from octop_memory.application.runtime import MemoryRuntime
-from octop_memory.server.control import ControlStore
+from octop_memory.core import Memory
+from octop_memory.domain.raw_search import raw_search_text
 from octop_memory.server.registry import SpaceRegistry
 
 _current_space: ContextVar[str] = ContextVar("octop_memory_space", default="")
 _current_scopes: ContextVar[tuple[str, ...]] = ContextVar("octop_memory_scopes", default=())
 _current_token: ContextVar[str] = ContextVar("octop_memory_token_id", default="")
-_current_client: ContextVar[str] = ContextVar("octop_memory_client", default="")
+_current_client_name: ContextVar[str] = ContextVar("octop_memory_client", default="")
 
 
 def _event_key(payload: dict[str, Any], event: dict[str, Any]) -> str:
@@ -55,7 +58,7 @@ def _require(scope: str) -> None:
         raise PermissionError(f"token is missing required scope {scope!r}")
 
 
-def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
+def build_mcp(registry: SpaceRegistry) -> FastMCP:
     mcp = FastMCP(
         "octop-memory",
         stateless_http=True,
@@ -67,29 +70,68 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         return MemoryRuntime(memory, config=registry.runtime_config)
 
     @mcp.tool()
-    async def memory_search(query: str, corpus: str = "all", max_results: int = 8) -> dict[str, Any]:
-        """Search this space's memory (atoms, sessions, wiki)."""
+    async def memory_search(
+        query: str,
+        corpus: Annotated[
+            str,
+            Field(description="Search atoms by default. Use raw for original events, or all, memory, wiki, sessions."),
+        ] = "atom",
+        max_results: Annotated[int, Field(ge=1)] = 8,
+    ) -> dict[str, Any]:
+        """Search this space and return paths that memory_get can read."""
         _require("read")
         space = _current_space.get()
+        corpus = corpus.strip().lower() or "atom"
+        if not query.strip():
+            raise ValueError("memory_search: 'query' must be a non-empty string")
 
-        def _run(memory: Any) -> dict[str, Any]:
-            return _runtime(memory).memory_search({"query": query, "corpus": corpus, "maxResults": max_results})
+        def _run(memory: Memory) -> dict[str, Any]:
+            if corpus == "raw":
+                hits = [
+                    {
+                        "path": raw_to_path(event),
+                        "score": None,
+                        "snippet": raw_search_text(event.content)[:200],
+                        "layer": "raw",
+                        "role_hint": event.payload.get("role") or event.event_type,
+                        "occurred_at": event.timestamp.isoformat(),
+                        "source_id": event.id,
+                    }
+                    for event in memory.search_raw(query, limit=max_results)
+                ]
+                return {
+                    "hits": hits,
+                    "total": len(hits),
+                    "empty_reason": None if hits else "no_matches",
+                    "corpus": corpus,
+                }
+
+            atom_only = corpus == "atom"
+            result = _runtime(memory).memory_search(
+                {
+                    "query": query,
+                    "corpus": "memory" if atom_only else corpus,
+                    "atomOnly": atom_only,
+                    "maxResults": max_results,
+                }
+            )
+            return {**result, "corpus": corpus}
 
         return await asyncio.to_thread(registry.call, space, _run)
 
     @mcp.tool()
-    async def memory_get(path: str, from_line: int | None = None, lines: int | None = None) -> dict[str, Any]:
-        """Read one memory document by virtual path."""
+    async def memory_get(
+        path: str, from_line: int | None = None, lines: int | None = None, *, start: int | None = None
+    ) -> dict[str, Any]:
+        """Read a memory_search hit's path. Set start and lines to read a range of lines."""
         _require("read")
         space = _current_space.get()
 
         def _run(memory: Any) -> dict[str, Any]:
-            params: dict[str, Any] = {"path": path}
-            if from_line is not None:
-                params["from"] = from_line
-            if lines is not None:
-                params["lines"] = lines
-            return _runtime(memory).memory_get(params)
+            result = _runtime(memory).memory_get(
+                {"path": path, "from": start if start is not None else from_line, "lines": lines}
+            )
+            return {**result, "content": result["excerpt"]}
 
         return await asyncio.to_thread(registry.call, space, _run)
 
@@ -100,8 +142,8 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         """Save an explicit durable fact into this space."""
         _require("write")
         space = _current_space.get()
-        client = _current_client.get() or _current_token.get()
-        metadata = {"source": source, "source_host": client, "caller": client}
+        token_id = _current_token.get()
+        metadata = {"source": source, "source_host": _current_client_name.get() or token_id, "caller": token_id}
         if supersedes:
             metadata["supersedes"] = supersedes
 
@@ -124,22 +166,22 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         extract: bool = True,
         events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Write raw events (L0) parsed by a client; extraction stays opt-in."""
+        """Write raw events (L0) parsed by a token_id; extraction stays opt-in."""
         _require("write")
         space = _current_space.get()
-        client = _current_client.get() or _current_token.get()
-        effective_session = session_id or f"ext:{source or client}:{client}"
+        token_id = _current_token.get()
+        effective_session = session_id or f"ext:{source or token_id}:{token_id}"
+        base_payload = {"source": source, "source_host": _current_client_name.get() or token_id, "caller": token_id}
         payload: list[dict[str, Any]] = []
         if events is not None:
             if len(events) > 200:
                 raise ValueError(f"[batch_too_large] events={len(events)} limit=200; send smaller batches")
             payload = [dict(event) for event in events]
         else:
-            base = {"source": source, "source_host": client, "caller": client}
             if content.strip():
-                payload.append({"event_type": "user_message", "content": content, "payload": base})
+                payload.append({"event_type": "user_message", "content": content, "payload": base_payload})
             if assistant:
-                payload.append({"event_type": "assistant_message", "content": assistant, "payload": base})
+                payload.append({"event_type": "assistant_message", "content": assistant, "payload": base_payload})
         if not payload:
             raise ValueError("content and assistant are both empty; nothing to record")
         if dry_run:
@@ -153,7 +195,6 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
 
         def _run(memory: Any) -> dict[str, Any]:
             runtime = _runtime(memory)
-            base_payload = {"source": source, "source_host": client, "caller": client}
             normalized: list[dict[str, Any]] = []
             seen: set[str] = set()
             for item in payload:
@@ -176,7 +217,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
                 normalized.append(event)
             if not normalized:
                 raise ValueError("events is empty after dropping blank entries")
-            known = {_raw_key(raw) for raw in memory.list_raw(session_id=effective_session, user=client, limit=5000)}
+            known = {_raw_key(raw) for raw in memory.list_raw(session_id=effective_session, user=token_id, limit=5000)}
             fresh = [event for event in normalized if event["payload"]["octop_event_key"] not in known]
             duplicates = len(normalized) - len(fresh)
             if not fresh:
@@ -192,7 +233,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
                 {
                     "session_id": effective_session,
                     "thread_id": thread_id,
-                    "user": client,
+                    "user": token_id,
                     "host": source or "mcp",
                     "events": fresh,
                 }
@@ -269,7 +310,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         """Promote review candidates through the 5-check worker."""
         _require("review")
         space = _current_space.get()
-        decided_by = _current_client.get() or _current_token.get()
+        decided_by = _current_token.get()
 
         def _run(memory: Any) -> dict[str, Any]:
             candidates = [
@@ -297,7 +338,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
         """Reject review candidates (kept in the audit trail)."""
         _require("review")
         space = _current_space.get()
-        decided_by = _current_client.get() or _current_token.get()
+        decided_by = _current_token.get()
 
         def _run(memory: Any) -> dict[str, Any]:
             updated = 0
@@ -346,7 +387,7 @@ def build_mcp(registry: SpaceRegistry, control: ControlStore) -> FastMCP:
 
 
 __all__ = [
-    "_current_client",
+    "_current_client_name",
     "_current_scopes",
     "_current_space",
     "_current_token",

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 import threading
 from collections.abc import Callable, Generator, Sequence
@@ -23,6 +22,7 @@ from octop_memory.storage.backends.fts_text import (
     fts_match_phrase,
     register_fts_functions,
 )
+from octop_memory.storage.backends.namespace import DEFAULT_SQLITE_DB_PATH, normalize_namespace
 from octop_memory.types import (
     ActiveEntity,
     Alias,
@@ -98,9 +98,9 @@ class SqliteMemoryBackend:
     def __init__(
         self,
         namespace: str,
-        db_path: str | Path = "~/.octop-memory/session.sqlite",
+        db_path: str | Path = DEFAULT_SQLITE_DB_PATH,
     ) -> None:
-        self._ns = re.sub(r"[^a-z0-9_]", "_", namespace.lower())
+        self._ns = normalize_namespace(namespace)
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._closed = False

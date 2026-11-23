@@ -6,9 +6,8 @@
 // under ``<host>/`` that decides what to read and which ``source`` /
 // ``session_id`` prefix to use — so changing one host never touches another.
 //
-// Config precedence: environment variable -> ``config.json`` next to the entry
-// script (the /mcp/memory/setup installer writes that file, so a hooked-up
-// terminal needs no secret in its hook command line).
+// Each installation uses its own endpoint and credential together. Environment
+// settings support hooks that have no installed connection.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -64,23 +63,16 @@ export function loadConfig() {
   } catch {
     // no config file (env-only setups keep working)
   }
+  const connection = fromFile.token ? fromFile : {
+    url: process.env.OCTOP_MEMORY_MCP_URL,
+    token: process.env.OCTOP_MEMORY_MCP_TOKEN,
+    tokenHeader: process.env.OCTOP_TOKEN_HEADER,
+  };
   return {
-    endpoint: process.env.OCTOP_MEMORY_MCP_URL || fromFile.url || "",
-    token: process.env.OCTOP_MEMORY_MCP_TOKEN || fromFile.token || "",
-    // Configurable header name; ``Authorization`` (the default) takes a bearer.
-    tokenHeader: process.env.OCTOP_TOKEN_HEADER || fromFile.tokenHeader || "Authorization",
-    // 接入端标识（安装时按宿主写入），服务端据此统计与开关。
-    client: process.env.OCTOP_CLIENT || fromFile.client || "",
+    endpoint: connection.url || "",
+    token: connection.token || "",
+    tokenHeader: connection.tokenHeader || "Authorization",
   };
-}
-
-function baseHeaders(config) {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-  };
-  if (config && config.client) headers["X-Octop-Client"] = config.client;
-  return headers;
 }
 
 export function authHeaders(config) {
@@ -88,7 +80,7 @@ export function authHeaders(config) {
   // takes ``Bearer <token>``, any other header name is written verbatim.
   // The MCP token is bound to one expert server-side, so a client sends no
   // identity header at all — neither a user id nor an expert id.
-  const headers = baseHeaders(config);
+  const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   const header = config.tokenHeader || "Authorization";
   headers[header] = header.toLowerCase() === "authorization" ? `Bearer ${config.token}` : config.token;
   return headers;

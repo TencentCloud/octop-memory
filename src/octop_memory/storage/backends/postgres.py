@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 from octop_memory.domain.datetime import as_utc
 from octop_memory.domain.raw_search import IMAGE_BLOCK_TYPES, IMAGE_PAYLOAD_FIELDS, IMAGE_PLACEHOLDERS
 from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
-from octop_memory.storage.backends.namespace import normalize_postgres_namespace
+from octop_memory.storage.backends.namespace import normalize_namespace
 from octop_memory.storage.backends.postgres_pool import acquire_pool
 from octop_memory.types import (
     ActiveEntity,
@@ -134,7 +134,7 @@ class PostgresMemoryBackend:
         dsn: str = "postgresql://localhost/octop_memory",
         **kwargs: Any,
     ) -> None:
-        self._ns = normalize_postgres_namespace(namespace)
+        self._ns = normalize_namespace(namespace)
         self._dsn = dsn
         self._connect_kwargs = dict(kwargs)
         self._conn: Any = None  # only held while an operation/transaction owns it

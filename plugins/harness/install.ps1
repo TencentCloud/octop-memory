@@ -1,6 +1,6 @@
 # octop-memory 终端接入（Windows PowerShell）
 #
-#   .\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token omcp_…
+#   .\install.ps1 -Url https://<memory-host>/mcp/ -Token omcp_…
 #
 # 环境变量等价：OCTOP_MEMORY_URL / OCTOP_MEMORY_TOKEN / OCTOP_TERMINALS / OCTOP_PROJECT_DIR
 param(
@@ -14,7 +14,7 @@ $Repo = if ($env:OCTOP_MEMORY_REPO) { $env:OCTOP_MEMORY_REPO } else { 'https://g
 $Ref = if ($env:OCTOP_MEMORY_REF) { $env:OCTOP_MEMORY_REF } else { 'main' }
 $Spec = "git+$Repo@$Ref#subdirectory=plugins/harness"
 
-if (-not $Url) { throw '缺少 -Url（例如 https://octop.example.com/mcp/memory/）' }
+if (-not $Url) { throw '缺少 -Url（例如 https://memory.example.com/mcp/）' }
 if (-not $Token) { throw '缺少 -Token（或在环境中设置 OCTOP_MEMORY_TOKEN）' }
 
 $argsList = @('install', '--url', $Url, '--token', $Token, '--terminals', $Terminals, '--project', $Project)

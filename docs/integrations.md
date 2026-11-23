@@ -93,7 +93,7 @@ Hermes needs v0.10.0+ with `MemoryProvider`; installation instructions are not a
 
 ## Terminal clients
 
-`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. It calls an Octop memory MCP endpoint with a user token created in Octop. It does not open a local memory database and does not embed a credential in the repository.
+`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. Each terminal installation calls the memory MCP endpoint with its own space token. It does not open a local memory database and does not embed a credential in the repository.
 
 The installer is on the `develop` branch. The `main` branch does not contain these scripts yet, so the one-line installers below use `develop`.
 
@@ -101,19 +101,19 @@ macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
-  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+  | sh -s -- --url https://<memory-host>/mcp/ --token "$OCTOP_TOKEN"
 ```
 
 Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
-.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+.\install.ps1 -Url https://<memory-host>/mcp/ -Token $env:OCTOP_TOKEN
 ```
 
 The script tries `uvx`, then `pipx`, then a temporary virtualenv. A manual install is `pip install octop-memory-harness` (or `pip install ./plugins/harness` from a checkout) followed by `octop-memory-harness install --url ... --token ...`.
 
-- `--terminals claude-code,codex,cursor,kiro,dsh` selects hosts. Non-interactive runs read this flag.
+- Select one installation per token, for example `--terminals codex`. Issue another token for a second installation in the same space.
 - `--project <dir>` registers one repository. Hook scripts and the token file stay in the user directory.
 - `octop-memory-harness uninstall` removes this installer's registrations and files.
 

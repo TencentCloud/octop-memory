@@ -88,7 +88,7 @@ Hermes 适配要求具备 `MemoryProvider` 接口的 v0.10.0+。安装说明不�
 
 ## 终端客户端
 
-`plugins/harness` 为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。分发包名是 `octop-memory-harness`。它使用在 Octop 创建的用户级 MCP token 调用 Octop 的 memory MCP，不打开本地记忆库，也不把凭据写进仓库。
+`plugins/harness` 为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。分发包名是 `octop-memory-harness`。每个终端安装使用自己的空间 token 调用记忆 MCP，不打开本地记忆库，也不把凭据写进仓库。
 
 安装器在 `develop` 分支。`main` 分支还没有这些脚本，所以下面的一行安装地址使用 `develop`。
 
@@ -96,19 +96,19 @@ macOS / Linux：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
-  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+  | sh -s -- --url https://<memory-host>/mcp/ --token "$OCTOP_TOKEN"
 ```
 
 Windows PowerShell：
 
 ```powershell
 irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
-.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+.\install.ps1 -Url https://<memory-host>/mcp/ -Token $env:OCTOP_TOKEN
 ```
 
 脚本依次尝试 `uvx`、`pipx`、临时虚拟环境。也可以 `pip install octop-memory-harness`（源码树里是 `pip install ./plugins/harness`），再执行 `octop-memory-harness install --url ... --token ...`。
 
-- `--terminals claude-code,codex,cursor,kiro,dsh` 选择终端。非交互运行读取这个参数。
+- 每枚 token 对应一个接入端，例如 `--terminals codex`。同一空间接入另一个终端时，另行签发 token。
 - `--project <dir>` 只注册一个仓库。hook 脚本和含 token 的文件仍留在用户目录。
 - `octop-memory-harness uninstall` 卸掉本安装器写入的注册和文件。
 

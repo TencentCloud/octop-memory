@@ -82,8 +82,6 @@ def _headers(config: dict) -> dict[str, str]:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    if config.get("client"):
-        common["X-Octop-Client"] = str(config["client"])
     if header.lower() == "authorization":
         return {"Authorization": f"Bearer {token}", **common}
     return {header: token, **common}

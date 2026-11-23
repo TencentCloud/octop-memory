@@ -1938,11 +1938,12 @@ def _resolve_memory_backend(
 ) -> MemoryBackend:
     """Resolve a backend type string to a MemoryBackend instance."""
     if backend_type == "sqlite":
+        from octop_memory.storage.backends.namespace import sqlite_database_path
         from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 
         return SqliteMemoryBackend(
             namespace=namespace,
-            db_path=config.get("db_path", "~/.octop-memory/session.sqlite"),
+            db_path=sqlite_database_path(config),
         )
     if backend_type == "postgres":
         try:

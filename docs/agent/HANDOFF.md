@@ -26,10 +26,12 @@ baselines for new work; consult their original PR/Git records.
 
 ### Standalone memory space isolation
 
-- Local follow-up to [Memory PR #59](https://github.com/TencentCloud/octop-memory/pull/59), based on `8e26f76`.
-- **⚠️ Recall/write path change** — The standalone server checks token scope changes in the control-store transaction, requires a registered space before MCP access, and rejects conflicting PostgreSQL namespaces before opening memory. Valid spaces keep their existing storage mapping.
-- **Validation** — `make all` passed against dedicated PostgreSQL 16 with 1,694 passed and 3 platform or optional-host skips. The [standalone server checks](TEST_MATRIX.md#validation-by-change-scope) exercised the HTTP API, CLI, and MCP with SQLite and PostgreSQL.
-- Audit grants issued by earlier builds before deploying against an existing control store.
+- Local follow-up to [Memory PR #59](https://github.com/TencentCloud/octop-memory/pull/59), based on `c32e45a`.
+- **⚠️ Recall/write path change** — The standalone server checks token scope changes in the control-store transaction and requires a registered space before MCP access. Registration and opening reject a shared SQLite table prefix in the same physical file, including file aliases and older configurations. PostgreSQL namespaces remain unique across the control store.
+- Space registration resolves the configured database for both CLI and API callers. Repeating the same binding confirms it. A different target returns HTTP 409 and keeps the original registration. The paired [Octop PR](https://github.com/TencentCloud/Octop/pull/2887) still needs to stop token issuance on conflict.
+- **⚠️ Recall/write path change** — Standalone MCP search defaults to durable atoms. Explicit `raw` uses the existing event search and returns readable paths. `memory_get` supports `start` and returns the excerpt as `content` for existing clients.
+- **Validation** — `make all` passed against dedicated PostgreSQL 16 with 1,712 passed and 3 platform or optional-host skips. All 33 [standalone server checks](TEST_MATRIX.md#validation-by-change-scope) ran, including token rebinding on an older control database, configured CLI and API registration, same-ID retries and concurrent conflicts, file aliases, shared-file MCP isolation, per-installation revocation and paginated recall. All 14 terminal plugin tests passed. A temporary POSIX project received distinct Codex and Cursor configurations. Windows rendering was tested without running PowerShell.
+- **⚠️ Recall/write path change** — Each installation receives its own space token. Usage, capture ownership and review attribution follow the token ID. Older shared or partially disabled credentials are retired on upgrade. The server ignores earlier secondary grants. Clients with Octop-only credentials need a new space token.
 
 ### Raw image search
 

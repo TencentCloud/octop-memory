@@ -2,8 +2,8 @@
 
 你要做的是：把用户这台机器上的编码终端接到 octop-memory。**只需要两个输入**：
 
-- `OCTOP_URL`：MCP 地址，形如 `https://<octop-host>/mcp/memory/`（本地实例是 `http://127.0.0.1:8088/mcp/memory/`）
-- `OCTOP_TOKEN`：用户级 MCP token，形如 `omcp_…`（用户在 Octop「个性化 → 记忆 → 终端接入」创建）
+- `OCTOP_URL`：MCP 地址，形如 `https://<memory-host>/mcp/`（本地实例是 `http://127.0.0.1:8790/mcp/`）
+- `OCTOP_TOKEN`：该接入端的空间 token，形如 `omcp_…`（由空间管理员为该终端单独签发）
 
 ## 规则（必须遵守）
 
@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/p
 
 或从本地仓库：`sh plugins/harness/install.sh --url "$OCTOP_URL" --token "$OCTOP_TOKEN"`
 
-- 只装部分终端：追加 `--terminals claude-code,codex`
+- 为每个终端分别签发 token 并运行安装器，例如 `--terminals codex`
 - 装到某个项目：追加 `--project "$PWD"`
 
 依赖：`uvx`（推荐）或 `pipx` 或 `python3`（脚本会用临时 venv 装安装器）。
@@ -44,8 +44,8 @@ tail -n 5 ~/.claude/hooks-events/octop-hook.log    # macOS/Linux
 ```
 
 - 让用户重开终端 / IDE（Codex 首次需要在 Codex 里 trust hook；DSH 需要重启）
-- 让用户问一句话，然后在 Octop「终端接入」页看 token 的「接入端」是否出现对应客户端
-- 若日志是 401：token 无效/被吊销；403：该接入端被禁用；404：服务端没开 `OCTOP_MEMORY_MCP_ENABLED`
+- 让用户问一句话，然后在空间的接入端列表里检查对应 token 的最近访问时间
+- 若日志是 401：token 无效或已撤销；403：检查空间绑定；404：检查 MCP 服务地址
 
 ## 卸载
 

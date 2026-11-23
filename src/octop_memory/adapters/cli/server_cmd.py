@@ -6,13 +6,15 @@ import json
 
 import click
 
+from octop_memory._config_io import load_config
 from octop_memory.server.config import load_server_config
 from octop_memory.server.control import ALL_SPACES, ControlStore
 
 
 def _control() -> ControlStore:
-    _server, control_cfg = load_server_config()
-    return ControlStore(control_cfg.sqlite_path)
+    cfg = load_config()
+    _server, control_cfg = load_server_config(cfg)
+    return ControlStore(control_cfg.sqlite_path, cfg)
 
 
 @click.group("space")
@@ -23,19 +25,25 @@ def space_group() -> None:
 @space_group.command("create")
 @click.argument("space_id")
 @click.option("--name", default="", help="Display name.")
-@click.option("--backend", type=click.Choice(["sqlite", "postgres"]), default="sqlite")
+@click.option("--backend", type=click.Choice(["sqlite", "postgres"]))
 @click.option("--dsn", default=None, help="PostgreSQL DSN (backend=postgres).")
-def space_create(space_id: str, name: str, backend: str, dsn: str | None) -> None:
+@click.pass_context
+def space_create(ctx: click.Context, space_id: str, name: str, backend: str | None, dsn: str | None) -> None:
+    root = ctx.find_root().params
+    backend = backend or root.get("backend")
+    overrides = {}
+    if dsn := dsn or root.get("dsn"):
+        overrides["dsn"] = dsn
+    if db := root.get("db"):
+        overrides["db_path"] = db
     control = _control()
-    if backend == "postgres":
-        cfg = {"dsn": dsn or "postgresql://localhost/octop_memory"}
-    else:
-        cfg = {"db_path": f"~/.octop-memory/spaces/{space_id}.db"}
     try:
-        control.create_space(space_id, name or space_id, backend, cfg, created_by="cli")
+        space = control.create_space(space_id, name, backend, overrides, created_by="cli")
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(json.dumps({"space_id": space_id, "backend": backend}))
+    finally:
+        control.close()
+    click.echo(json.dumps({"space_id": space.space_id, "backend": space.backend}))
 
 
 @space_group.command("list")
@@ -105,7 +113,10 @@ def token_list(space_id: str) -> None:
 @click.argument("token_id")
 def token_rotate(token_id: str) -> None:
     control = _control()
-    token, plaintext = control.rotate(token_id)
+    try:
+        token, plaintext = control.rotate(token_id)
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({"token_id": token_id, "token": plaintext, "token_hint": token.token_hint}))
 
 

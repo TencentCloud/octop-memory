@@ -1,4 +1,4 @@
-"""ASGI app: MCP at ``/mcp`` (legacy ``/mcp/memory``) + admin API at ``/api/admin``."""
+"""ASGI app serving MCP at ``/mcp/`` and the admin API at ``/api/admin``."""
 
 from __future__ import annotations
 
@@ -17,15 +17,13 @@ from octop_memory.server.admin import build_admin_app
 from octop_memory.server.config import load_server_config
 from octop_memory.server.control import ControlStore
 from octop_memory.server.mcp import (
-    _current_client,
+    _current_client_name,
     _current_scopes,
     _current_space,
     _current_token,
     build_mcp,
 )
 from octop_memory.server.registry import SpaceRegistry
-
-_current_touch: ContextVar[Any] = ContextVar("octop_memory_touch", default=None)
 
 
 class TokenAuthMiddleware:
@@ -49,40 +47,24 @@ class TokenAuthMiddleware:
         if token is None:
             await _json(send, 401, {"error": "invalid or revoked token"})
             return
-        # Legacy multi-expert tokens keep access through grants: a request may
-        # pick one of its granted spaces explicitly, otherwise the primary one.
-        allowed = await asyncio.to_thread(self._control.allowed_spaces, token)
         requested = headers.get("x-octop-space", "").strip()
-        # Backward compatibility: legacy Octop clients sent the expert id, and
-        # each migrated expert lives in ``octop-expert-<agent_id>``.
-        agent_hint = headers.get("x-octop-agent-id", "").strip()
-        if not requested and agent_hint:
-            requested = f"octop-expert-{agent_hint}"
-        space_id, scopes = token.space_id, token.scopes
-        if requested:
-            match = next((item for item in allowed if item[0] == requested), None)
-            if match is None:
-                await _json(send, 403, {"error": "token has no grant for this space"})
-                return
-            space_id, scopes = match
-        if await asyncio.to_thread(self._control.get_space, space_id) is None:
+        if requested and requested != token.space_id:
+            await _json(send, 403, {"error": "token is bound to another space"})
+            return
+        if headers.get("x-octop-agent-id", "").strip():
+            await _json(send, 400, {"error": "omit X-Octop-Agent-Id; the token determines the space"})
+            return
+        if await asyncio.to_thread(self._control.get_space, token.space_id) is None:
             await _json(send, 403, {"error": "token space is not registered"})
             return
-        client = headers.get("x-octop-client", "").strip()[:64] or token.client_name
-        if client and client in token.disabled_clients:
-            await _json(
-                send,
-                403,
-                {"error": f"client {client!r} is disabled for this token"},
-            )
+        if not await asyncio.to_thread(self._control.record_use, plaintext):
+            await _json(send, 401, {"error": "invalid or revoked token"})
             return
-        if client:
-            await asyncio.to_thread(self._control.record_client, token.token_id, client)
         values: list[tuple[ContextVar[Any], CtxToken[Any]]] = [
-            (_current_space, _current_space.set(space_id)),
-            (_current_scopes, _current_scopes.set(tuple(scopes))),
+            (_current_space, _current_space.set(token.space_id)),
+            (_current_scopes, _current_scopes.set(tuple(token.scopes))),
             (_current_token, _current_token.set(token.token_id)),
-            (_current_client, _current_client.set(client)),
+            (_current_client_name, _current_client_name.set(token.client_name)),
         ]
         try:
             await self._app(scope, receive, send)
@@ -106,12 +88,11 @@ async def _json(send: Send, status: int, payload: dict[str, Any]) -> None:
 def build_app(config: dict[str, Any] | None = None) -> Any:
     cfg = config or load_config()
     _server_cfg, control_cfg = load_server_config(cfg)
-    control = ControlStore(control_cfg.sqlite_path)
-    registry = SpaceRegistry(control, cfg)
+    control = ControlStore(control_cfg.sqlite_path, cfg)
+    registry = SpaceRegistry(control)
 
-    mcp = build_mcp(registry, control)
+    mcp = build_mcp(registry)
     inner = mcp.streamable_http_app()
-    protected = TokenAuthMiddleware(inner, control)
     manager = getattr(mcp, "_session_manager", None)
 
     @asynccontextmanager
@@ -126,8 +107,7 @@ def build_app(config: dict[str, Any] | None = None) -> Any:
                 control.close()
 
     app = build_admin_app(control, lifespan=lifespan)
-    app.mount("/mcp", protected)
-    app.mount("/mcp/memory", protected)
+    app.mount("/mcp", TokenAuthMiddleware(inner, control))
     app.state.control = control
     app.state.registry = registry
     app.state.mcp = mcp

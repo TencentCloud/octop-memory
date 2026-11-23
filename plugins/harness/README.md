@@ -1,6 +1,6 @@
 # octop-memory-harness
 
-把本机终端接到 octop-memory MCP 的**客户端侧**安装器与 hooks。服务端（Octop）只提供
+把本机终端接到 octop-memory MCP 的**客户端侧**安装器与 hooks。独立记忆服务提供
 MCP 接口和 token；这个包负责在 Claude Code / Codex / Cursor / Kiro / DSH 里自动召回、
 会话上报和 MCP 条目注册。
 
@@ -10,14 +10,14 @@ macOS / Linux：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
-  | sh -s -- --url https://<octop-host>/mcp/memory/ --token omcp_…
+  | sh -s -- --url https://<memory-host>/mcp/ --token omcp_…
 ```
 
 Windows PowerShell：
 
 ```powershell
 irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
-.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token omcp_…
+.\install.ps1 -Url https://<memory-host>/mcp/ -Token omcp_…
 ```
 
 脚本优先用 `uvx`/`pipx`，都没有时用 `python3 -m venv` 建临时环境安装 `octop-memory-harness`，
@@ -36,11 +36,11 @@ pip install octop-memory-harness
 
 ```bash
 octop-memory-harness install \
-  --url https://<octop-host>/mcp/memory/ \
-  --token omcp_…                     # 用户级 MCP token，在 Octop 的「MCP 接入」页创建
+  --url https://<memory-host>/mcp/ \
+  --token omcp_…                     # 为该接入端签发的空间 token
 ```
 
-- `--terminals claude-code,codex,cursor,kiro,dsh`：只装其中几个（默认交互选择，非交互模式读这个参数）
+- `--terminals codex`：选择一个终端。每个终端使用自己的 token，分别安装
 - `--project /path/to/repo`：只注册到这个项目（hook 脚本和含 token 的 `config.json` 仍留在用户目录）
 - 卸载：`octop-memory-harness uninstall [--terminals …] [--project …]`
 
@@ -83,14 +83,13 @@ DSH 原生插件 `dsh-octop-memory` 在 `package.json` 声明 `dsh.engines.dsh` 
 
 ```json
 {
-  "url": "https://<octop-host>/mcp/memory/",
+  "url": "https://<memory-host>/mcp/",
   "token": "omcp_…",
-  "tokenHeader": "Authorization",
-  "client": "claude-code"
+  "tokenHeader": "Authorization"
 }
 ```
 
-`client` 会以 `X-Octop-Client` 头发给服务端，用于 Dashboard 的「接入端」统计与按接入端禁用。
+服务端按签发的 token 记录用量。要禁用某个接入端，撤销它的 token，同一空间的其他终端可以继续使用。
 
 ## 验证
 
