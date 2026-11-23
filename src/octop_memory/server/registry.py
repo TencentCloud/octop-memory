@@ -46,6 +46,8 @@ class SpaceRegistry:
         )
 
     def _open(self, space: Space) -> Memory:
+        if space.backend == "postgres":
+            self._control.check_postgres_namespace(space.space_id)
         memory = Memory(
             namespace=space.space_id,
             backend=space.backend,

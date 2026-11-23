@@ -7,12 +7,20 @@ import json
 import secrets
 import sqlite3
 import threading
-from collections.abc import Iterable
-from contextlib import suppress
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from octop_memory.storage.backends.namespace import normalize_postgres_namespace
+
+ALL_SPACES = "*"
+
+
+class SpaceConflictError(ValueError):
+    """A space ID or its underlying storage namespace is already in use."""
 
 
 def _now() -> str:
@@ -82,6 +90,17 @@ class ControlStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[None]:
+        """Keep permission checks and writes atomic across CLI and API connections."""
+        with self._lock:
+            if self._conn.in_transaction:
+                yield
+                return
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                yield
 
     def _init_schema(self) -> None:
         with self._lock, self._conn:
@@ -155,7 +174,13 @@ class ControlStore:
         *,
         created_by: str = "local",
     ) -> Space:
-        with self._lock, self._conn:
+        if not space_id.strip() or space_id == ALL_SPACES:
+            raise ValueError("space ID must be nonempty and cannot be '*'")
+        with self.write_transaction():
+            if self.get_space(space_id) is not None:
+                raise SpaceConflictError(f"space {space_id!r} already exists")
+            if backend == "postgres":
+                self.check_postgres_namespace(space_id)
             self._conn.execute(
                 "INSERT INTO memory_spaces VALUES (?,?,?,?,?,?,NULL)",
                 (
@@ -167,7 +192,22 @@ class ControlStore:
                     _now(),
                 ),
             )
-        return self.get_space(space_id)  # type: ignore[return-value]
+            return self.get_space(space_id)  # type: ignore[return-value]
+
+    def check_postgres_namespace(self, space_id: str) -> None:
+        """Require unique PostgreSQL namespaces in this control store.
+
+        Different connection strings can point to the same database, so the
+        check covers every PostgreSQL space, independent of its DSN.
+        """
+        namespace = normalize_postgres_namespace(space_id)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT space_id FROM memory_spaces WHERE backend = 'postgres' AND space_id != ?",
+                (space_id,),
+            ).fetchall()
+        if any(normalize_postgres_namespace(row["space_id"]) == namespace for row in rows):
+            raise SpaceConflictError(f"PostgreSQL namespace {namespace!r} is already used by another space")
 
     def get_space(self, space_id: str) -> Space | None:
         with self._lock:
@@ -227,24 +267,30 @@ class ControlStore:
         last_used_at: str | None = None,
         revoked_at: str | None = None,
         octop_token_id: str = "",
+        extra_space_ids: Iterable[str] = (),
+        disabled_clients: Iterable[str] = (),
+        client_stats: dict[str, Any] | None = None,
     ) -> Token:
         token_id = "mt_" + secrets.token_hex(8)
-        with self._lock, self._conn:
+        scopes = sorted(set(scopes))
+        with self.write_transaction():
             self._conn.execute(
                 "INSERT INTO memory_space_tokens"
                 " (token_id, space_id, client_name, scopes, token_hash, token_hint,"
-                "  created_at, last_used_at, revoked_at, client_stats)"
-                " VALUES (?,?,?,?,?,?,?,?,?,'{}')",
+                "  created_at, last_used_at, revoked_at, client_stats, disabled_clients)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     token_id,
                     space_id,
                     client_name,
-                    json.dumps(sorted(set(scopes)), ensure_ascii=False),
+                    json.dumps(scopes, ensure_ascii=False),
                     token_hash,
                     token_hint,
                     created_at,
                     last_used_at,
                     revoked_at,
+                    json.dumps(client_stats or {}, ensure_ascii=False),
+                    json.dumps(sorted(set(disabled_clients)), ensure_ascii=False),
                 ),
             )
             if octop_token_id:
@@ -252,7 +298,10 @@ class ControlStore:
                     "INSERT OR REPLACE INTO memory_token_map VALUES (?,?,?,?)",
                     (octop_token_id, token_id, space_id, _now()),
                 )
-        return self.get_token(token_id)  # type: ignore[return-value]
+            for extra in dict.fromkeys(extra_space_ids):
+                if extra != space_id:
+                    self.add_grant(token_id, extra, scopes)
+            return self.get_token(token_id)  # type: ignore[return-value]
 
     def get_token(self, token_id: str) -> Token | None:
         with self._lock:
@@ -302,7 +351,7 @@ class ControlStore:
         return [(token.space_id, token.scopes)] + [(row["space_id"], json.loads(row["scopes"] or "[]")) for row in rows]
 
     def add_grant(self, token_id: str, space_id: str, scopes: Iterable[str]) -> None:
-        with self._lock, self._conn:
+        with self.write_transaction():
             self._conn.execute(
                 "INSERT OR REPLACE INTO memory_space_grants VALUES (?,?,?,?,?)",
                 (
@@ -315,20 +364,19 @@ class ControlStore:
             )
 
     def rotate(self, token_id: str) -> tuple[Token, str]:
-        token = self.get_token(token_id)
-        if token is None:
-            raise KeyError(token_id)
         plaintext = _new_token()
-        with self._lock, self._conn:
+        with self.write_transaction():
+            if self.get_token(token_id) is None:
+                raise KeyError(token_id)
             self._conn.execute(
                 "UPDATE memory_space_tokens SET token_hash=?, token_hint=?,"
                 " revoked_at=NULL, last_used_at=NULL WHERE token_id=?",
                 (_hash(plaintext), plaintext[-4:], token_id),
             )
-        return self.get_token(token_id), plaintext  # type: ignore[return-value]
+            return self.get_token(token_id), plaintext  # type: ignore[return-value]
 
     def revoke(self, token_id: str) -> bool:
-        with self._lock, self._conn:
+        with self.write_transaction():
             cur = self._conn.execute(
                 "UPDATE memory_space_tokens SET revoked_at=? WHERE token_id=? AND revoked_at IS NULL",
                 (_now(), token_id),
@@ -344,10 +392,10 @@ class ControlStore:
         disabled_clients: Iterable[str] | None = None,
         space_id: str | None = None,
     ) -> Token | None:
-        token = self.get_token(token_id)
-        if token is None:
-            return None
-        with self._lock, self._conn:
+        with self.write_transaction():
+            token = self.get_token(token_id)
+            if token is None:
+                return None
             if client_name is not None:
                 self._conn.execute(
                     "UPDATE memory_space_tokens SET client_name=? WHERE token_id=?",
@@ -363,13 +411,13 @@ class ControlStore:
                     "UPDATE memory_space_tokens SET disabled_clients=? WHERE token_id=?",
                     (json.dumps(sorted(set(disabled_clients))), token_id),
                 )
-            if space_id is not None:
+            if space_id is not None and space_id != token.space_id:
                 self._conn.execute(
                     "UPDATE memory_space_tokens SET space_id=? WHERE token_id=?",
                     (space_id, token_id),
                 )
                 self._conn.execute("DELETE FROM memory_space_grants WHERE token_id=?", (token_id,))
-        return self.get_token(token_id)
+            return self.get_token(token_id)
 
     def record_client(self, token_id: str, client: str) -> None:
         token = self.get_token(token_id)

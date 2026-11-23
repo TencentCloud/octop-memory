@@ -24,6 +24,13 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Standalone memory space isolation
+
+- Local follow-up to [Memory PR #59](https://github.com/TencentCloud/octop-memory/pull/59), based on `8e26f76`.
+- **⚠️ Recall/write path change** — The standalone server checks token scope changes in the control-store transaction, requires a registered space before MCP access, and rejects conflicting PostgreSQL namespaces before opening memory. Valid spaces keep their existing storage mapping.
+- **Validation** — `make all` passed against dedicated PostgreSQL 16 with 1,694 passed and 3 platform or optional-host skips. The [standalone server checks](TEST_MATRIX.md#validation-by-change-scope) exercised the HTTP API, CLI, and MCP with SQLite and PostgreSQL.
+- Audit grants issued by earlier builds before deploying against an existing control store.
+
 ### Raw image search
 
 - **Status** — Under review in [Memory PR #54](https://github.com/TencentCloud/octop-memory/pull/54) for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).

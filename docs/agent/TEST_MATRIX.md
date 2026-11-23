@@ -23,6 +23,7 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 | Change | Focused commands and assertions |
 |---|---|
 | Package / host naming | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`; `uv build`; in `plugins/openclaw/octopmemory/`, run `npm test`, `npm run typecheck`, `npm run build` |
+| Standalone space isolation | `uv run pytest tests/test_server.py -q -rs` with dedicated `TEST_POSTGRES_DSN`. Cover scoped and global admin sessions, token moves and imports, rejected partial grants, namespace conflicts via HTTP and CLI, and MCP save and recall isolation on SQLite and PostgreSQL. |
 | Documentation / import boundaries | `uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q` |
 | Host-file globs / Windows paths | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`; PureWindowsPath cases reject rooted/drive-relative/UNC paths on any platform; portable fixtures isolate home expansion through Path.parts |
 | Memory / Runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |

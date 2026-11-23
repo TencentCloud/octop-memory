@@ -31,8 +31,11 @@ GET  /healthz       liveness + space count
 ```
 
 - SQLite: one database file per space (`spaces/<space>.db`); the control store is separate.
-- PostgreSQL: the existing backend isolation is reused (`namespace` column on the
-  shared tables); `namespace == space_id`.
+- PostgreSQL reuses the `namespace` column on the shared tables. The backend
+  lowercases space IDs and replaces characters outside `a-z`, `0-9`, and `_` with
+  `_`. Choose IDs with distinct normalized namespaces across the control store,
+  even when using different DSNs. Registration rejects conflicts, and the
+  service refuses to open PostgreSQL spaces with conflicts already on record.
 - `backend` selects the default for new spaces; `spaces.<id>` overrides per space.
 
 ## CLI
@@ -53,6 +56,8 @@ Scopes: `read` (search/get/raws/candidates), `write` (capture/save),
 `review` (extract/promote/reject).
 
 ## MCP client
+
+MCP tokens can only access spaces registered in the control store.
 
 ```json
 {
@@ -80,14 +85,19 @@ GET  /api/admin/spaces
 POST /api/admin/spaces               {space_id, display_name, backend?}
 GET  /api/admin/spaces/{id}/tokens
 POST /api/admin/spaces/{id}/tokens   {client_name, scopes}
-PATCH /api/admin/tokens/{id}         {client_name?, scopes?}
+PATCH /api/admin/tokens/{id}         {client_name?, scopes?, disabled_clients?, space_id?}
 POST /api/admin/tokens/{id}/rotate
 DELETE /api/admin/tokens/{id}
 GET  /api/admin/spaces/{id}/clients
 ```
 
-A management UI never issues tokens itself: it exchanges a one-time code (created
-by the local admin CLI) for a short-lived session and calls this API.
+A management UI exchanges a one-time code from the local admin CLI for a
+short-lived session and calls this API to issue tokens. A space-scoped session
+lists and manages its own space. Creating spaces requires a session from
+`octop-memory auth code --all`. Re-registering a space the caller already
+manages returns HTTP 409. Token moves and imports require permission for every
+affected space. Managing a legacy token with multiple grants also requires
+permission for all of its spaces.
 
 ## Legacy Octop token migration
 

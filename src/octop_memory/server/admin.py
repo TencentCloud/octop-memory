@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from octop_memory.server.control import ControlStore, Session
+from octop_memory.server.control import ALL_SPACES, ControlStore, Session, SpaceConflictError, Token
 
 API_PREFIX = "/api/admin"
 
@@ -67,9 +66,17 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         return session
 
     def require_space(session: Session, space_id: str) -> None:
-        # ``*`` is an all-spaces management session (terminal access from Octop).
-        if session.space_id not in {"*", space_id}:
+        if session.space_id not in {ALL_SPACES, space_id}:
             raise HTTPException(status_code=403, detail="session is bound to another space")
+
+    def managed_token(token_id: str, session: Session) -> Token:
+        token = control.get_token(token_id)
+        if token is None:
+            raise HTTPException(status_code=404, detail="token not found")
+        # Mutating a legacy multi-space token affects every grant it carries.
+        for space_id, _ in control.allowed_spaces(token):
+            require_space(session, space_id)
+        return token
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -94,18 +101,23 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
 
     @app.get(f"{API_PREFIX}/spaces")
     def list_spaces(session: Session = Depends(require_session)) -> dict[str, Any]:
+        if session.space_id == ALL_SPACES:
+            spaces = control.list_spaces()
+        else:
+            space = control.get_space(session.space_id)
+            spaces = [space] if space is not None else []
         return {
-            "spaces": [
-                {"space_id": s.space_id, "display_name": s.display_name, "backend": s.backend}
-                for s in control.list_spaces()
-            ]
+            "spaces": [{"space_id": s.space_id, "display_name": s.display_name, "backend": s.backend} for s in spaces]
         }
 
     @app.post(f"{API_PREFIX}/spaces")
     def create_space(body: SpaceCreate, session: Session = Depends(require_session)) -> dict[str, Any]:
-        existing = control.get_space(body.space_id)
-        if existing is not None:
-            raise HTTPException(status_code=409, detail="space already exists")
+        if session.space_id != ALL_SPACES:
+            require_space(session, body.space_id)
+            # Octop checks that its bound space exists through this response.
+            if control.get_space(body.space_id) is not None:
+                raise HTTPException(status_code=409, detail="space already exists")
+        require_space(session, ALL_SPACES)
         backend = body.backend or "sqlite"
         if body.backend_config:
             config = dict(body.backend_config)
@@ -115,9 +127,14 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
             config = {"dsn": "postgresql://localhost/octop_memory"}
         else:
             raise HTTPException(status_code=400, detail="unknown backend")
-        space = control.create_space(
-            body.space_id, body.display_name or body.space_id, backend, config, created_by="admin"
-        )
+        try:
+            space = control.create_space(
+                body.space_id, body.display_name or body.space_id, backend, config, created_by="admin"
+            )
+        except SpaceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"space_id": space.space_id, "backend": space.backend}
 
     @app.get(f"{API_PREFIX}/spaces/{{space_id}}/tokens")
@@ -157,19 +174,19 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
 
     @app.patch(f"{API_PREFIX}/tokens/{{token_id}}")
     def patch_token(token_id: str, body: TokenUpdate, session: Session = Depends(require_session)) -> dict[str, Any]:
-        token = control.get_token(token_id)
-        if token is None:
-            raise HTTPException(status_code=404, detail="token not found")
-        require_space(session, token.space_id)
-        if body.space_id is not None and body.space_id != token.space_id and control.get_space(body.space_id) is None:
-            raise HTTPException(status_code=404, detail="target space not found")
-        updated = control.update_token(
-            token_id,
-            client_name=body.client_name,
-            scopes=body.scopes,
-            disabled_clients=body.disabled_clients,
-            space_id=body.space_id,
-        )
+        with control.write_transaction():
+            token = managed_token(token_id, session)
+            if body.space_id is not None and body.space_id != token.space_id:
+                require_space(session, body.space_id)
+                if control.get_space(body.space_id) is None:
+                    raise HTTPException(status_code=404, detail="target space not found")
+            updated = control.update_token(
+                token_id,
+                client_name=body.client_name,
+                scopes=body.scopes,
+                disabled_clients=body.disabled_clients,
+                space_id=body.space_id,
+            )
         if updated is None:
             raise HTTPException(status_code=404, detail="token not found")
         return _token_payload(updated)
@@ -180,45 +197,36 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
         body: TokenImportBody,
         session: Session = Depends(require_session),
     ) -> dict[str, Any]:
-        require_space(session, space_id)
-        if control.get_space(space_id) is None:
-            raise HTTPException(status_code=404, detail="space not found")
-        if control.token_by_hash(body.token_hash) is not None:
-            raise HTTPException(status_code=409, detail="token already migrated")
-        token = control.import_token(
-            space_id=space_id,
-            client_name=body.client_name,
-            scopes=body.scopes,
-            token_hash=body.token_hash,
-            token_hint=body.token_hint,
-            created_at=body.created_at,
-            last_used_at=body.last_used_at,
-            revoked_at=body.revoked_at,
-            octop_token_id=body.octop_token_id,
-        )
-        for extra in body.extra_space_ids:
-            if extra != space_id:
-                control.add_grant(token.token_id, extra, body.scopes)
-        if body.disabled_clients or body.client_stats:
-            control.update_token(
-                token.token_id,
-                disabled_clients=body.disabled_clients or None,
+        target_spaces = dict.fromkeys([space_id, *body.extra_space_ids])
+        for target in target_spaces:
+            require_space(session, target)
+        with control.write_transaction():
+            for target in target_spaces:
+                if control.get_space(target) is None:
+                    raise HTTPException(status_code=404, detail="space not found")
+            if control.token_by_hash(body.token_hash) is not None:
+                raise HTTPException(status_code=409, detail="token already migrated")
+            token = control.import_token(
+                space_id=space_id,
+                client_name=body.client_name,
+                scopes=body.scopes,
+                token_hash=body.token_hash,
+                token_hint=body.token_hint,
+                created_at=body.created_at,
+                last_used_at=body.last_used_at,
+                revoked_at=body.revoked_at,
+                octop_token_id=body.octop_token_id,
+                extra_space_ids=body.extra_space_ids,
+                disabled_clients=body.disabled_clients,
+                client_stats=body.client_stats,
             )
-            if body.client_stats:
-                with control._lock, control._conn:
-                    control._conn.execute(
-                        "UPDATE memory_space_tokens SET client_stats=? WHERE token_id=?",
-                        (json.dumps(body.client_stats, ensure_ascii=False), token.token_id),
-                    )
         return {"token_id": token.token_id, "space_id": space_id}
 
     @app.post(f"{API_PREFIX}/tokens/{{token_id}}/rotate")
     def rotate(token_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:
-        token = control.get_token(token_id)
-        if token is None:
-            raise HTTPException(status_code=404, detail="token not found")
-        require_space(session, token.space_id)
-        fresh, plaintext = control.rotate(token_id)
+        with control.write_transaction():
+            managed_token(token_id, session)
+            fresh, plaintext = control.rotate(token_id)
         return {
             "token_id": fresh.token_id,
             "client_name": fresh.client_name,
@@ -228,11 +236,9 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
 
     @app.delete(f"{API_PREFIX}/tokens/{{token_id}}")
     def revoke(token_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:
-        token = control.get_token(token_id)
-        if token is None:
-            raise HTTPException(status_code=404, detail="token not found")
-        require_space(session, token.space_id)
-        return {"revoked": control.revoke(token_id)}
+        with control.write_transaction():
+            managed_token(token_id, session)
+            return {"revoked": control.revoke(token_id)}
 
     @app.get(f"{API_PREFIX}/spaces/{{space_id}}/clients")
     def clients(space_id: str, session: Session = Depends(require_session)) -> dict[str, Any]:

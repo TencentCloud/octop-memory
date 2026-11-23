@@ -7,14 +7,19 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from click.testing import CliRunner
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from octop_memory.server import mcp as mcp_module
+from octop_memory.server.admin import build_admin_app
+from octop_memory.server.app import build_app
 from octop_memory.server.config import resolve_space
-from octop_memory.server.control import ControlStore
+from octop_memory.server.control import ALL_SPACES, ControlStore, SpaceConflictError
 from octop_memory.server.registry import SpaceRegistry
 
 
@@ -23,6 +28,139 @@ def control(tmp_path):
     store = ControlStore(tmp_path / "control.db")
     yield store
     store.close()
+
+
+def _admin_headers(client, control, space_id):
+    response = client.post("/api/admin/session/exchange", json={"code": control.create_admin_code(space_id)})
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['session_token']}"}
+
+
+def _mcp_call(client, token, name, **arguments):
+    response = client.post(
+        "/mcp/",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+    assert response.status_code == 200
+    data = next(line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: "))
+    result = json.loads(data)["result"]
+    assert not result.get("isError"), result
+    return result["structuredContent"]
+
+
+def test_space_admin_cannot_manage_other_spaces(control, tmp_path):
+    control.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    token, secret = control.create_token("alpha", "codex", ["read"])
+    with TestClient(build_admin_app(control)) as client:
+        scoped = _admin_headers(client, control, "alpha")
+        global_admin = _admin_headers(client, control, ALL_SPACES)
+        spaces_url = "/api/admin/spaces"
+        token_url = f"/api/admin/tokens/{token.token_id}"
+        beta = {"space_id": "beta", "backend_config": {"db_path": str(tmp_path / "b.db")}}
+
+        assert client.post(spaces_url, headers=scoped, json=beta).status_code == 403
+        assert control.get_space("beta") is None
+        assert client.post(spaces_url, headers=scoped, json={"space_id": "alpha"}).status_code == 409
+        assert client.post(spaces_url, headers=global_admin, json=beta).status_code == 200
+        assert client.post(spaces_url, headers=scoped, json=beta).status_code == 403
+        assert client.post(spaces_url, headers=global_admin, json={"space_id": ALL_SPACES}).status_code == 400
+        assert [s["space_id"] for s in client.get(spaces_url, headers=scoped).json()["spaces"]] == ["alpha"]
+        spaces = client.get(spaces_url, headers=global_admin).json()["spaces"]
+        assert {s["space_id"] for s in spaces} == {"alpha", "beta"}
+
+        changes = {"space_id": "beta", "client_name": "renamed"}
+        assert client.patch(token_url, headers=scoped, json=changes).status_code == 403
+        assert control.authenticate(secret) == token
+        assert client.patch(token_url, headers=scoped, json={"client_name": "renamed"}).status_code == 200
+        assert client.patch(token_url, headers=global_admin, json=changes).json()["space_id"] == "beta"
+        assert control.authenticate(secret).space_id == "beta"
+
+
+def test_import_requires_permission_for_every_grant(control, tmp_path):
+    for name in ("alpha", "beta"):
+        control.create_space(name, name, "sqlite", {"db_path": str(tmp_path / f"{name}.db")})
+    secret = "legacy-test-token"
+    body = {
+        "token_hash": hashlib.sha256(secret.encode()).hexdigest(),
+        "token_hint": secret[-4:],
+        "client_name": "legacy",
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "extra_space_ids": ["beta"],
+        "disabled_clients": ["disabled"],
+        "client_stats": {"codex": {"count": 1}},
+    }
+    url = "/api/admin/spaces/alpha/tokens/import"
+    with TestClient(build_admin_app(control)) as client:
+        scoped = _admin_headers(client, control, "alpha")
+        global_admin = _admin_headers(client, control, ALL_SPACES)
+        assert client.post(url, headers=scoped, json=body).status_code == 403
+        missing = {**body, "extra_space_ids": ["beta", "missing"]}
+        assert client.post(url, headers=global_admin, json=missing).status_code == 404
+        assert control.list_tokens("alpha") == []
+
+        assert client.post(url, headers=global_admin, json=body).status_code == 200
+        token = control.authenticate(secret)
+        assert {space for space, _ in control.allowed_spaces(token)} == {"alpha", "beta"}
+        assert token.disabled_clients == body["disabled_clients"]
+        assert token.client_stats == body["client_stats"]
+        token_url = f"/api/admin/tokens/{token.token_id}"
+        assert client.post(f"{token_url}/rotate", headers=scoped).status_code == 403
+        assert client.delete(token_url, headers=scoped).status_code == 403
+        assert client.patch(token_url, headers=scoped, json={"scopes": ["read"]}).status_code == 403
+        assert control.authenticate(secret) == token
+        assert client.post(f"{token_url}/rotate", headers=global_admin).status_code == 200
+        assert client.delete(token_url, headers=global_admin).json() == {"revoked": True}
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_registered_spaces_keep_separate_memory(backend, control, tmp_path, request, monkeypatch):
+    suffix = uuid4().hex[:10]
+    alpha = f"test-{suffix}-alpha"
+    beta = f"test-{suffix}-beta"
+    config = {"control": {"sqlite": {"db_path": str(control.path)}}}
+    config_path = tmp_path / "config.json"
+    dsn = request.getfixturevalue("postgres_dsn") if backend == "postgres" else None
+    with TestClient(build_app(config)) as client:
+        headers = _admin_headers(client, control, ALL_SPACES)
+        url = "/api/admin/spaces"
+        for space_id in (alpha, beta):
+            settings = {"dsn": dsn} if dsn else {"db_path": str(tmp_path / f"{space_id}.db")}
+            body = {"space_id": space_id, "backend": backend, "backend_config": settings}
+            assert client.post(url, headers=headers, json=body).status_code == 200
+
+        _, writer = control.create_token(alpha, "writer", ["read", "write"])
+        _, other_reader = control.create_token(beta, "reader", ["read"])
+        _mcp_call(client, writer, "memory_save", source="test", content="The launch project uses cobalt freighters.")
+        if dsn:
+            alternate_id = alpha.upper().replace("-", "_")
+            conflict = {"space_id": alternate_id, "backend": backend, "backend_config": {"dsn": dsn}}
+            assert client.post(url, headers=headers, json=conflict).status_code == 409
+
+            from octop_memory.adapters.cli import main
+
+            config_path.write_text(json.dumps(config))
+            monkeypatch.setattr("octop_memory._config_io.get_config_path", lambda: config_path)
+            result = CliRunner().invoke(main, ["space", "create", alternate_id, "--backend", "postgres"])
+            assert result.exit_code == 1
+            assert "PostgreSQL namespace" in result.output
+            assert control.get_space(alternate_id) is None
+        assert _mcp_call(client, writer, "memory_search", query="cobalt")["total"] == 1
+        assert _mcp_call(client, other_reader, "memory_search", query="cobalt")["total"] == 0
+
+
+def test_registry_rejects_preexisting_postgres_namespace_conflicts(control):
+    control.create_space("project-alpha", "Alpha", "postgres", {})
+    # Simulate an entry written by a previous version of the control store.
+    with control._lock, control._conn:
+        control._conn.execute(
+            "INSERT INTO memory_spaces VALUES (?, ?, 'postgres', '{}', 'legacy', '', NULL)",
+            ("PROJECT_ALPHA", "Legacy"),
+        )
+    registry = SpaceRegistry(control, {"server": {}})
+    for space_id in ("project-alpha", "PROJECT_ALPHA"):
+        with pytest.raises(SpaceConflictError, match="PostgreSQL namespace"):
+            registry.call(space_id, lambda memory: memory)
 
 
 def test_space_and_token_lifecycle(control, tmp_path):

@@ -65,6 +65,9 @@ class TokenAuthMiddleware:
                 await _json(send, 403, {"error": "token has no grant for this space"})
                 return
             space_id, scopes = match
+        if await asyncio.to_thread(self._control.get_space, space_id) is None:
+            await _json(send, 403, {"error": "token space is not registered"})
+            return
         client = headers.get("x-octop-client", "").strip()[:64] or token.client_name
         if client and client in token.disabled_clients:
             await _json(

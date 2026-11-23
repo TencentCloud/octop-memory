@@ -36,6 +36,7 @@ Paths in this table are relative to `src/octop_memory/`.
 | `application/config.py` | Runtime defaults and configuration conversion. OpenClaw expands profiles in TS; Python Runtime does not switch policy from a profile label |
 | `application/host_files.py`, `path_projection.py` | Host Markdown index and virtual paths |
 | `application/checkpoint_maintenance.py`, `storage/backends/sqlite_checkpoint*.py` | SQLite checkpoint content reuse, offline/online maintenance, reader compatibility |
+| `server/admin.py`, `server/control.py`, `server/registry.py` | Standalone space and token management. Token changes require authorization for every affected space. SQLite control-store transactions cover checks and writes, and PostgreSQL registrations share the backend's namespace normalization. |
 | `storage/backends/__init__.py`, `sqlite.py`, `postgres.py`, `postgres_pool.py` | `MemoryBackend` contract, SQL, FTS, transactions, namespaces, pools |
 | `storage/backends/postgres_legacy.py` | Pre-1.0 `harness_memory` schema: automatic copy on open, status, merge, purge marker (PG only) |
 | `storage/driver_errors.py` | Exception tuples allowed to degrade at each boundary |

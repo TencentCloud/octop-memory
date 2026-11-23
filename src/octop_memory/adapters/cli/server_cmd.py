@@ -7,7 +7,7 @@ import json
 import click
 
 from octop_memory.server.config import load_server_config
-from octop_memory.server.control import ControlStore
+from octop_memory.server.control import ALL_SPACES, ControlStore
 
 
 def _control() -> ControlStore:
@@ -27,13 +27,14 @@ def space_group() -> None:
 @click.option("--dsn", default=None, help="PostgreSQL DSN (backend=postgres).")
 def space_create(space_id: str, name: str, backend: str, dsn: str | None) -> None:
     control = _control()
-    if control.get_space(space_id):
-        raise click.ClickException(f"space {space_id!r} already exists")
     if backend == "postgres":
         cfg = {"dsn": dsn or "postgresql://localhost/octop_memory"}
     else:
         cfg = {"db_path": f"~/.octop-memory/spaces/{space_id}.db"}
-    control.create_space(space_id, name or space_id, backend, cfg, created_by="cli")
+    try:
+        control.create_space(space_id, name or space_id, backend, cfg, created_by="cli")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({"space_id": space_id, "backend": backend}))
 
 
@@ -127,10 +128,10 @@ def auth_group() -> None:
 def auth_code(space_id: str | None, all_spaces: bool, ttl: int) -> None:
     control = _control()
     if all_spaces:
-        space_id = "*"
+        space_id = ALL_SPACES
     if not space_id:
         raise click.ClickException("pass --space <id> or --all")
-    if space_id != "*" and control.get_space(space_id) is None:
+    if space_id != ALL_SPACES and control.get_space(space_id) is None:
         raise click.ClickException(f"space {space_id!r} not found")
     click.echo(json.dumps({"code": control.create_admin_code(space_id, ttl), "space_id": space_id}))
 
