@@ -226,3 +226,20 @@ def test_project_mcp_keeps_credentials_in_the_user_directory(codex_install, tmp_
     assert (codex / "octop-memory-projects").as_posix() in helper.replace("\\", "/")
     assert TOKEN not in text
     assert len(list((codex / "octop-memory-projects").glob("*/config.json"))) == 1
+
+
+def test_delegate_review_uses_explicit_octop_endpoint_and_resets_on_switch(codex_install, monkeypatch):
+    config = codex_install / "hooks/config.json"
+    monkeypatch.setenv("OCTOP_CODEX_EXTRACTION", "octop")
+    monkeypatch.setenv("OCTOP_CODEX_REVIEW_URL", "http://example.test/api/memory-mcp/codex-review")
+    with pytest.raises(ValueError, match="HTTPS"):
+        exec(installer._MERGE_PY, {})
+    url = "https://octop.example/api/memory-mcp/codex-review"
+    monkeypatch.setenv("OCTOP_CODEX_REVIEW_URL", url)
+    exec(installer._MERGE_PY, {})
+    data = json.loads(config.read_text())
+    assert data["codexExtraction"] == "octop" and data["codexReviewUrl"] == url
+    monkeypatch.setenv("OCTOP_CODEX_EXTRACTION", "codex")
+    exec(installer._MERGE_PY, {})
+    data = json.loads(config.read_text())
+    assert data["codexExtraction"] == "codex" and "codexReviewUrl" not in data

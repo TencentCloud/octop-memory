@@ -30,6 +30,8 @@ irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/har
 
 在「设置 → Hooks」或 CLI 的 `/hooks` 审核并信任新钩子，即可启用自动召回和适用的会话上报。召回结果中的 `path` 可直接传给 `memory_get`。
 
+选择 Octop 模型时，在「共享记忆」为本终端的读写 Token 保存模型。按页面提示设置 `OCTOP_CODEX_EXTRACTION=octop` 和 `OCTOP_CODEX_REVIEW_URL=<Octop 地址>/api/memory-mcp/codex-review` 后运行安装器。更换 Octop 模型后，下次复核使用新模型。切换到 Codex 会话模型时，按新的提示词重新安装。
+
 ## 其他终端
 
 你要做的是：把用户这台机器上的编码终端接到 octop-memory。**只需要两个输入**：

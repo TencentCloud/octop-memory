@@ -300,7 +300,7 @@ export async function capture(ctx) {
     // rewritten/compacted file falls back to a full (idempotent) re-send.
     if (start > 0 && start < buffer.length && buffer[start - 1] !== 0x0a) start = 0;
   }
-  if (start >= buffer.length) {
+  if (start >= buffer.length && !(config.codexExtraction === "octop" && ctx.turnId)) {
     log(`${event} session=${sessionId} no new bytes (offset=${start}) -> skip`);
     return { skipped: true };
   }
@@ -325,6 +325,7 @@ export async function capture(ctx) {
     "--prefix",
     sessionPrefix || "",
   ];
+  if (config.codexExtraction === "octop") args.push("--state-dir", paths.scratchDir);
   if (ctx.turnId) args.push("--turn-id", ctx.turnId);
   if (ctx.model) args.push("--model", ctx.model);
   try {

@@ -415,7 +415,13 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         return self._backend.get_candidate(candidate_id)
 
     def propose_quote(
-        self, event_id: str, quote: str, *, caller: str, kind: Literal["Preference", "Decision", "Fact"]
+        self,
+        event_id: str,
+        quote: str,
+        *,
+        caller: str,
+        kind: Literal["Preference", "Decision", "Fact"],
+        review_model: str | None = None,
     ) -> Candidate:
         """Queue an exact excerpt from the caller's stored user message for review."""
         event = self.get_raw(event_id)
@@ -447,7 +453,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             extractor_version="host-quote/v1",
             created_at=datetime.now(UTC),
             session_id=event.session_id,
-            payload={"source_model": event.payload.get("source_model")},
+            payload={
+                "source_model": review_model
+                if event.payload.get("octop_model_review")
+                else event.payload.get("source_model")
+            },
         )
         try:
             with self._backend.transaction():

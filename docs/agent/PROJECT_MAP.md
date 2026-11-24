@@ -63,6 +63,8 @@ The continued Stop sends a completion receipt through `memory_capture`. Overview
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.
 
+Codex delegated review (`OCTOP_CODEX_EXTRACTION=octop`) captures user evidence through the existing MCP and queues event IDs for the configured Octop review endpoint. The host uses `memory_codex_review_evidence` to verify the credential, space, turn and eligible source before calling its selected model. `memory_propose` persists the exact quote for human review.
+
 ### Public API responsibilities
 
 | Scenario | Entry and result |

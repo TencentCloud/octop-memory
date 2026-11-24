@@ -26,6 +26,8 @@ baselines for new work; consult their original PR/Git records.
 
 ### Codex memory setup prompt
 
+⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.
+
 - **⚠️ Recall/write path change** — The terminal installer registers native Codex `memory_get` and
   `memory_save`; recall now includes readable paths. The read-only mode exposes `memory_get` and skips
   transcript capture. Authentication uses the existing local credential file.

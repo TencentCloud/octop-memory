@@ -12,6 +12,8 @@ hook's ``config.json`` for endpoint and token and prints one JSON line on stdout
 from __future__ import annotations
 
 import argparse
+import hashlib
+import tempfile
 import json
 import re
 import os
@@ -112,6 +114,46 @@ def _post(url: str, headers: dict[str, str], body: dict, timeout: float = 60.0) 
     return status, parsed
 
 
+class _NoReviewRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _review_jobs(state_dir: Path, config: dict) -> Path:
+    identity = json.dumps([config.get("url"), config["token"], config["codexReviewUrl"]])
+    folder = state_dir / "codex-review-queue" / hashlib.sha256(identity.encode()).hexdigest()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder
+
+
+def _submit_reviews(folder: Path, config: dict) -> int:
+    # Stored jobs contain only server-issued event ids. The Octop endpoint reads
+    # the authorized evidence from Memory and keeps an idempotent turn receipt.
+    failed = 0
+    for job in sorted(folder.glob("*.json"))[:16]:
+        try:
+            request = urllib.request.Request(config["codexReviewUrl"], data=job.read_bytes(),
+                                             headers=_headers(config), method="POST")
+            with urllib.request.build_opener(_NoReviewRedirect()).open(request, timeout=40) as response:
+                result = json.load(response)
+            if not isinstance(result, dict) or (result.get("status") != "skipped" and not result.get("candidate_id")):
+                raise ValueError("invalid review receipt")
+            job.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            failed += 1
+    return failed
+
+
+def _queue_review(folder: Path, session: str, turn: str, event_ids: list[str]) -> None:
+    body = {"session_id": session, "turn_id": turn, "event_ids": list(dict.fromkeys(event_ids))[-4:]}
+    key = hashlib.sha256(json.dumps([session, turn]).encode()).hexdigest()
+    with tempfile.NamedTemporaryFile(mode="w", dir=folder, delete=False) as tmp:
+        json.dump(body, tmp)
+    os.replace(tmp.name, folder / f"{key}.json")
+
+
 def _split_complete_lines(raw: bytes, start: int) -> tuple[list[bytes], bytes]:
     """Return complete lines from ``start``; a half-written trailing line is left out."""
     tail = raw[start:]
@@ -158,11 +200,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--prefix", default="")
     parser.add_argument("--turn-id", default="")
+    parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--model", default="")
     args = parser.parse_args(argv)
 
     config = _config(args.config)
     client_extraction = args.source == "codex" and config.get("codexExtraction") == "codex"
+    delegated = args.source == "codex" and config.get("codexExtraction") == "octop"
+    queue = _review_jobs(args.state_dir or Path(args.config).parent, config) if delegated else None
     url = (config.get("url") or "").rstrip("/")
     if not url or not config.get("token"):
         print(json.dumps({"ok": False, "error": "hook config has no url/token"}))
@@ -178,6 +223,21 @@ def main(argv: list[str] | None = None) -> int:
     if start and raw[start - 1 : start] != b"\n":
         start = 0
 
+    if delegated and args.turn_id and start:
+        # A concurrent Stop worker may already have acknowledged bytes from this
+        # turn. Include its turn_context so transcript parsing and evidence replay
+        # remain stable across offsets and out-of-order stops.
+        pos = 0
+        for line in raw[:start].splitlines(keepends=True):
+            if b'turn_context' in line:
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    record = None
+                if isinstance(record, dict) and record.get("type") == "turn_context" and (record.get("payload") or {}).get("turn_id") == args.turn_id:
+                    start = pos
+                    break
+            pos += len(line)
     _lines, complete = _split_complete_lines(raw, start)
     text = complete.decode("utf-8", "replace")
 
@@ -230,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
             remaining[record] = remaining.get(record, 0) + 1
 
     if not entries:
+        if queue is not None:
+            _submit_reviews(queue, config)
         print(json.dumps({"ok": True, "status": 200, "imported": 0, "offset": start + len(complete)}))
         return 0
 
@@ -266,8 +328,9 @@ def main(argv: list[str] | None = None) -> int:
                         "events": events,
                         "source": args.source,
                         "session_id": session,
-                        "extract": not client_extraction,
-                        **({"evidence_for_turn": args.turn_id} if client_extraction and args.turn_id else {}),
+                        "extract": not (client_extraction or delegated),
+                        **({"octop_model_review": True} if delegated else {}),
+                        **({"evidence_for_turn": args.turn_id} if (client_extraction or delegated) and args.turn_id else {}),
                     },
                 },
             },
@@ -288,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 else (tool_error or f"HTTP {status}: unexpected tool result")
             ) or "capture failed"
         structured = body.get("result", {}).get("structuredContent") or {}
-        if ok and client_extraction:
+        if ok and (client_extraction or delegated):
             user_event_ids.extend(structured.get("user_event_ids", []))
         return ok, message, int(structured.get("accepted") or structured.get("imported") or 0)
 
@@ -330,6 +393,11 @@ def main(argv: list[str] | None = None) -> int:
         if _flush(final=True):
             committed = start + len(complete)
 
+    if ok and queue is not None:
+        if args.turn_id and user_event_ids:
+            _queue_review(queue, session, args.turn_id, user_event_ids)
+        if _submit_reviews(queue, config):
+            error = "Octop review pending; the next capture will retry"
     print(
         json.dumps(
             {

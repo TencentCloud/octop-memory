@@ -123,6 +123,8 @@ The Codex installer also exposes `memory_get` and `memory_save` through Streamab
 
 With a writable token, set `OCTOP_CODEX_EXTRACTION=codex` at install time to use the current Codex chat model. After capture, Stop requests one continuation for a turn with stored user evidence. The model may use `memory_propose` to submit one exact quote for human review. This uses Codex model quota. `memory_save` remains an explicit durable write. Choose `OCTOP_CODEX_EXTRACTION=server` to restore server extraction. Both the installer and server must support proposals.
 
+For a Codex terminal using an Octop-hosted model, choose a model on its read/write token in Shared Memory and run the generated setup prompt. The installer sets `OCTOP_CODEX_EXTRACTION=octop` and `OCTOP_CODEX_REVIEW_URL` to the Octop review endpoint (HTTPS or loopback). The Stop hook queues evidence IDs, the selected model reviews only this token’s captured user messages, and an exact quote enters human review. The provider credential stays in Octop.
+
 The Memory overview shows when Codex delivered a user message, when the review turn finished without a recorded proposal, or how many candidates it submitted. Older hooks can show delivery and submitted candidates. A confirmed zero-proposal result requires a completion receipt from the updated hook. Server extraction has its own timestamp and result.
 
 Host directories, the `config.json` shape, and the page that can be handed to an assistant are in [plugins/harness/README.md](../plugins/harness/README.md) and [AI-SETUP.md](../plugins/harness/AI-SETUP.md).

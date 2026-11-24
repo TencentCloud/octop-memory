@@ -737,12 +737,23 @@ def do_codex():
     existing = _load(scripts_dir / "config.json") or {}
     default = existing.get("codexExtraction", "server") if existing.get("url") == HOOK_URL else "server"
     mode = os.environ.get("OCTOP_CODEX_EXTRACTION", default)
-    if mode not in ("server", "codex"):
-        raise ValueError("OCTOP_CODEX_EXTRACTION must be server or codex")
+    if mode not in ("server", "codex", "octop"):
+        raise ValueError("OCTOP_CODEX_EXTRACTION must be server, codex or octop")
+    review_settings = {}
+    if mode == "octop" and not _codex_read_only():
+        from urllib.parse import urlsplit
+        url = os.environ.get("OCTOP_CODEX_REVIEW_URL") or (
+            existing.get("codexReviewUrl") if existing.get("url") == HOOK_URL and existing.get("token") == TOKEN else ""
+        )
+        parsed = urlsplit(url or "")
+        secure = parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"))
+        if not secure or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or parsed.path != "/api/memory-mcp/codex-review":
+            raise ValueError("OCTOP_CODEX_REVIEW_URL requires the Octop HTTPS (or loopback) codex-review endpoint")
+        review_settings = {"codexExtraction": "octop", "codexReviewUrl": url}
     client_extraction = mode == "codex" and not _codex_read_only()
     registered, server_name = _codex_update_mcp(updated, scripts_dir, client_extraction)
     _validate_codex_toml(registered)
-    _install_hooks(scripts_dir, "codex", {"codexExtraction": "codex", "mcpServer": server_name} if client_extraction else None)
+    _install_hooks(scripts_dir, "codex", {"codexExtraction": "codex", "mcpServer": server_name} if client_extraction else review_settings)
     if registered != text:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(registered, encoding="utf-8")

@@ -118,6 +118,8 @@ Codex 安装器还会通过 Streamable HTTP MCP 开放 `memory_get` 和 `memory_
 
 使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。模型可以用 `memory_propose` 引用一句用户原话，提交到待审核列表。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
 
+要让外部 Codex 使用 Octop 模型，在「共享记忆」为该读写 Token 选择模型，并执行生成的接入提示词。安装时设置 `OCTOP_CODEX_EXTRACTION=octop` 和 `OCTOP_CODEX_REVIEW_URL`（HTTPS 或本机回环地址）。Stop 在后台提交证据 ID，Octop 用所选模型复核该 Token 对应的用户原文，引用进入待审核列表。模型服务商密钥保存在 Octop。
+
 记忆概览显示最近一轮 Codex 复核的进度，包括原文已上报、复核续轮结束时未收到候选，以及实际提交的候选数量。旧版 hook 上报的原文和候选也能显示。确认一轮结束且没有候选，需要新版 hook 的完成回执。服务端提取保留独立的时间和结果。
 
 各终端目录、`config.json` 形状，以及可以整页交给助手的说明，见 [plugins/harness/README.md](../plugins/harness/README.md) 和 [AI-SETUP.md](../plugins/harness/AI-SETUP.md)。

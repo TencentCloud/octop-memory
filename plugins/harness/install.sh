@@ -61,7 +61,9 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
   exit 1
 fi
 
-VENV="${TMPDIR:-/tmp}/octop-memory-harness-venv"
+# Isolate the fallback install by repository and revision, just as uvx/pipx do.
+INSTALL_KEY=$("$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:20])' "$SPEC")
+VENV="${TMPDIR:-/tmp}/octop-memory-harness-venv-$INSTALL_KEY"
 if [ ! -x "$VENV/bin/octop-memory-harness" ]; then
   echo "· 创建临时虚拟环境: $VENV"
   "$PYTHON" -m venv "$VENV"

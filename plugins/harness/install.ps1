@@ -31,7 +31,9 @@ try {
     exit $LASTEXITCODE
   }
 
-  $venv = Join-Path $env:TEMP 'octop-memory-harness-venv'
+  $installKey = python -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:20])" $Spec
+  if ($LASTEXITCODE -ne 0) { throw "Unable to identify the requested installer revision" }
+  $venv = Join-Path $env:TEMP "octop-memory-harness-venv-$installKey"
   $exe = Join-Path $venv 'Scripts\octop-memory-harness.exe'
   if (-not (Test-Path $exe)) {
     Write-Host "· 创建临时虚拟环境: $venv"

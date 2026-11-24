@@ -774,3 +774,32 @@ def test_cleanup_legacy_group_schema_is_optional(tmp_path):
     assert store.legacy_group_schema() == {"table": False, "group_id_column": False}
     assert store.authenticate(plaintext).token_id == token.token_id
     store.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_delegated_codex_review_only_reads_the_credential_and_turns_evidence(backend, control, tmp_path, request):
+    dsn = request.getfixturevalue("postgres_dsn") if backend == "postgres" else None
+    space = f"review_{uuid4().hex[:12]}"
+    control.create_space(space, space, backend, {"dsn": dsn} if dsn else {"db_path": str(tmp_path / "memory.db")})
+    identity, writer = control.create_token(space, "codex", ["read", "write"])
+    _, other = control.create_token(space, "other", ["read", "write"])
+    phrase = "Use metric units for my workshop projects."
+    with TestClient(build_app({"control": {"sqlite": {"db_path": str(control.path)}}})) as client:
+        batch = dict(
+            source="codex",
+            session_id="codex:session",
+            evidence_for_turn="turn",
+            extract=False,
+            octop_model_review=True,
+            events=[{"event_type": "user_message", "content": phrase, "payload": {"turn_id": "turn"}}],
+        )
+        ids = _mcp_call(client, writer, "memory_capture", **batch)["user_event_ids"]
+        args = dict(session_id="codex:session", turn_id="turn", event_ids=ids)
+        evidence = _mcp_call(client, writer, "memory_codex_review_evidence", **args)
+        assert evidence == {
+            "token_id": identity.token_id,
+            "space_id": space,
+            "messages": [{"id": ids[0], "text": phrase}],
+        }
+        for token, turn in [(other, "turn"), (writer, "different")]:
+            assert _mcp_result(client, token, "memory_codex_review_evidence", **{**args, "turn_id": turn})["isError"]

@@ -105,6 +105,8 @@ try {
   log(`${event} read failed: ${exc} (${transcriptPath})`);
   process.exit(0);
 }
+const delegatedTurn = config.codexExtraction === "octop" && event === "Stop" &&
+  hookInput.stop_hook_active === false && typeof hookInput.turn_id === "string";
 const result = await capture({
   config,
   log,
@@ -114,7 +116,7 @@ const result = await capture({
   transcriptPath,
   buffer,
   sessionPrefix: "codex:",
-  turnId: reviewTurn ? hookInput.turn_id : "",
+  turnId: reviewTurn || delegatedTurn ? hookInput.turn_id : "",
   model: reviewTurn && typeof hookInput.model === "string" ? hookInput.model : "",
 });
 const ids = result.detail?.user_event_ids ?? [];

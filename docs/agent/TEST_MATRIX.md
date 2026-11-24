@@ -54,6 +54,8 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 | Recall evaluation | `uv run python -m evals.recall.run` |
 | Example / evaluation static checks | `uv run ruff check examples evals` and `uv run ruff format --check examples evals` |
 
+Codex delegated review is covered by `test_delegated_codex_review_only_reads_the_credential_and_turns_evidence` on SQLite and PostgreSQL and by `plugins/harness/tests/test_codex_install.py` for model mode switching.
+
 The manual-document session-context duplicate test runs real SQLite retrieval and the recall policy with a fixed elapsed
 clock and synchronous source calls. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
 

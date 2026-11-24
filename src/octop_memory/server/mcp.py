@@ -160,16 +160,48 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         event_id: str,
         quote: Annotated[str, Field(min_length=1, max_length=200)],
         kind: Literal["Preference", "Decision", "Fact"],
+        review_model: Annotated[str | None, Field(max_length=512)] = None,
     ) -> dict[str, Any]:
         """Propose an exact quote from your own captured user message for human review."""
         _require("write")
         caller = _current_token.get()
 
         def _run(memory: Memory) -> dict[str, Any]:
-            candidate = memory.propose_quote(event_id, quote, caller=caller, kind=kind)
+            candidate = memory.propose_quote(event_id, quote, caller=caller, kind=kind, review_model=review_model)
             return {"candidate_id": candidate.id, "status": candidate.status}
 
         return await asyncio.to_thread(registry.call, _current_space.get(), _run)
+
+    @mcp.tool()
+    async def memory_codex_review_evidence(
+        session_id: str,
+        turn_id: str,
+        event_ids: Annotated[list[str], Field(min_length=1, max_length=4)],
+    ) -> dict[str, Any]:
+        """Read this credential's eligible Codex messages for a delegated Octop review."""
+        _require("read")
+        _require("write")
+        caller, space = _current_token.get(), _current_space.get()
+
+        def read(memory: Memory) -> dict[str, Any]:
+            messages = []
+            for event_id in dict.fromkeys(event_ids):
+                event = memory.get_raw(event_id)
+                if (
+                    event is None
+                    or event.user != caller
+                    or event.host != "codex"
+                    or event.session_id != session_id
+                    or event.payload.get("turn_id") != turn_id
+                    or event.event_type != "user_message"
+                    or event.payload.get("content_redacted")
+                    or not event.payload.get("octop_model_review")
+                ):
+                    raise ValueError("Codex review evidence is unavailable")
+                messages.append({"id": event.id, "text": event.content[:8000]})
+            return {"token_id": caller, "space_id": space, "messages": messages}
+
+        return await asyncio.to_thread(registry.call, space, read)
 
     @mcp.tool()
     async def memory_capture(
@@ -183,6 +215,7 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         events: list[dict[str, Any]] | None = None,
         evidence_for_turn: str | None = None,
         completed_review_turn: str | None = None,
+        octop_model_review: bool = False,
     ) -> dict[str, Any]:
         """Write raw events (L0) parsed by a token_id; extraction stays opt-in."""
         _require("write")
@@ -247,14 +280,18 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                     "payload": {**(item.get("payload") or {}), **base_payload},
                 }
                 event["payload"].pop("codex_review", None)
+                event["payload"].pop("octop_model_review", None)
                 if (
                     source == "codex"
                     and not extract
                     and evidence_for_turn
                     and event["event_type"] == "user_message"
-                    and event["payload"].get("turn_id") == evidence_for_turn
+                    and (
+                        event["payload"].get("turn_id") == evidence_for_turn
+                        or (octop_model_review and event["payload"].get("turn_id"))
+                    )
                 ):
-                    event["payload"]["codex_review"] = True
+                    event["payload"]["octop_model_review" if octop_model_review else "codex_review"] = True
                 timestamp_iso = item.get("timestamp_iso")
                 if isinstance(timestamp_iso, str) and timestamp_iso:
                     event["timestamp_iso"] = timestamp_iso
@@ -276,6 +313,7 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                     if raw.event_type == "user_message"
                     and not raw.payload.get("content_redacted")
                     and raw.payload.get("turn_id") == evidence_for_turn
+                    and (not octop_model_review or raw.payload.get("octop_model_review"))
                     and _raw_key(raw) in seen
                 ]
             fresh = [event for event in normalized if event["payload"]["octop_event_key"] not in known]
