@@ -610,6 +610,86 @@ def test_registry_opens_postgres_with_space_namespace(monkeypatch):
     store.close()
 
 
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(backend, control, tmp_path, request):
+    dsn = request.getfixturevalue("postgres_dsn") if backend == "postgres" else None
+    space = f"proposal_{uuid4().hex[:10]}"
+    control.create_space(space, space, backend, {"dsn": dsn} if dsn else {"db_path": str(tmp_path / "quotes.db")})
+    _, writer = control.create_token(space, "codex", ["read", "write"])
+    _, other = control.create_token(space, "other", ["write"])
+    _, reader = control.create_token(space, "reader", ["read"])
+    phrase = "For this project I prefer plain text."
+    events = [
+        {"event_type": role, "content": phrase, "payload": {"turn_id": turn, "src_key": str(i)}}
+        for i, (role, turn) in enumerate(
+            [("user_message", "old"), ("user_message", "now"), ("assistant_message", "now")]
+        )
+    ]
+    with TestClient(build_app({"control": {"sqlite": {"db_path": str(control.path)}}})) as client:
+        capture = dict(session_id="codex:test", source="codex", events=events, extract=False, evidence_for_turn="now")
+        registry = client.app.state.registry
+
+        def review():
+            return registry.call(space, lambda memory: memory.get_last_codex_review())
+
+        assert review() is None
+        registry.call(space, lambda memory: memory.record_extract_run({"failure_reason": "no LLM backend configured"}))
+        first = _mcp_call(client, writer, "memory_capture", **capture)
+        [event] = first["user_event_ids"]
+        assert review()["status"] == "captured"
+        receipt = dict(session_id="codex:test", source="codex", extract=False, completed_review_turn="now")
+        for token, overrides in [
+            (other, {}),
+            (writer, {"session_id": "different"}),
+            (writer, {"completed_review_turn": "old"}),
+            (writer, {"dry_run": True}),
+        ]:
+            _mcp_call(client, token, "memory_capture", **{**receipt, **overrides})
+            assert review()["status"] == "captured"
+        assert _mcp_result(client, reader, "memory_capture", **receipt)["isError"]
+        assert _mcp_result(client, writer, "memory_capture", **receipt, content="mixed")["isError"]
+        for _ in range(2):
+            result = _mcp_call(client, writer, "memory_capture", **receipt)
+            assert result["accepted"] == 0 and not result["recorded"]
+            assert review()["status"] == "finished_without_proposal"
+        assert registry.call(space, lambda memory: memory.backend.count_stats()["raw_events"]) == 3
+        retry = _mcp_call(client, writer, "memory_capture", **capture)
+        assert retry["accepted"] == 0 and retry["user_event_ids"] == [event]
+        proposal = dict(event_id=event, quote=phrase, kind="Preference")
+        for token in [other, reader]:
+            assert _mcp_result(client, token, "memory_propose", **proposal)["isError"]
+        assert _mcp_result(client, writer, "memory_propose", **{**proposal, "quote": "Invented quote"})["isError"]
+        result = _mcp_call(client, writer, "memory_propose", **proposal)
+        assert result["status"] == "needs_review"
+        assert _mcp_call(client, writer, "memory_propose", **proposal) == result
+        assert review()["status"] == "proposed" and review()["proposals"] == 1
+        _mcp_call(
+            client,
+            writer,
+            "memory_capture",
+            **{
+                **capture,
+                # Older clients tagged the source model before the explicit review marker existed.
+                "evidence_for_turn": None,
+                "events": [
+                    {
+                        "event_type": "user_message",
+                        "content": "Another turn",
+                        "payload": {"turn_id": "later", "source_model": "example", "src_key": "later"},
+                    }
+                ],
+            },
+        )
+        _mcp_call(client, writer, "memory_capture", **receipt)
+        assert review()["status"] == "captured" and review()["model"] == "example" and not review()["proposals"]
+        assert (
+            registry.call(space, lambda memory: memory.get_last_extract_run())["failure_reason"]
+            == "no LLM backend configured"
+        )
+        assert _mcp_call(client, reader, "memory_candidates", status="needs_review")["count"] == 1
+        assert _mcp_call(client, reader, "memory_search", query="plain text")["hits"] == []
+
+
 def test_tool_scope_is_enforced(tmp_path):
     store = ControlStore(tmp_path / "control.db")
     store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})

@@ -90,19 +90,19 @@ Hermes 适配要求具备 `MemoryProvider` 接口的 v0.10.0+。安装说明不�
 
 `plugins/harness` 为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。分发包名是 `octop-memory-harness`。每个终端安装使用自己的空间 token 调用记忆 MCP，不打开本地记忆库，也不把凭据写进仓库。
 
-安装器在 `develop` 分支。`main` 分支还没有这些脚本，所以下面的一行安装地址使用 `develop`。
+一行安装命令使用已发布的 `main` 分支。发布前可以用本地 checkout 验证安装器的改动。
 
 macOS / Linux：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
   | sh -s -- --url https://<memory-host>/mcp/ --token "$OCTOP_TOKEN"
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
 .\install.ps1 -Url https://<memory-host>/mcp/ -Token $env:OCTOP_TOKEN
 ```
 
@@ -112,7 +112,13 @@ irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/
 - `--project <dir>` 只注册一个仓库。hook 脚本和含 token 的文件仍留在用户目录。
 - `octop-memory-harness uninstall` 卸掉本安装器写入的注册和文件。
 
-Stop hook 把新增的 transcript 字节交给本地解析器，再调用 `memory_capture(events=...)`。服务端不解析 transcript。字节游标只在上报成功后前进。DSH 加载原生插件 `dsh-octop-memory`（`dsh.engines.dsh` 至少 `0.2.0`），不走 hook 桥接。Codex 需要一次 hook 信任，安装后应重开终端。
+Stop hook 把新增的 transcript 字节交给本地解析器，再调用 `memory_capture(events=...)`。服务端不解析 transcript。字节游标只在上报成功后前进。DSH 加载原生插件 `dsh-octop-memory`（`dsh.engines.dsh` 至少 `0.2.0`），不走 hook 桥接。
+
+Codex 安装器还会通过 Streamable HTTP MCP 开放 `memory_get` 和 `memory_save`。自动召回的结果含有可交给 `memory_get` 的 `path`。HTTP 请求头由本机辅助命令从 hook 配置读取 token。使用只读凭据时设置 `OCTOP_CODEX_READ_ONLY=1`，仅开放 `memory_get` 并停用会话上报。安装后在设置中重启 MCP 连接，用 `/mcp` 确认工具，并在设置或 CLI 的 `/hooks` 中审核钩子。
+
+使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。模型可以用 `memory_propose` 引用一句用户原话，提交到待审核列表。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
+
+记忆概览显示最近一轮 Codex 复核的进度，包括原文已上报、复核续轮结束时未收到候选，以及实际提交的候选数量。旧版 hook 上报的原文和候选也能显示。确认一轮结束且没有候选，需要新版 hook 的完成回执。服务端提取保留独立的时间和结果。
 
 各终端目录、`config.json` 形状，以及可以整页交给助手的说明，见 [plugins/harness/README.md](../plugins/harness/README.md) 和 [AI-SETUP.md](../plugins/harness/AI-SETUP.md)。
 

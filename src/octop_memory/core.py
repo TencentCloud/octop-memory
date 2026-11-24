@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from octop_memory.storage.backends import _UNSET, MemoryBackend, SearchIndexMaintenance, _Unset
+from octop_memory.storage.backends import _UNSET, CodexReviewBackend, MemoryBackend, SearchIndexMaintenance, _Unset
 from octop_memory.storage.driver_errors import DRIVER_ERRORS, VECTOR_ERRORS
 from octop_memory.types import (
     ActiveEntity,
@@ -413,6 +413,51 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         return self._backend.get_candidate(candidate_id)
+
+    def propose_quote(
+        self, event_id: str, quote: str, *, caller: str, kind: Literal["Preference", "Decision", "Fact"]
+    ) -> Candidate:
+        """Queue an exact excerpt from the caller's stored user message for review."""
+        event = self.get_raw(event_id)
+        if not caller or event is None or event.user != caller or event.event_type != "user_message":
+            raise ValueError("user evidence is unavailable")
+        quote = quote.strip()
+        if event.payload.get("content_redacted") or not 1 <= len(quote) <= 200 or quote not in event.content:
+            raise ValueError("quote must match the stored user evidence")
+        candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"octop:proposal:{event.id}:{quote}"))
+        existing = self.get_candidate(candidate_id)
+        if existing:
+            return existing
+        proposal = Candidate(
+            id=candidate_id,
+            raw_event_ids=[event.id],
+            candidate_type=kind,
+            status="needs_review",
+            title=quote[:80],
+            assertion=quote,
+            verbatim_quote=quote,
+            quote_event_id=event.id,
+            subject_name="User" if kind == "Preference" else quote[:80],
+            subject_entity_type="User" if kind == "Preference" else kind,
+            target_entity_id=None,
+            confidence="medium",
+            importance="medium",
+            recommended_action="needs_review",
+            promotion_reason="Proposed by the conversation model for human review",
+            extractor_version="host-quote/v1",
+            created_at=datetime.now(UTC),
+            session_id=event.session_id,
+            payload={"source_model": event.payload.get("source_model")},
+        )
+        try:
+            with self._backend.transaction():
+                self.add_candidate(proposal)
+        except DRIVER_ERRORS:
+            # Another server process may have committed the same quote first.
+            if existing := self.get_candidate(candidate_id):
+                return existing
+            raise
+        return proposal
 
     def list_candidates(
         self,
@@ -1113,6 +1158,33 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def set_meta(self, key: str, value: str) -> None:
         self._backend.set_meta(key, value)
+
+    def get_last_codex_review(self) -> dict[str, Any] | None:
+        """Project the last eligible turn, distinguishing delivery, completion and submission."""
+        if not isinstance(self._backend, CodexReviewBackend):
+            return None
+        evidence = self._backend.latest_codex_review_evidence()
+        if evidence is None:
+            return None
+        status = "captured"
+        if evidence.proposals:
+            status = "proposed"
+        elif self.get_meta("codex_review_finished") == evidence.cursor:
+            status = "finished_without_proposal"
+        return {
+            "timestamp": evidence.timestamp.isoformat(),
+            "model": evidence.model,
+            "proposals": evidence.proposals,
+            "status": status,
+        }
+
+    def finish_codex_review(self, *, session_id: str, turn_id: str, caller: str) -> None:
+        """A repeated or late Stop receipt must never mark a different turn complete."""
+        if not caller or not isinstance(self._backend, CodexReviewBackend):
+            return
+        evidence = self._backend.latest_codex_review_evidence()
+        if evidence and (evidence.session_id, evidence.turn_id, evidence.caller) == (session_id, turn_id, caller):
+            self._backend.advance_codex_review_cursor(evidence.cursor)
 
     def get_last_extract_run(self) -> dict[str, Any] | None:
         """Latest extract pass summary (meta, not journal). ``None`` if never run."""

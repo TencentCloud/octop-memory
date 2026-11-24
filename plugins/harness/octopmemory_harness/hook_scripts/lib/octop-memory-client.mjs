@@ -72,6 +72,9 @@ export function loadConfig() {
     endpoint: connection.url || "",
     token: connection.token || "",
     tokenHeader: connection.tokenHeader || "Authorization",
+    readOnly: connection.readOnly === true,
+    codexExtraction: connection.codexExtraction,
+    mcpServer: connection.mcpServer,
   };
 }
 
@@ -197,13 +200,14 @@ export function decompressZstdContainer(buffer) {
 }
 
 /** Call one memory MCP tool; returns ``{ok, status, detail, raw}`` (never throws). */
-export async function callTool(config, name, args) {
-  return rpc(config, "tools/call", { name, arguments: args });
+export async function callTool(config, name, args, signal) {
+  return rpc(config, "tools/call", { name, arguments: args }, signal);
 }
 
 /** One raw JSON-RPC call; returns ``{ok, status, detail, error, raw}`` (never throws). */
-export async function rpc(config, method, params) {
+export async function rpc(config, method, params, signal) {
   const response = await fetch(config.endpoint, {
+    signal,
     method: "POST",
     headers: authHeaders(config),
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -321,6 +325,8 @@ export async function capture(ctx) {
     "--prefix",
     sessionPrefix || "",
   ];
+  if (ctx.turnId) args.push("--turn-id", ctx.turnId);
+  if (ctx.model) args.push("--model", ctx.model);
   try {
     const child = spawnSync(python, args, { encoding: "utf8", timeout: 180000 });
     const last = (child.stdout || "").trim().split("\n").pop() || "{}";

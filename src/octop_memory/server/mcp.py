@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from contextlib import suppress
 from contextvars import ContextVar
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -156,6 +156,22 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         return await asyncio.to_thread(registry.call, space, _run)
 
     @mcp.tool()
+    async def memory_propose(
+        event_id: str,
+        quote: Annotated[str, Field(min_length=1, max_length=200)],
+        kind: Literal["Preference", "Decision", "Fact"],
+    ) -> dict[str, Any]:
+        """Propose an exact quote from your own captured user message for human review."""
+        _require("write")
+        caller = _current_token.get()
+
+        def _run(memory: Memory) -> dict[str, Any]:
+            candidate = memory.propose_quote(event_id, quote, caller=caller, kind=kind)
+            return {"candidate_id": candidate.id, "status": candidate.status}
+
+        return await asyncio.to_thread(registry.call, _current_space.get(), _run)
+
+    @mcp.tool()
     async def memory_capture(
         content: str = "",
         source: str = "",
@@ -165,11 +181,35 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         dry_run: bool = False,
         extract: bool = True,
         events: list[dict[str, Any]] | None = None,
+        evidence_for_turn: str | None = None,
+        completed_review_turn: str | None = None,
     ) -> dict[str, Any]:
         """Write raw events (L0) parsed by a token_id; extraction stays opt-in."""
         _require("write")
         space = _current_space.get()
         token_id = _current_token.get()
+        if completed_review_turn is not None:
+            if (
+                source != "codex"
+                or not session_id
+                or not completed_review_turn.strip()
+                or extract
+                or content
+                or assistant
+                or events is not None
+                or evidence_for_turn
+                or thread_id
+            ):
+                raise ValueError("A Codex review receipt requires only a session, completed turn and extract=false")
+            if not dry_run:
+                await asyncio.to_thread(
+                    registry.call,
+                    space,
+                    lambda memory: memory.finish_codex_review(
+                        session_id=session_id, turn_id=completed_review_turn, caller=token_id
+                    ),
+                )
+            return {"recorded": False, "accepted": 0, "dry_run": dry_run, "session_id": session_id}
         effective_session = session_id or f"ext:{source or token_id}:{token_id}"
         base_payload = {"source": source, "source_host": _current_client_name.get() or token_id, "caller": token_id}
         payload: list[dict[str, Any]] = []
@@ -206,6 +246,15 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                     "content": body,
                     "payload": {**(item.get("payload") or {}), **base_payload},
                 }
+                event["payload"].pop("codex_review", None)
+                if (
+                    source == "codex"
+                    and not extract
+                    and evidence_for_turn
+                    and event["event_type"] == "user_message"
+                    and event["payload"].get("turn_id") == evidence_for_turn
+                ):
+                    event["payload"]["codex_review"] = True
                 timestamp_iso = item.get("timestamp_iso")
                 if isinstance(timestamp_iso, str) and timestamp_iso:
                     event["timestamp_iso"] = timestamp_iso
@@ -217,7 +266,18 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                 normalized.append(event)
             if not normalized:
                 raise ValueError("events is empty after dropping blank entries")
-            known = {_raw_key(raw) for raw in memory.list_raw(session_id=effective_session, user=token_id, limit=5000)}
+            previous = memory.list_raw(session_id=effective_session, user=token_id, limit=5000)
+            known = {_raw_key(raw) for raw in previous}
+            evidence = {}
+            if evidence_for_turn:
+                evidence["user_event_ids"] = [
+                    raw.id
+                    for raw in reversed(previous)
+                    if raw.event_type == "user_message"
+                    and not raw.payload.get("content_redacted")
+                    and raw.payload.get("turn_id") == evidence_for_turn
+                    and _raw_key(raw) in seen
+                ]
             fresh = [event for event in normalized if event["payload"]["octop_event_key"] not in known]
             duplicates = len(normalized) - len(fresh)
             if not fresh:
@@ -226,6 +286,7 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                     "recorded": False,
                     "session_id": effective_session,
                     "accepted": 0,
+                    **evidence,
                     "skipped_duplicates": duplicates,
                     "note": "all events already recorded for this session; retry is idempotent",
                 }
@@ -236,17 +297,21 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                     "user": token_id,
                     "host": source or "mcp",
                     "events": fresh,
+                    "evidence_for_turn": evidence_for_turn,
                 }
             )
             if extract:
                 with suppress(Exception):
                     runtime.extract({"session_id": effective_session, "promote": False})
             accepted = int(result.get("accepted") or 0)
+            if evidence_for_turn:
+                evidence["user_event_ids"].extend(result.get("user_event_ids", []))
             return {
                 "marker": "[octop memory capture]",
                 "recorded": accepted > 0,
                 "session_id": effective_session,
                 "accepted": accepted,
+                **evidence,
                 "skipped_duplicates": duplicates,
                 "skipped": {
                     key.removeprefix("skipped_"): value

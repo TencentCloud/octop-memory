@@ -48,6 +48,17 @@ Paths in this table are relative to `src/octop_memory/`.
 | `operations/retention.py` | Historical runtime-error governance, semantic manual-document reconciliation, audit metadata |
 
 Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
+
+The Codex installer registers a Streamable HTTP MCP server in `config.toml`. Its header helper reads the same
+local credential file as the hooks. Recall includes virtual paths for `memory_get`. Read-only setup exposes
+only `memory_get` and skips transcript capture. With `OCTOP_CODEX_EXTRACTION=codex`, writable Codex captures
+pass `extract=false` and request evidenced user event IDs for the active turn. Stop can continue that turn once.
+The authenticated `memory_propose` tool checks the caller and matches the quote against the stored user event
+before adding an idempotent `needs_review` candidate. The captured model slug is client-reported provenance.
+The review prompt asks the model to end with an empty final response for both submissions and skips.
+The continued Stop sends a completion receipt through `memory_capture`. Overview reads
+`last_codex_review` from eligible user events, the matching receipt and submitted quote candidates.
+`last_extract_run` continues to describe server extraction.
 `tests/` contains behavior tests, `evals/recall/` synthetic evaluation, and `examples/basic_usage.py` a public-API
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.

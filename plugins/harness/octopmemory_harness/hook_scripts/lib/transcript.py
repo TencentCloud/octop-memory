@@ -640,6 +640,7 @@ def parse_codex_text(text: str) -> ParsedSession:
     events: list[TranscriptEvent] = []
     skipped_own = 0
     seen_messages: set[str] = set()
+    turn_id = None
     for index, record in enumerate(_iter_records(text)):
         if not isinstance(record, dict):
             continue
@@ -648,11 +649,17 @@ def parse_codex_text(text: str) -> ParsedSession:
             continue
         record_type = str(record.get("type") or "")
         payload_type = str(payload.get("type") or "")
+        if record_type == "turn_context" or (record_type == "event_msg" and payload_type == "task_started"):
+            current = payload.get("turn_id")
+            if current != turn_id:
+                seen_messages.clear()
+            turn_id = current
+            continue
         record_id = str(payload.get("id") or record.get("id") or f"line{index}")
         key = f"{record_id}:0"
         event_type = ""
         content = ""
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any] = {"turn_id": turn_id}
 
         if record_type == "event_msg":
             if payload_type == "user_message":

@@ -1,4 +1,36 @@
-# 给 AI 的接入说明（把这一页 + token 交给 AI 即可）
+# 给编码助手的接入说明
+
+## Codex 一次性接入提示词
+
+把下面的提示词发给本机 Codex，并填上 Octop Memory 的 MCP 地址。凭据通过本机交给安装器。
+
+> 请在本机为 Codex 接入 Octop Memory。MCP 地址是 `<MCP 地址>`。请使用 TencentCloud/octop-memory 仓库 `main` 分支的 `plugins/harness/install.sh`，Windows 用 `plugins/harness/install.ps1`。将该地址传给 `--url` 或 `-Url`，并通过 `--terminals codex` 或 `-Terminals codex` 选择 Codex。
+> 优先使用为本次接入提供的 `OCTOP_MEMORY_TOKEN`。在我确认记忆空间一致时，可以复用本机 Codex 的接入凭据。需要新凭据时，请让我在本机终端隐藏输入一次。
+> 使用读写 Token 时，这次用当前 Codex 模型提取记忆，安装前设置 `OCTOP_CODEX_EXTRACTION=codex`。如果我选择服务端提取，设置 `OCTOP_CODEX_EXTRACTION=server`。只读接入设置 `OCTOP_CODEX_READ_ONLY=1`。
+> 装完就在发起安装的当前 Codex 对话中检查本次注册的 MCP 服务（包括按需加载的工具）。只读接入检查 `memory_get`，读写接入也检查 `memory_save`；选择当前 Codex 模型提取时，还要找到可调用的 `memory_propose`。只有本对话发现工具后才报告已加载。验证只需发现工具，避免为验证新增记忆或候选。
+> 如果安装成功但本对话找不到预期工具，报告“已配置，当前对话待重载”。在桌面 Codex 按 ⌘K（Windows/Linux 按 Ctrl+K），搜索 MCP，打开 MCP 设置，点击“服务器”标题旁的重启图标。回到这段对话再次检查。若使用 CLI，在保存配置后退出并恢复原会话，再检查工具。若重载后仍不可用，报告实际错误。单独检查本机配置、服务端工具列表或新进程无法证明原对话已加载工具。
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
+  | sh -s -- --url "$OCTOP_URL" --terminals codex
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url $env:OCTOP_URL -Terminals codex
+```
+
+把凭据通过 `OCTOP_MEMORY_TOKEN` 传给安装器。使用只读凭据时，同时设置 `OCTOP_CODEX_READ_ONLY=1`，安装器开放 `memory_get`，并停用会话上报。使用读写凭据时，Codex 也会加载 `memory_save`。
+
+使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。模型可以用 `memory_propose` 引用一句用户原话，提交到待审核列表。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
+
+在「设置 → Hooks」或 CLI 的 `/hooks` 审核并信任新钩子，即可启用自动召回和适用的会话上报。召回结果中的 `path` 可直接传给 `memory_get`。
+
+## 其他终端
 
 你要做的是：把用户这台机器上的编码终端接到 octop-memory。**只需要两个输入**：
 
@@ -15,7 +47,7 @@
 ## macOS / Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
   | sh -s -- --url "$OCTOP_URL" --token "$OCTOP_TOKEN"
 ```
 
@@ -29,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/p
 ## Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
 .\install.ps1 -Url $env:OCTOP_URL -Token $env:OCTOP_TOKEN
 ```
 

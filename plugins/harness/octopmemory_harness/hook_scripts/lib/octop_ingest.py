@@ -157,9 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--path", required=True)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--prefix", default="")
+    parser.add_argument("--turn-id", default="")
+    parser.add_argument("--model", default="")
     args = parser.parse_args(argv)
 
     config = _config(args.config)
+    client_extraction = args.source == "codex" and config.get("codexExtraction") == "codex"
     url = (config.get("url") or "").rstrip("/")
     if not url or not config.get("token"):
         print(json.dumps({"ok": False, "error": "hook config has no url/token"}))
@@ -203,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         if not content or any(marker in content for marker in SKIP_MARKERS):
             continue
         payload = dict(event.payload or {})
+        if client_extraction and args.model and payload.get("turn_id") == args.turn_id:
+            payload["source_model"] = args.model
         record: int | None = None
         match = _LINE_KEY.match(str(payload.get("src_key") or ""))
         if match:
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             remaining[record] = remaining.get(record, 0) + 1
 
     if not entries:
-        print(json.dumps({"ok": True, "status": 200, "imported": 0, "offset": len(raw)}))
+        print(json.dumps({"ok": True, "status": 200, "imported": 0, "offset": start + len(complete)}))
         return 0
 
     batch_limit = _batch_size()
@@ -245,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
                 safe_end = start + spans[next_record][1]
             next_record += 1
 
+    user_event_ids: list[str] = []
+
     def _send(events: list[dict]) -> tuple[bool, str, int]:
         status, body = _post(
             f"{url}/",
@@ -259,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
                         "events": events,
                         "source": args.source,
                         "session_id": session,
-                        "extract": True,
+                        "extract": not client_extraction,
+                        **({"evidence_for_turn": args.turn_id} if client_extraction and args.turn_id else {}),
                     },
                 },
             },
@@ -280,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
                 else (tool_error or f"HTTP {status}: unexpected tool result")
             ) or "capture failed"
         structured = body.get("result", {}).get("structuredContent") or {}
+        if ok and client_extraction:
+            user_event_ids.extend(structured.get("user_event_ids", []))
         return ok, message, int(structured.get("accepted") or structured.get("imported") or 0)
 
     imported = 0
@@ -329,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
                 "batches": batches,
                 "offset": committed,
                 "error": error,
+                "user_event_ids": user_event_ids[-4:],
             }
         )
     )

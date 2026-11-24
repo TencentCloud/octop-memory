@@ -43,17 +43,15 @@ if [ -z "$TOKEN" ]; then echo "缺少 --token（或用 OCTOP_MEMORY_TOKEN）" >&
 
 run_installer() {
   OCTOP_MEMORY_TOKEN="$TOKEN" "$@" install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+    --url "$URL" --terminals "$TERMINALS" --project "$PROJECT"
 }
 
 if command -v uvx >/dev/null 2>&1; then
-  OCTOP_MEMORY_TOKEN="$TOKEN" uvx --from "$SPEC" octop-memory-harness install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+  run_installer uvx --from "$SPEC" octop-memory-harness
   exit 0
 fi
 if command -v pipx >/dev/null 2>&1; then
-  OCTOP_MEMORY_TOKEN="$TOKEN" pipx run --spec "$SPEC" octop-memory-harness install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+  run_installer pipx run --spec "$SPEC" octop-memory-harness
   exit 0
 fi
 
@@ -70,5 +68,4 @@ if [ ! -x "$VENV/bin/octop-memory-harness" ]; then
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   "$VENV/bin/python" -m pip install --quiet "git+${REPO}@${REF}#subdirectory=plugins/harness"
 fi
-OCTOP_MEMORY_TOKEN="$TOKEN" "$VENV/bin/octop-memory-harness" install \
-  --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+run_installer "$VENV/bin/octop-memory-harness"

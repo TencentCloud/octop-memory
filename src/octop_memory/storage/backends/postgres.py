@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from octop_memory.domain.datetime import as_utc
 from octop_memory.domain.raw_search import IMAGE_BLOCK_TYPES, IMAGE_PAYLOAD_FIELDS, IMAGE_PLACEHOLDERS
-from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
+from octop_memory.storage.backends import _UNSET, CodexReviewEvidence, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.namespace import normalize_namespace
 from octop_memory.storage.backends.postgres_pool import acquire_pool
 from octop_memory.types import (
@@ -2070,6 +2070,44 @@ class PostgresMemoryBackend:
             )
             row = cur.fetchone()
         return self._row_to_entity_page(row) if row else None
+
+    def latest_codex_review_evidence(self) -> CodexReviewEvidence | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                WITH latest AS (
+                    SELECT namespace, id AS event_id, timestamp, session_id, "user" AS caller,
+                           payload->>'turn_id' AS turn_id, payload->>'source_model' AS model
+                    FROM raw_events
+                    WHERE namespace = %s AND host = 'codex' AND event_type = 'user_message'
+                      AND session_id IS NOT NULL AND "user" IS NOT NULL AND payload->>'turn_id' != ''
+                      AND (payload->>'codex_review' = 'true' OR payload->>'source_model' != '')
+                      AND payload->>'content_redacted' IS DISTINCT FROM 'true'
+                    ORDER BY timestamp DESC, id DESC LIMIT 1
+                )
+                SELECT event_id, timestamp, session_id, caller, turn_id, model, (
+                    SELECT count(*) FROM candidates c JOIN raw_events r
+                      ON r.namespace = c.namespace AND r.id = c.quote_event_id
+                    WHERE c.namespace = latest.namespace AND c.extractor_version = 'host-quote/v1'
+                      AND c.session_id = latest.session_id AND r.session_id = latest.session_id
+                      AND r."user" = latest.caller AND r.host = 'codex' AND r.payload->>'turn_id' = latest.turn_id
+                ) AS proposals FROM latest
+            """,
+                (self._ns,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return CodexReviewEvidence(**{**row, "timestamp": as_utc(row["timestamp"])})
+
+    def advance_codex_review_cursor(self, cursor: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """INSERT INTO meta (key, value) VALUES (%s, %s)
+                   ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value
+                   WHERE EXCLUDED.value COLLATE "C" > meta.value COLLATE "C" """,
+                (self._meta_key("codex_review_finished"), cursor),
+            )
 
     def count_stats(self) -> dict[str, int]:
         out: dict[str, int] = {}

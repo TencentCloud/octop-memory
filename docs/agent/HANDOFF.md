@@ -24,6 +24,25 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Codex memory setup prompt
+
+- **⚠️ Recall/write path change** — The terminal installer registers native Codex `memory_get` and
+  `memory_save`; recall now includes readable paths. The read-only mode exposes `memory_get` and skips
+  transcript capture. Authentication uses the existing local credential file.
+- **⚠️ Recall/write path change** — Opt-in Codex Stop continuation uses the current turn model for quote-backed,
+  review-only proposals. The token dialog lets the installer select Codex or standalone server extraction.
+- The companion Octop dashboard worktree adds a Codex setup prompt to the token dialog. Its official
+  installer URL requires the matching installer code before it can be used for a fresh installation.
+- **Validation** — The Memory full gate passed on SQLite and dedicated PostgreSQL (1,714 passed, three
+  optional skips). With an isolated responses provider and real Codex client, the installed Stop hook
+  continued the original model turn, submitted one candidate over HTTP, and retained its raw evidence.
+  Repeated submissions and continued Stop events produced no duplicate candidate or extra continuation.
+  A second real Codex turn with a local test provider completed with no proposal and a verified Stop receipt.
+  Setup now checks the installed server in the originating chat. The Stop prompt requests an empty
+  final response after review, preserving the separate dashboard receipt.
+  Overview shows the most recent Codex evidence separately from the previous server extraction.
+  The live MCP catalog and hook trust were verified separately. Windows execution was not exercised.
+
 ### Standalone memory space isolation
 
 - Local follow-up to [Memory PR #59](https://github.com/TencentCloud/octop-memory/pull/59), based on `c32e45a`.

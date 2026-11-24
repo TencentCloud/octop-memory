@@ -10,15 +10,18 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { capture, isConfigured, loadConfig, makeLogger, sleep } from "../lib/octop-memory-client.mjs";
+import { callTool, capture, isConfigured, loadConfig, makeLogger, sleep } from "../lib/octop-memory-client.mjs";
 
 const log = makeLogger("stopcap.codex");
 const DELAY_MS = Number(process.env.OCTOP_CAPTURE_DELAY_MS ?? 3000);
 const POLL_MS = Number(process.env.OCTOP_CAPTURE_POLL_MS ?? 1000);
 const MAX_WAIT_MS = Number(process.env.OCTOP_CAPTURE_MAX_WAIT_MS ?? 20000);
 const IS_WORKER = process.argv.includes("--worker");
+const config = loadConfig();
+if (config.readOnly) process.exit(0);
 
 let raw = "";
+let hookInput = {};
 if (IS_WORKER) {
   raw = Buffer.from(process.env.OCTOP_HOOK_PAYLOAD_B64 || "", "base64").toString("utf8");
 } else {
@@ -27,7 +30,16 @@ if (IS_WORKER) {
   } catch {
     raw = "";
   }
-  if (process.env.OCTOP_CAPTURE_SYNC !== "1") {
+}
+try {
+  if (raw.trim()) hookInput = JSON.parse(raw);
+} catch {
+  log("stdin-not-json");
+}
+const reviewTurn = !IS_WORKER && config.codexExtraction === "codex" && hookInput.stop_hook_active === false &&
+  typeof hookInput.turn_id === "string" && hookInput.turn_id && hookInput.session_id && hookInput.hook_event_name === "Stop";
+if (!IS_WORKER) {
+  if (!reviewTurn && process.env.OCTOP_CAPTURE_SYNC !== "1") {
     try {
       const worker = spawn(process.execPath, [fileURLToPath(import.meta.url), "--worker"], {
         detached: true,
@@ -42,22 +54,27 @@ if (IS_WORKER) {
     }
   }
 }
-let hookInput = {};
-try {
-  if (raw.trim()) hookInput = JSON.parse(raw);
-} catch {
-  log("stdin-not-json");
-}
 
 const sessionId = hookInput.session_id || "";
 const event = hookInput.hook_event_name || "Stop";
 const transcriptPath = hookInput.transcript_path || "";
+if (event === "Stop" && hookInput.stop_hook_active === true && config.codexExtraction === "codex" &&
+    sessionId && typeof hookInput.turn_id === "string" && hookInput.turn_id && isConfigured(config)) {
+  try {
+    const receipt = await callTool(config, "memory_capture", {
+      source: "codex", session_id: "codex:" + sessionId, extract: false, completed_review_turn: hookInput.turn_id,
+    }, AbortSignal.timeout(3000));
+    if (!receipt.ok || receipt.error || receipt.detail?.isError) log("review receipt rejected");
+  } catch {
+    log("review receipt unavailable");
+  }
+}
 if (!transcriptPath) {
   log(`${event} skip: payload has no transcript_path`);
   process.exit(0);
 }
 
-if (IS_WORKER) {
+if (IS_WORKER || (reviewTurn && process.env.OCTOP_CAPTURE_SYNC !== "1")) {
   if (DELAY_MS > 0) await sleep(DELAY_MS);
   const deadline = Date.now() + MAX_WAIT_MS;
   let previousSize = -1;
@@ -77,7 +94,6 @@ if (IS_WORKER) {
   if (waited) log(`${event} waited ${waited}ms for the rollout to settle`);
 }
 
-const config = loadConfig();
 if (!isConfigured(config)) {
   log("skip: not configured");
   process.exit(0);
@@ -89,7 +105,7 @@ try {
   log(`${event} read failed: ${exc} (${transcriptPath})`);
   process.exit(0);
 }
-await capture({
+const result = await capture({
   config,
   log,
   event,
@@ -98,5 +114,24 @@ await capture({
   transcriptPath,
   buffer,
   sessionPrefix: "codex:",
+  turnId: reviewTurn ? hookInput.turn_id : "",
+  model: reviewTurn && typeof hookInput.model === "string" ? hookInput.model : "",
 });
+const ids = result.detail?.user_event_ids ?? [];
+if (reviewTurn && result.detail?.ok && ids.length && config.mcpServer) {
+  // Only server-issued raw identifiers enter the continuation.
+  const evidence = ids.filter((id) => typeof id === "string" && /^evt_[a-f0-9]{12}$/.test(id));
+  if (evidence.length) {
+    process.stdout.write(JSON.stringify({
+      decision: "block",
+      reason: "[octop memory review] The user already received the answer. Silently review only the user's message in this completed turn. " +
+        "If it contains a new durable preference, decision or fact, propose at most one short exact quote " +
+        "using memory_propose on " + config.mcpServer + " with the matching event_id from " + evidence.join(", ") + ". " +
+        "Skip secrets, transient requests, recalled text, opt-outs and anything already saved. " +
+        "If no quote qualifies or the tool is unavailable, skip the proposal. Do not use memory_save for this review. " +
+        "In every case, end this continuation with an empty final response. Do not send chat text before or after a tool call, " +
+        "including acknowledgments, skip reasons or review summaries.",
+    }) + "\n");
+  }
+}
 process.exit(0);

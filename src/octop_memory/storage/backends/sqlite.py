@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Concatenate
 
 from octop_memory.domain.datetime import as_utc, parse_datetime_utc
-from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
+from octop_memory.storage.backends import _UNSET, CodexReviewEvidence, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.fts_text import (
     FTS_TEXT_VERSION,
     RAW_FTS_TEXT_VERSION,
@@ -1862,6 +1862,40 @@ class SqliteMemoryBackend:
             (entity_id,),
         ).fetchone()
         return self._row_to_entity_page(row) if row else None
+
+    @locked_sqlite_operation
+    def latest_codex_review_evidence(self) -> CodexReviewEvidence | None:
+        ns = self._ns
+        row = self._conn.execute(f"""
+            WITH latest AS (
+                SELECT id AS event_id, timestamp, session_id, user AS caller,
+                       json_extract(payload, '$.turn_id') AS turn_id, json_extract(payload, '$.source_model') AS model
+                FROM {ns}_raw_events
+                WHERE host = 'codex' AND event_type = 'user_message' AND session_id IS NOT NULL AND user IS NOT NULL
+                  AND json_extract(payload, '$.turn_id') != ''
+                  AND (json_extract(payload, '$.codex_review') = 1 OR json_extract(payload, '$.source_model') != '')
+                  AND coalesce(json_extract(payload, '$.content_redacted'), 0) = 0
+                ORDER BY timestamp DESC, id DESC LIMIT 1
+            )
+            SELECT latest.*, (
+                SELECT count(*) FROM {ns}_candidates c JOIN {ns}_raw_events r ON r.id = c.quote_event_id
+                WHERE c.extractor_version = 'host-quote/v1' AND c.session_id = latest.session_id
+                  AND r.session_id = latest.session_id AND r.user = latest.caller AND r.host = 'codex'
+                  AND json_extract(r.payload, '$.turn_id') = latest.turn_id
+            ) AS proposals FROM latest
+        """).fetchone()
+        if row is None:
+            return None
+        return CodexReviewEvidence(**{**dict(row), "timestamp": parse_datetime_utc(row["timestamp"])})
+
+    @locked_sqlite_operation
+    def advance_codex_review_cursor(self, cursor: str) -> None:
+        self._conn.execute(
+            f"""INSERT INTO {self._ns}_meta (key, value) VALUES ('codex_review_finished', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > value""",
+            (cursor,),
+        )
+        self._commit()
 
     @locked_sqlite_operation
     def count_stats(self) -> dict[str, int]:
