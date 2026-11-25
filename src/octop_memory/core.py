@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from octop_memory.storage.backends import _UNSET, MemoryBackend, _Unset
+from octop_memory.storage.backends import _UNSET, MemoryBackend, SearchIndexMaintenance, _Unset
 from octop_memory.storage.driver_errors import DRIVER_ERRORS, VECTOR_ERRORS
 from octop_memory.types import (
     ActiveEntity,
@@ -373,8 +373,18 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             limit=limit,
         )
 
+    def raw_search_index_ready(self) -> bool:
+        """Custom backends without versioned indexes manage their own search."""
+        return not isinstance(self._backend, SearchIndexMaintenance) or self._backend.raw_search_index_ready()
+
+    def upgrade_search_index(self) -> bool:
+        """Run the built-in backend's offline search index upgrade."""
+        if not isinstance(self._backend, SearchIndexMaintenance):
+            raise NotImplementedError("This backend does not provide a search index upgrade")
+        return self._backend.upgrade_search_index()
+
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
-        """FTS5 full-text search over raw event content."""
+        """Search the text of raw events and return the original records."""
         return self._backend.search_raw(query, limit=limit)
 
     def get_raw_events_by_ids(self, event_ids: list[str]) -> list[RawEvent]:
@@ -653,7 +663,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             self.mark_entity_page_dirty(entity.id, when=now)
             if created_entity:
                 normalized = normalize_alias(entity.canonical_name)
-                if normalized and self.find_entity_by_alias(normalized) is None:
+                if normalized:
                     self.add_alias(
                         Alias(
                             alias=normalized,
@@ -712,6 +722,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         deprecated.
         """
         from octop_memory.domain.alias import normalize_alias
+        from octop_memory.domain.search_terms import search_phrases
 
         text = assertion.strip()
         if not text:
@@ -730,6 +741,14 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         now = datetime.now(UTC)
         new_atom: AtomCard
         with self._backend.transaction():
+            # A correction can change the topic. Discard inferred phrases from the
+            # previous assertion and retain its subject and imported index terms.
+            source = self.get_candidate(old.candidate_id)
+            inferred = (
+                set(search_phrases(source.payload.get("search_phrases"), subject=source.subject_name))
+                if source
+                else set()
+            )
             new_atom = AtomCard(
                 id=str(uuid.uuid4()),
                 entity_id=old.entity_id,
@@ -738,7 +757,7 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 assertion=text,
                 verbatim_quote=old.verbatim_quote,
                 quote_event_id=old.quote_event_id,
-                search_terms=list(old.search_terms),
+                search_terms=[term for term in old.search_terms if term not in inferred],
                 occurred_at=old.occurred_at,
                 confidence=old.confidence,
                 importance=old.importance,
@@ -781,6 +800,17 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         limit: int = 10,
     ) -> list[AtomCard]:
         return self._backend.search_atoms(query, include_deprecated=include_deprecated, limit=limit)
+
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        return self._backend.search_atom_terms(terms, entity_ids=entity_ids, start=start, end=end, limit=limit)
 
     def search_atoms_by_time_range(
         self,
@@ -1008,6 +1038,10 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def add_alias(self, alias: Alias) -> None:
         self._backend.save_alias(alias)
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Return every owner of each normalized name or alias within this namespace."""
+        return self._backend.match_entity_names(names)
 
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Look up the entity that the given (already-normalized) alias resolves to."""
@@ -1427,7 +1461,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 payload={"metadata": dict(metadata) if metadata else {}},
             )
 
-            entity = self.find_entity_by_name(entity_name, entity_type="Fact")
+            key = normalize_alias(entity_name)
+            owners = [e for e in self.match_entity_names([key]).get(key, []) if e.entity_type == "Fact"]
+            if len(owners) > 1:
+                raise ValueError("ambiguous topic; supply entity_id through create_atom")
+            entity = owners[0] if owners else None
             if entity is None:
                 entity = Entity(
                     id=str(uuid.uuid4()),
@@ -1622,13 +1660,11 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
                 return existing_users[0], False
 
         normalized = normalize_alias(name)
-        if normalized:
-            aliased = self.find_entity_by_alias(normalized)
-            if aliased is not None:
-                return aliased, False
-        by_name = self.find_entity_by_name(name, entity_type=entity_type)
-        if by_name is not None:
-            return by_name, False
+        owners = [e for e in self.match_entity_names([normalized]).get(normalized, []) if e.entity_type == entity_type]
+        if len(owners) > 1:
+            raise ValueError("ambiguous entity name; supply entity_id")
+        if owners:
+            return owners[0], False
 
         now = datetime.now(UTC)
         entity = Entity(

@@ -142,13 +142,15 @@ dashboard 当前仅供源码 checkout 配合 `[dashboard]` 依赖运行，其模
 ## 外部 Agent 适配
 
 `plugins/<host>/` 将外部 Agent 的 hook、工具调用和配置映射到共享 Python runtime。
-当前提供 OpenClaw、Hermes 两种适配；其他 Agent 可通过 Python API 或 JSON-RPC 接入，需实现各自的宿主契约。
+当前提供 OpenClaw、Hermes 两种适配。`plugins/harness` 把 Claude Code、Codex、Cursor、Kiro、DSH 接到 Octop 的 memory MCP，安装器在 `develop` 分支。
+其他 Agent 可通过 Python API 或 JSON-RPC 接入，需实现各自的宿主契约。
 
 | 接入方式 | 适用场景 | 入口 |
 |---|---|---|
 | Python 进程内 | 自有 Agent / Python 应用 | `MemoryService.capture_turn()` / `recall()` / `search()` / `get()` / `extract()` |
 | JSON-RPC bridge | 跨语言或独立进程 | stdio `octopmemory-bridge` |
 | 宿主插件 | 需要对接指定 Agent 的生命周期和工具接口 | `plugins/<host>/`；已有 OpenClaw、Hermes |
+| 终端客户端 | Claude Code、Codex、Cursor、Kiro、DSH 调用 Octop memory MCP | `plugins/harness`；包名 `octop-memory-harness` |
 
 安装、配置、profile、排错和新增适配的边界统一见[集成指南](docs/integrations_CN.md)。
 
@@ -203,6 +205,10 @@ Candidate 是候选，不代表每条都要人工审批。promotion 会按价值
 `Memory.store()` 的手工写入无需模型，直接建立 RawEvent/Candidate/AtomCard 和 leaf 引用。
 
 自动 prompt 召回只使用 `atom` 事实，可选向量检索也只返回 Atom。没有匹配的 Atom 时返回空，不再回退注入原始对话或页面摘要。主动 `MemoryService.search()` / `memory_search` 保留多源检索及可配置的 raw 策略；底层调用方可用 `recall_for_prompt(..., atom_only=False)` 显式启用该行为，仍排除当前会话的 raw。
+
+查询点名项目时，系统同时查该实体下的事实和全库主题。别的实体持有的事实，如果正文或引文明确提到目标，也可召回。姓名有歧义时自动召回留空。后台分批复核历史归属、近似名和别名证据；也可手动运行 `octop-memory entity dream --limit 20`，通过 `octop-memory journal list --action entity_review` 查看依据。
+
+查询电话号码、附件大小上限、日志保留期限等常见字段时，系统会展开近义表达，再检查事实正文是否给出了对应的值。提炼新事实时，还可在原有模型调用中生成最多三个近义检索短语。检索短语用于找候选，进入提示词的仍是原始事实。
 
 系统生成的运行报错不自动进入长期记忆，也不通过历史 raw 兜底召回。octop-harness / Octop 将模型异常保留为 checkpoint 失败任务，由宿主单独显示错误；团队自动失败通知排除采集。仍生成合成报错的宿主必须使用 `payload.octop_runtime_error=true` 标记；在线链路只按结构化来源排除，不判断“记住”“已验证”等文字。Agent 自行决定调用 `memory_save`，手工保存与人工批准由来源记录保护。后台采集保留原长度策略，不再有记忆意图关键词例外；主动保存不受此长度限制。原始诊断证据仍可按 ID 检查。`operations.retention.audit_runtime_errors(memory)` 默认仅预览，显式 `apply=True` 也仅软停用全部证据均有错误标记的自动 Atom。旧版固定报错格式只生成 `review_atom_ids` / `review_candidate_ids` 审核清单；证据缺失或混合来源也保留待审，不自动改变这些记录的状态。
 

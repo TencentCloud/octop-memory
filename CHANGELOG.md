@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-25
+
+### 新增
+
+- 发布包加入 `py.typed`，类型检查器可以直接使用 `Memory`、`MemoryService` 等公开接口的类型注解。
+
+### 修复
+
+- 显式记忆搜索只按文字配文索引和排序，纯图片不再占用结果名额。按路径读取原始记忆时仍返回原始证据。
+- 实体复核的名称前缀改为字面匹配，避免在 `en_US.UTF-8` 等排序规则下漏掉 `Hermes2` 这类边界名称。SQLite 与 PostgreSQL 行为一致。
+- 同名实体按类型和唯一名字或别名判断归属；有歧义的自动提炼候选进入审核。无向量召回合并实体内事实与全库主题结果，正文明确提到目标时可以召回跨实体事实。后台可分批审计历史归属，并保留原始证据。
+
+### 变更
+
+- 旧库的原始搜索索引不再在打开或搜索时隐式重建，改为维护窗口执行 `octop-memory db upgrade-index`。漏迁时显式搜索会提示升级；对话记录、长期记忆召回和按路径读取仍可用。
+- 无向量召回会展开电话、附件大小、日志保留期限等常见字段的近义问法，并核对事实是否给出对应的值。提炼新事实时可在同一次模型调用中附加最多三个近义检索词；进入提示词的仍是原始事实。
+- 集成文档补充 Claude Code、Codex、Cursor、Kiro、DSH 终端客户端的安装说明。
+
 ## [1.0.5] - 2026-11-17
 
 ### 新增
@@ -15,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 变更
 
+- 新增 `plugins/harness`（包名 `octop-memory-harness`）：为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。凭据在运行时传入，写进用户目录下权限 `0600` 的 `config.json`。客户端本地解析 transcript 后调用 `memory_capture(events=...)`，服务端不再解析对话记录。DSH 使用原生插件 `dsh-octop-memory`。安装脚本在 `develop` 分支，尚未进入 `main`。
+- PostgreSQL checkpoint 裁剪需指定已核实归属的线程，实际裁剪前需在所有宿主上暂停该线程的执行、恢复和分叉。定时维护跳过共享 PG checkpoint 表。可预览并按数量、日期和恢复依赖裁剪，支持从 DeltaChannel 恢复最后一条回复后裁剪已结束的任务级子图。持久子图及其父线程保留。裁剪只回收删除后已无引用的候选 blob 版本。
+- SQLite checkpoint 裁剪支持由宿主提供 `messages` 的 DeltaChannel。在仅依赖消息增量的根图保留边界写入完整快照后，裁掉旧父链及写入，并保留窗口内的 checkpoint ID 和恢复状态。
 - Checkpoint 库不再随对话无限变大。长会话每轮都会落一份快照，旧快照会一直占空间。现在可以按线程裁掉已经用完的旧快照，只保留还能恢复和回放的检查点。正在执行的任务，以及还要继续用的子图，不会被裁掉。
 
 ### 修复

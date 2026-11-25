@@ -39,6 +39,7 @@ from octop_memory.pipeline.recall import recall_for_prompt
 from octop_memory.pipeline.recall.cache import RecallCache
 from octop_memory.ports.llm import LLMClient, NoopLLMClient, OpenAICompatClient
 from octop_memory.ports.llm._protocol import LLMClientError
+from octop_memory.storage.backends import SearchIndexUpgradeRequired
 from octop_memory.storage.driver_errors import REPORTABLE_ERRORS
 from octop_memory.types import RawEvent
 
@@ -169,12 +170,18 @@ class MemoryRuntime:
         return manual_document_review_status(self._memory, documents)
 
     def review_new_memory(self, *, max_atoms: int = 20) -> dict[str, Any] | None:
-        """Check one background batch against current owner files.
+        """Audit entity assignments and check one background batch against current owner files.
 
         Callers on a chat turn must not wait for this. The host drains a
         bounded batch after the save returns. An explicit
         ``reconcile_manual_documents`` call still uses its own limit.
         """
+        from octop_memory.pipeline.lifecycle.dreaming import run_entity_dreaming
+
+        try:
+            run_entity_dreaming(self._memory, limit=max_atoms)
+        except REPORTABLE_ERRORS:
+            logger.warning("Entity review after memory write is unavailable", exc_info=True)
         provider = self._manual_documents_provider
         if provider is None:
             return None
@@ -288,10 +295,15 @@ class MemoryRuntime:
         host_files_policy = recall_cfg["host_files_policy"]
         raw_policy = recall_cfg["raw_policy"]
 
+        upgrade_hint = None
+
         # Layer 1: SQLite-backed atom / raw recall. Skipped when
         # the agent explicitly asks for sessions/host files, or when the
         # profile forces host_files_policy="only".
         if corpus in {"all", "memory"} and host_files_policy != "only":
+            if not atom_only and raw_policy != "never" and not self._memory.raw_search_index_ready():
+                upgrade_hint = str(SearchIndexUpgradeRequired())
+                raw_policy = "never"
             result = recall_for_prompt(
                 self._memory,
                 query,
@@ -350,7 +362,8 @@ class MemoryRuntime:
         return {
             "hits": hits,
             "total": len(hits),
-            "empty_reason": None if hits else "no_matches",
+            "empty_reason": None if hits else (upgrade_hint or "no_matches"),
+            **({"warning": upgrade_hint} if upgrade_hint else {}),
         }
 
     def memory_get(self, params: dict[str, Any]) -> dict[str, Any]:

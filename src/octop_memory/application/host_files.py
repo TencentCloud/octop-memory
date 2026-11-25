@@ -218,7 +218,7 @@ class HostFilesIndex:
     def _migrate_fts_text_version(self) -> None:
         """Rebuild triggers + FTS index when CJK segmentation changes.
 
-        Mirrors SqliteMemoryBackend._migrate_fts_text_version: pre-v2
+        Mirrors SqliteMemoryBackend.upgrade_search_index: pre-v2
         databases indexed raw text, which is unsearchable for Chinese.
         CREATE TRIGGER IF NOT EXISTS keeps old trigger bodies, so the
         upgrade must drop + recreate them explicitly.

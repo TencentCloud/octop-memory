@@ -10,7 +10,7 @@ because some LLM hosts only expose ``prompt`` and ignore ``system``).
 
 from __future__ import annotations
 
-EXTRACTOR_VERSION = "v2.4"
+EXTRACTOR_VERSION = "v2.5"
 """Version tag persisted on every Candidate (`extractor_version` field).
 
 Bump when:
@@ -19,6 +19,8 @@ Bump when:
 - The output JSON schema changes
 
 Do NOT bump for whitespace-only or comment changes.
+
+v2.5 requests optional lexical paraphrases in the same extraction call.
 
 v2.4 adds durable eligibility rules before confidence/importance scoring,
 excluding transient runtime diagnostics while protecting troubleshooting
@@ -146,6 +148,7 @@ OUTPUT:
       "candidate_type": "Fact",
       "status": "pending",
       "title": "alias table default size",
+      "search_phrases": ["alias table capacity", "alias storage limit"],
       "assertion": "alias table 默认大小是 10000",
       "verbatim_quote": "alias table 默认大小是 10000",
       "quote_event_id": "raw-B1",
@@ -373,6 +376,11 @@ Extraction rules:
 - subject.name MUST be a stable, reusable entity name (person name, project
   name, product name, or generic label such as "User"). It MUST NOT contain
   time words (years, months, dates), verbs, or event/scene descriptions.
+- Optionally emit search_phrases as an array of up to three short alternate
+  wordings for the topic a user might search for. Keep the same meaning and
+  language as the source. Omit names, answer values and unsupported details.
+  These phrases are search metadata only. Copy the evidence into the existing
+  assertion and verbatim_quote fields under the usual rules.
 - Time, event, and scene details belong in the assertion field, NOT in
   subject.name. Example: user says "我今天午餐吃了抹茶奶冻" → subject.name="User",
   assertion="用户今天午餐吃了抹茶奶冻" (NOT subject.name="User Lunch Today").

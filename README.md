@@ -144,14 +144,15 @@ The dashboard is available from a source checkout with `[dashboard]` dependencie
 ## External agent adapters
 
 `plugins/<host>/` maps external agent hooks, tools, and configuration to the shared Python runtime.
-OpenClaw and Hermes adapters are available today. Other agents can integrate through the Python API or JSON-RPC,
-with an adapter implementing their host contract.
+OpenClaw and Hermes adapters are available today. `plugins/harness` installs Claude Code, Codex, Cursor, Kiro, and DSH against an Octop memory MCP; that installer is on `develop`.
+Other agents can integrate through the Python API or JSON-RPC, with an adapter implementing their host contract.
 
 | Integration | Use case | Entry point |
 |---|---|---|
 | In-process Python | Custom agents / Python applications | `MemoryService.capture_turn()` / `recall()` / `search()` / `get()` / `extract()` |
 | JSON-RPC bridge | Cross-language or separate processes | stdio `octopmemory-bridge` |
 | Host plugin | Agent-specific lifecycle and tool interfaces | `plugins/<host>/`; OpenClaw and Hermes currently implemented |
+| Terminal client | Claude Code, Codex, Cursor, Kiro, DSH calling an Octop memory MCP | `plugins/harness`; package `octop-memory-harness` |
 
 See the [integration guide](docs/integrations.md) for installation, configuration, profiles, troubleshooting, and adapter boundaries.
 
@@ -207,6 +208,10 @@ rather than immediately after every write. Episode extraction is a parallel path
 Manual `Memory.store()` needs no model and directly creates RawEvent/Candidate/AtomCard plus a leaf reference.
 
 Automatic prompt recall uses canonical `atom` facts only, including optional vector atom hits. No matching atom means an empty result; raw conversations and page summaries are not injected as fallback. Explicit `MemoryService.search()` / `memory_search` keeps multi-source retrieval and its configurable raw policy. Low-level callers can opt into that behavior with `recall_for_prompt(..., atom_only=False)`; current-session raw remains excluded.
+
+Named queries search the entity and the global topic index. A fact held by another owner can enter the results when its text explicitly names the target. An ambiguous name leaves automatic recall empty. In the background, `octop-memory entity dream --limit 20` audits one batch of existing atoms. Inspect evidence with `octop-memory journal list --action entity_review`.
+
+For common value lookups such as a telephone number, attachment size limit or log retention period, lexical recall expands equivalent wording and checks that the fact supplies the requested value. The extractor can also index up to three alternative search phrases from its existing call. These phrases can retrieve a fact. The prompt cites the original assertion.
 
 Synthetic runtime failures are excluded from automatic capture, extraction and raw prompt fallback. octop-harness / Octop raise model errors into checkpoint task failures and display diagnostics separately; automatic team failure notifications are excluded from capture. Hosts that still create synthetic replies must mark them with `payload.octop_runtime_error=true`; online filtering uses structured provenance only. Agents decide when to call `memory_save`; approvals and manual saves are protected by their provenance, without intent or troubleshooting-value keyword lists. Automatic capture keeps its length policy with no intent-keyword exception; explicit saves bypass that capture policy. Original diagnostics remain inspectable by ID. `operations.retention.audit_runtime_errors(memory)` previews eligible records by default; even `apply=True` retires only automatic atoms whose evidence is entirely marked as runtime failures. The fixed legacy retry envelope only nominates `review_atom_ids` / `review_candidate_ids`; missing and mixed evidence stays unchanged for human review.
 

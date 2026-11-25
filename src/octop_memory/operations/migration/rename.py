@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from octop_memory.storage.backends.fts_text import register_fts_functions
+from octop_memory.storage.backends.fts_text import fts_index_value, register_fts_functions
 
 RenameMode = Literal["rename", "copy"]
 
@@ -265,27 +265,22 @@ def apply_rename(plan: RenamePlan, *, allow_overwrite: bool = False) -> int:
             # renamed base tables.
             _rebuild_fts_and_triggers(conn, plan.dst_namespace)
         elif plan.mode == "copy":
-            # CREATE TABLE dst AS SELECT * FROM src — preserves rows
-            # but loses indexes / triggers / FTS5 contentless table
-            # specifics. The caller MUST instantiate a fresh
-            # ``Memory(namespace=dst)`` afterwards so the
-            # ``_init_schema`` recreates indexes + triggers + FTS
-            # virtual tables. For FTS virtual tables we skip — the
-            # new namespace's _init_schema will rebuild them and the
-            # AFTER INSERT triggers will re-populate from the copied
-            # base tables.
+            # Copy base rows only. Opening the destination installs empty FTS
+            # tables and triggers. db upgrade-index populates historical rows.
             for step in plan.steps:
                 if step.is_fts_shadow:  # actually "is FTS virtual" — see plan_rename
                     continue
                 conn.execute(f'CREATE TABLE "{step.dst_table}" AS SELECT * FROM "{step.src_table}"')
-            # The copied {dst}_meta carries the source's fts_text_version,
-            # which would make the destination's first _init_schema skip
-            # the FTS rebuild and leave the copied namespace unsearchable.
-            # Clear the marker so the rebuild runs against the copied rows.
+            # The copied {dst}_meta carries the source's index versions,
+            # but its historical rows have not been indexed.
             meta_table = f"{plan.dst_namespace}_meta"
             exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (meta_table,)).fetchone()
             if exists:
-                conn.execute(f'DELETE FROM "{meta_table}" WHERE key = ?', ("fts_text_version",))
+                # CREATE TABLE AS drops the key constraint used to publish versions.
+                conn.execute(f'CREATE UNIQUE INDEX "{meta_table}_key" ON "{meta_table}" (key)')
+                conn.execute(
+                    f'DELETE FROM "{meta_table}" WHERE key IN (?, ?)', ("fts_text_version", "raw_fts_text_version")
+                )
         else:
             raise ValueError(f"unknown mode: {plan.mode!r}")
 
@@ -356,9 +351,8 @@ def _rebuild_fts_and_triggers(conn: sqlite3.Connection, namespace: str) -> None:
     Recreate FTS5 tables + AFTER INSERT/UPDATE/DELETE triggers under
     ``namespace`` and repopulate the FTS index from the base table.
 
-    Both the trigger bodies and the repopulation pass run every value
-    through ``hm_cjk_seg`` so the rebuilt index keeps the per-character
-    CJK segmentation (see :mod:`octop_memory.storage.backends.fts_text`).
+    Triggers and repopulation share the operational projections for CJK
+    segmentation and raw image filtering.
     """
     register_fts_functions(conn)
     for base_suffix, trigger_prefix, fts_suffix, columns in _FTS_SPECS:
@@ -375,8 +369,11 @@ def _rebuild_fts_and_triggers(conn: sqlite3.Connection, namespace: str) -> None:
             continue
 
         col_list = ", ".join(columns)
-        new_vals = ", ".join(f"hm_cjk_seg(new.{c})" for c in columns)
-        old_vals = ", ".join(f"hm_cjk_seg(old.{c})" for c in columns)
+        raw = base_suffix == "raw_events"
+        new_vals = ", ".join(fts_index_value(f"new.{c}", raw=raw) for c in columns)
+        old_vals = ", ".join(fts_index_value(f"old.{c}", raw=raw) for c in columns)
+        insert_when = f"WHEN {new_vals} <> '' " if raw else ""
+        delete_when = f"WHEN {old_vals} <> '' " if raw else ""
         conn.execute(
             f'CREATE VIRTUAL TABLE "{fts}" USING fts5('
             f"{col_list}, content='{base}', content_rowid='rowid', tokenize='unicode61')"
@@ -384,7 +381,7 @@ def _rebuild_fts_and_triggers(conn: sqlite3.Connection, namespace: str) -> None:
 
         # AFTER INSERT trigger
         conn.execute(
-            f'CREATE TRIGGER "{namespace}_{trigger_prefix}_ai" AFTER INSERT ON "{base}" BEGIN '
+            f'CREATE TRIGGER "{namespace}_{trigger_prefix}_ai" AFTER INSERT ON "{base}" {insert_when}BEGIN '
             f'  INSERT INTO "{fts}"(rowid, {col_list}) VALUES (new.rowid, {new_vals}); '
             f"END"
         )
@@ -393,7 +390,7 @@ def _rebuild_fts_and_triggers(conn: sqlite3.Connection, namespace: str) -> None:
         # whose name MUST equal the FTS table name — recreated under
         # the new namespace so it stays consistent.
         conn.execute(
-            f'CREATE TRIGGER "{namespace}_{trigger_prefix}_ad" AFTER DELETE ON "{base}" BEGIN '
+            f'CREATE TRIGGER "{namespace}_{trigger_prefix}_ad" AFTER DELETE ON "{base}" {delete_when}BEGIN '
             f'  INSERT INTO "{fts}"({fts}, rowid, {col_list}) '
             f"  VALUES ('delete', old.rowid, {old_vals}); "
             f"END"
@@ -413,8 +410,9 @@ def _rebuild_fts_and_triggers(conn: sqlite3.Connection, namespace: str) -> None:
             )
 
         # Repopulate FTS from the base table.
-        col_select = ", ".join(f"hm_cjk_seg({c})" for c in columns)
-        conn.execute(f'INSERT INTO "{fts}"(rowid, {col_list}) SELECT rowid, {col_select} FROM "{base}"')
+        col_select = ", ".join(fts_index_value(c, raw=raw) for c in columns)
+        where = f" WHERE {col_select} <> ''" if raw else ""
+        conn.execute(f'INSERT INTO "{fts}"(rowid, {col_list}) SELECT rowid, {col_select} FROM "{base}"{where}')
 
 
 __all__ = ["RenameMode", "RenamePlan", "TablePlan", "apply_rename", "plan_rename"]

@@ -27,7 +27,6 @@ import click
 from octop_memory.adapters.cli.config import get_memory
 from octop_memory.domain.alias import normalize_alias
 from octop_memory.pipeline.extractor import CandidateExtractor, extract_session
-from octop_memory.pipeline.promotion.checks import build_atom_from_candidate
 from octop_memory.pipeline.promotion.fallback import (
     DEFAULT_REJECTION_THRESHOLD,
     DEFAULT_STALE_DAYS,
@@ -36,11 +35,9 @@ from octop_memory.pipeline.promotion.fallback import (
 from octop_memory.pipeline.promotion.llm_hook import ModelEscalationHook
 from octop_memory.ports.llm import LLMClient, NoopLLMClient, OpenAICompatClient
 from octop_memory.types import (
-    Alias,
     Candidate,
     CandidateStatus,
     CandidateType,
-    Entity,
     JournalEntry,
 )
 
@@ -593,70 +590,24 @@ def review_cmd(
 
         now = datetime.now(UTC)
         if choice == "a":
-            entity_id = cand.target_entity_id
-            if not entity_id:
-                normalized = normalize_alias(cand.subject_name)
-                hit = memory.find_entity_by_alias(normalized) if normalized else None
-                if hit is None and cand.subject_name.strip():
-                    hit = memory.find_entity_by_name(
-                        cand.subject_name,
-                        entity_type=cand.subject_entity_type,
-                    )
-                if hit is not None:
-                    entity_id = hit.id
-                else:
-                    entity_id = str(uuid.uuid4())
-                    memory.add_entity(
-                        Entity(
-                            id=entity_id,
-                            entity_type=cand.subject_entity_type,
-                            canonical_name=cand.subject_name,
-                            aliases=[],
-                            atom_count=0,
-                            created_at=now,
-                        )
-                    )
-                if normalized:
-                    memory.add_alias(
-                        Alias(
-                            alias=normalized,
-                            entity_id=entity_id,
-                            entity_type=cand.subject_entity_type,
-                            created_by="user",
-                            created_at=now,
-                        )
-                    )
+            from octop_memory.pipeline.promotion import PromotionWorker
 
-            atom = build_atom_from_candidate(
-                cand,
-                atom_id=str(uuid.uuid4()),
-                entity_id=entity_id,
-                now=now,
-            )
-            memory.add_atom(atom)
-            memory.bump_entity_atom_count(entity_id, delta=1, last_promoted_at=now)
-            memory.update_candidate_status(
-                cand.id,
-                status="promoted",
-                decided_by="user",
-                decided_at=now,
-                target_entity_id=entity_id,
-                promotion_reason="user-approved via review CLI",
-            )
-            memory.append_journal(
-                JournalEntry(
-                    id=str(uuid.uuid4()),
-                    timestamp=now,
-                    action="promote",
-                    actor="user",
-                    target_entity_id=entity_id,
-                    target_atom_id=atom.id,
-                    target_candidate_id=cand.id,
-                    note="user-approved via review CLI",
-                )
-            )
+            name = normalize_alias(cand.subject_name)
+            owners = [
+                e for e in memory.match_entity_names([name]).get(name, []) if e.entity_type == cand.subject_entity_type
+            ]
+            selected = None
+            if len(owners) > 1:
+                for owner in owners:
+                    click.echo(f"  {owner.id}  {owner.canonical_name} ({owner.entity_type})")
+                selected = click.prompt("entity ID", type=click.Choice([e.id for e in owners]))
+            decision = PromotionWorker(memory).approve(cand, entity_id=selected)
+            if decision.outcome.kind == "needs_review":
+                counters["skip"] += 1
+                click.echo(f"  → needs review ({decision.outcome.reason})")
+                continue
             counters["approve"] += 1
-            click.echo(f"  → approved (atom={atom.id[:8]}, entity={entity_id[:8]})\n")
+            click.echo(f"  → approved ({decision.outcome.kind})")
 
         elif choice == "r":
             note = click.prompt(

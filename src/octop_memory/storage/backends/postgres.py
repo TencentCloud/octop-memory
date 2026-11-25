@@ -12,10 +12,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from octop_memory.domain.datetime import as_utc
-from octop_memory.storage.backends import _UNSET, _Unset
+from octop_memory.domain.raw_search import IMAGE_BLOCK_TYPES, IMAGE_PAYLOAD_FIELDS, IMAGE_PLACEHOLDERS
+from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.postgres_pool import acquire_pool
 from octop_memory.types import (
     ActiveEntity,
@@ -42,6 +44,11 @@ logger = logging.getLogger(__name__)
 # All namespaces share one fixed set of tables inside this schema.
 SHARED_SCHEMA = "octop_memory"
 
+# Version the SQL projection and index together so existing indexes stay valid.
+_RAW_SEARCH_FUNCTION = f"{SHARED_SCHEMA}.raw_search_text_v1"
+_RAW_SEARCH_VECTOR = f"to_tsvector('simple', {_RAW_SEARCH_FUNCTION}(content))"
+_RAW_SEARCH_INDEX = "raw_events_text_v1_fts"
+
 # Version of the shared-table layout, stamped into ``meta``. Bump when the
 # DDL below changes shape and add a corresponding migration.
 SCHEMA_VERSION = "2"
@@ -52,14 +59,12 @@ SCHEMA_VERSION = "2"
 _DDL_LOCK_KEY = 0x68_6D_65_6D  # "hmem"
 _DDL_LOCK_TIMEOUT = "5s"
 
-# Tables with a generated tsvector column, and that column's name. Their FTS
-# indexes are namespace-scoped by ``_scope_fts_indexes_by_namespace``.
-_FTS_INDEXES: tuple[tuple[str, str], ...] = (
-    ("memory_nodes", "content_tsv"),
-    ("raw_events", "content_tsv"),
-    ("candidates", "fts_tsv"),
-    ("atoms", "fts_tsv"),
-    ("episodes", "fts_tsv"),
+# Table, indexed vector, and base index name.
+_FTS_INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("memory_nodes", "content_tsv", "memory_nodes_fts"),
+    ("candidates", "fts_tsv", "candidates_fts"),
+    ("atoms", "fts_tsv", "atoms_fts"),
+    ("episodes", "fts_tsv", "episodes_fts"),
 )
 
 # Tables owned by this backend, in parent-before-child order (memory_nodes has
@@ -265,6 +270,8 @@ class PostgresMemoryBackend:
                 cur, indexes, "CREATE INDEX IF NOT EXISTS memory_nodes_fts ON memory_nodes USING GIN(content_tsv)"
             )
 
+            cur.execute("SELECT to_regclass(%s) IS NULL AS fresh", (f"{SHARED_SCHEMA}.raw_events",))
+            fresh_raw_table = cur.fetchone()["fresh"]
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS raw_events (
                     namespace TEXT NOT NULL,
@@ -294,9 +301,8 @@ class PostgresMemoryBackend:
             _ensure_index(
                 cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_type ON raw_events(namespace, event_type)"
             )
-            _ensure_index(
-                cur, indexes, "CREATE INDEX IF NOT EXISTS raw_events_fts ON raw_events USING GIN(content_tsv)"
-            )
+            if fresh_raw_table:
+                self._build_raw_search_index(cur)
 
             # ----------------------------------------------------------
             # M2: L1 Candidates
@@ -606,6 +612,102 @@ class PostgresMemoryBackend:
         self._conn.execute(f"SET search_path TO {SHARED_SCHEMA}, public")
         self._conn.commit()
 
+    @staticmethod
+    def _raw_search_indexes(cur: Any) -> dict[str, bool]:
+        # The projection version is part of each physical index name. Check
+        # validity as well so an interrupted external build cannot enable search.
+        cur.execute(
+            """SELECT c.relname AS name, i.indisvalid AND i.indisready AS ready
+               FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE i.indrelid = to_regclass(%s)
+                 AND i.indexrelid IN (to_regclass(%s), to_regclass(%s))""",
+            (
+                f"{SHARED_SCHEMA}.raw_events",
+                f"{SHARED_SCHEMA}.{_RAW_SEARCH_INDEX}",
+                f"{SHARED_SCHEMA}.{_RAW_SEARCH_INDEX}_ns",
+            ),
+        )
+        return {row["name"]: row["ready"] for row in cur.fetchall()}
+
+    def raw_search_index_ready(self) -> bool:
+        with self._cursor() as cur:
+            return any(self._raw_search_indexes(cur).values())
+
+    def _build_raw_search_index(self, cur: Any) -> None:
+        self._ensure_raw_search_function(cur)
+        scoped = self._enable_btree_gin()
+        name = f"{_RAW_SEARCH_INDEX}_ns" if scoped else _RAW_SEARCH_INDEX
+        columns = f"namespace, ({_RAW_SEARCH_VECTOR})" if scoped else f"({_RAW_SEARCH_VECTOR})"
+        cur.execute(f"CREATE INDEX {name} ON {SHARED_SCHEMA}.raw_events USING GIN ({columns})")
+
+    def upgrade_search_index(self) -> bool:
+        """Build once for the shared raw_events table in a maintenance transaction."""
+        with self._cursor() as cur:
+            if self._in_transaction:
+                raise RuntimeError("Run the index upgrade outside a business transaction")
+            cur.execute(f"SET LOCAL lock_timeout = '{_DDL_LOCK_TIMEOUT}'")
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK_KEY,))
+            indexes = self._raw_search_indexes(cur)
+            if any(indexes.values()):
+                return False
+            for name in indexes:
+                cur.execute(sql.SQL("DROP INDEX {}").format(sql.Identifier(SHARED_SCHEMA, name)))
+            self._build_raw_search_index(cur)
+        return True
+
+    @staticmethod
+    def _ensure_raw_search_function(cur: Any) -> None:
+        """Install the SQL equivalent of raw_search_text for indexed writes."""
+        cur.execute("SELECT to_regprocedure(%s) AS projection", (f"{_RAW_SEARCH_FUNCTION}(text)",))
+        if cur.fetchone()["projection"] is not None:
+            return
+        cur.execute(
+            sql.SQL(r"""
+                CREATE FUNCTION {function_name}(transcript text) RETURNS text
+                LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE SET search_path TO pg_catalog
+                AS $raw_search$
+                DECLARE
+                    line text;
+                    trimmed text;
+                    block jsonb;
+                    kept text[] := ARRAY[]::text[];
+                    projected text := btrim(transcript, E' \t\r\n\f\013');
+                BEGIN
+                    IF strpos(transcript, '{{') <> 0 OR strpos(transcript, chr(10)) <> 0 THEN
+                        FOREACH line IN ARRAY string_to_array(transcript, chr(10)) LOOP
+                            trimmed := btrim(line, E' \t\r\n\f\013');
+                            IF trimmed = ANY({placeholders}::text[]) THEN
+                                CONTINUE;
+                            END IF;
+                            IF left(trimmed, 1) = '{{' AND right(trimmed, 1) = '}}' THEN
+                                BEGIN
+                                    block := trimmed::jsonb;
+                                    IF block->>'type' = ANY({block_types}::text[])
+                                        AND block ?| {payload_fields}::text[] THEN
+                                        CONTINUE;
+                                    END IF;
+                                EXCEPTION WHEN data_exception THEN
+                                    NULL;  -- Ordinary text can also start and end with braces.
+                                END;
+                            END IF;
+                            kept := array_append(kept, line);
+                        END LOOP;
+                        projected := btrim(array_to_string(kept, chr(10)), E' \t\r\n\f\013');
+                    END IF;
+                    IF projected = ANY({placeholders}::text[]) THEN
+                        RETURN '';
+                    END IF;
+                    RETURN projected;
+                END;
+                $raw_search$
+            """).format(
+                function_name=sql.Identifier(*_RAW_SEARCH_FUNCTION.split(".")),
+                block_types=sql.Literal(list(IMAGE_BLOCK_TYPES)),
+                payload_fields=sql.Literal(list(IMAGE_PAYLOAD_FIELDS)),
+                placeholders=sql.Literal(list(IMAGE_PLACEHOLDERS)),
+            )
+        )
+
     def _scope_fts_indexes_by_namespace(self, cur: Any) -> None:
         """Replace single-column FTS indexes with ``(namespace, tsv)`` ones.
 
@@ -624,8 +726,8 @@ class PostgresMemoryBackend:
         Runs under the caller's advisory lock, so concurrent instances cannot
         race the swap.
         """
-        scoped_names = {f"{table}_fts_ns" for table, _column in _FTS_INDEXES}
-        legacy_names = {f"{table}_fts" for table, _column in _FTS_INDEXES}
+        legacy_names = {index for _table, _column, index in _FTS_INDEXES}
+        scoped_names = {f"{index}_ns" for index in legacy_names}
         cur.execute(
             "SELECT indexname FROM pg_indexes WHERE schemaname = %s AND indexname = ANY(%s)",
             (SHARED_SCHEMA, list(scoped_names | legacy_names)),
@@ -637,9 +739,8 @@ class PostgresMemoryBackend:
             return
         if not self._enable_btree_gin():
             return
-        for table, column in _FTS_INDEXES:
-            scoped_name = f"{table}_fts_ns"
-            legacy_name = f"{table}_fts"
+        for table, column, legacy_name in _FTS_INDEXES:
+            scoped_name = f"{legacy_name}_ns"
             if scoped_name not in existing:
                 cur.execute(f"CREATE INDEX IF NOT EXISTS {scoped_name} ON {table} USING GIN (namespace, {column})")
             # Redundant now: every FTS query is namespace-scoped.
@@ -1194,12 +1295,15 @@ class PostgresMemoryBackend:
         return [self._row_to_raw(r) for r in rows]
 
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
+        """Match and rank projected raw text, returning the original events."""
         with self._cursor() as cur:
+            if not any(self._raw_search_indexes(cur).values()):
+                raise SearchIndexUpgradeRequired()
             cur.execute(
-                """SELECT * FROM raw_events
+                f"""SELECT * FROM raw_events
                     WHERE namespace = %s
-                      AND content_tsv @@ plainto_tsquery('simple', %s)
-                    ORDER BY ts_rank(content_tsv, plainto_tsquery('simple', %s)) DESC
+                      AND {_RAW_SEARCH_VECTOR} @@ plainto_tsquery('simple', %s)
+                    ORDER BY ts_rank({_RAW_SEARCH_VECTOR}, plainto_tsquery('simple', %s)) DESC
                     LIMIT %s""",
                 (self._ns, query, query, limit),
             )
@@ -1521,6 +1625,64 @@ class PostgresMemoryBackend:
             rows = cur.fetchall()
         return [self._row_to_atom(r) for r in rows]
 
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        clauses = ["a.namespace = %s", "a.deprecated_at IS NULL"]
+        args: list[object] = [self._ns]
+        order = "a.occurred_at DESC"
+        join = ""
+        if terms:
+            # Existing tsvectors keep continuous Han text in a single lexeme. Match
+            # CJK phrases as literal substrings, and Latin words via the native index.
+            han = [term for term in terms if re.search(r"[㐀-鿿]", term)]
+            latin = [term for term in terms if term not in han]
+            query = " || ".join("phraseto_tsquery('simple', %s)" for _ in latin)
+            joins = []
+            scores = []
+            prefix: list[object] = []
+            matches = []
+            if latin:
+                joins.append(f"CROSS JOIN (SELECT {query} AS q) lexical")
+                prefix.extend(latin)
+                matches.append("a.fts_tsv @@ lexical.q")
+                scores.append("ts_rank(a.fts_tsv, lexical.q)")
+            if han:
+                joins.append("""CROSS JOIN LATERAL (
+                    SELECT coalesce(sum(length(t)),0) AS weight FROM unnest(%s::text[]) t
+                    WHERE strpos(a.assertion,t)>0 OR strpos(a.verbatim_quote,t)>0
+                       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.search_terms) term WHERE strpos(term,t)>0)
+                ) cjk""")
+                prefix.append(han)
+                matches.append("cjk.weight > 0")
+                scores.append("cjk.weight")
+            join = " ".join(joins)
+            args = prefix + args
+            clauses.append("(" + " OR ".join(matches) + ")")
+            order = "(" + " + ".join(scores) + ") DESC"
+        if entity_ids:
+            clauses.append("a.entity_id = ANY(%s)")
+            args.append(list(entity_ids))
+        if start is not None:
+            clauses.append("a.occurred_at >= %s")
+            args.append(start)
+        if end is not None:
+            clauses.append("a.occurred_at < %s")
+            args.append(end)
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT a.* FROM atoms a {join} WHERE {' AND '.join(clauses)} ORDER BY {order}, a.id LIMIT %s",
+                [*args, limit],
+            )
+            rows = cur.fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
     def search_atoms_by_time_range(
         self,
         *,
@@ -1681,7 +1843,7 @@ class PostgresMemoryBackend:
                     """SELECT * FROM entities
                         WHERE namespace = %s
                           AND LOWER(canonical_name) = LOWER(%s) AND entity_type = %s
-                        LIMIT 1""",
+                        LIMIT 2""",
                     (self._ns, canonical_name, entity_type),
                 )
             else:
@@ -1689,11 +1851,11 @@ class PostgresMemoryBackend:
                     """SELECT * FROM entities
                         WHERE namespace = %s
                           AND LOWER(canonical_name) = LOWER(%s)
-                        LIMIT 1""",
+                        LIMIT 2""",
                     (self._ns, canonical_name),
                 )
-            row = cur.fetchone()
-        return self._row_to_entity(row) if row else None
+            rows = cur.fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     def list_entities(
         self,
@@ -1777,17 +1939,59 @@ class PostgresMemoryBackend:
                 ),
             )
 
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM atoms WHERE namespace = %s AND id > %s AND deprecated_at IS NULL
+                        ORDER BY id LIMIT %s""",
+                (self._ns, after_id, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM entities WHERE namespace = %s AND entity_type = %s AND id <> %s
+                    AND starts_with(lower(canonical_name), %s)
+                        ORDER BY lower(canonical_name), id LIMIT %s""",
+                (self._ns, entity.entity_type, entity.id, prefix, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_entity(row) for row in rows]
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Find all owners, including legacy canonical names without alias rows."""
+        if not names:
+            return {}
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT a.alias AS matched_name, e.* FROM aliases a JOIN entities e
+                       ON (e.namespace, e.id) = (a.namespace, a.entity_id)
+                   WHERE a.namespace = %s AND a.alias = ANY(%s)
+                   UNION ALL
+                   SELECT lower(canonical_name) AS matched_name, e.* FROM entities e
+                   WHERE namespace = %s AND lower(canonical_name) = ANY(%s)""",
+                (self._ns, list(names), self._ns, list(names)),
+            )
+            rows = cur.fetchall()
+        matches: dict[str, dict[str, Entity]] = {}
+        for row in rows:
+            entity = self._row_to_entity(row)
+            matches.setdefault(row["matched_name"], {})[entity.id] = entity
+        return {name: list(owners.values()) for name, owners in matches.items()}
+
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         with self._cursor() as cur:
             cur.execute(
                 """SELECT e.* FROM aliases a
                     JOIN entities e ON e.namespace = a.namespace AND e.id = a.entity_id
                     WHERE a.namespace = %s AND a.alias = %s
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (self._ns, alias),
             )
-            row = cur.fetchone()
-        return self._row_to_entity(row) if row else None
+            rows = cur.fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     def list_aliases(
         self,
@@ -2071,13 +2275,14 @@ class PostgresMemoryBackend:
     # ------------------------------------------------------------------
 
     def append_journal(self, entry: JournalEntry) -> None:
+        duplicate = "ON CONFLICT (namespace,id) DO NOTHING" if entry.action == "entity_review" else ""
         with self._cursor() as cur:
             cur.execute(
-                """INSERT INTO journal
+                f"""INSERT INTO journal
                     (namespace, id, timestamp, action, actor,
                      target_entity_id, target_atom_id, target_candidate_id,
                      before, after, note)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) {duplicate}""",
                 (
                     self._ns,
                     entry.id,

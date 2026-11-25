@@ -28,6 +28,27 @@ from octop_memory.types import (
 )
 
 
+class SearchIndexUpgradeRequired(RuntimeError):
+    """The stored raw-event index does not have the current text projection."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Raw memory search index needs an upgrade. Run `octop-memory db upgrade-index` "
+            "with the store's connection settings during maintenance."
+        )
+
+
+@runtime_checkable
+class SearchIndexMaintenance(Protocol):
+    """Optional maintenance capability of the built-in relational backends."""
+
+    def raw_search_index_ready(self) -> bool: ...
+
+    def upgrade_search_index(self) -> bool:
+        """Upgrade the stored search index, returning whether work was needed."""
+        ...
+
+
 class _Unset:
     """Sentinel type for "argument not provided" in update APIs.
 
@@ -146,7 +167,7 @@ class MemoryBackend(Protocol):
         ...
 
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
-        """Full-text search over raw events."""
+        """Match and rank text with image blocks excluded, returning original records."""
         ...
 
     def delete_raw_before(self, before: datetime) -> int:
@@ -285,6 +306,16 @@ class MemoryBackend(Protocol):
     ) -> list[AtomCard]:
         """FTS over assertion + verbatim_quote + search_terms."""
         ...
+
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]: ...
 
     def search_atoms_by_time_range(
         self,
@@ -496,6 +527,12 @@ class MemoryBackend(Protocol):
     def save_alias(self, alias: Alias) -> None:
         """Insert a new alias mapping. Duplicate (alias, entity_id) is a no-op."""
         ...
+
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]: ...
+
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]: ...
+
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]: ...
 
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Look up the entity that the given alias resolves to."""

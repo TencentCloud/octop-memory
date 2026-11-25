@@ -2,11 +2,11 @@
 
 [English](integrations.md) · **中文**
 
-本页维护外部 Agent 的接入方式、宿主适配和验证约定；当前已有 OpenClaw、Hermes 实现。
+本页维护外部 Agent 的接入方式、宿主适配和验证约定；当前已有 OpenClaw、Hermes，以及编码终端客户端安装器。
 核心 API 与开发流程见
 [README](../README_CN.md) 和 [CONTRIBUTING](../CONTRIBUTING.md)，全部文档见 [文档导航](README.md)。
 
-按场景阅读：[Python 宿主](#python-宿主) · [JSON-RPC bridge](#json-rpc-bridge) · [OpenClaw](#openclaw) · [Hermes](#hermes) · [排错](#共同验证与排错) · [旧安装迁移](#更名与已有安装迁移)。
+按场景阅读：[Python 宿主](#python-宿主) · [JSON-RPC bridge](#json-rpc-bridge) · [终端客户端](#终端客户端) · [OpenClaw](#openclaw) · [Hermes](#hermes) · [排错](#共同验证与排错) · [旧安装迁移](#更名与已有安装迁移)。
 
 ## 接入方式与边界
 
@@ -85,6 +85,36 @@ stdin/stdout 每行一个 JSON 对象，日志写 stderr。例如依次发送：
 Python 要求 3.12+，SQLite 需要 FTS5。宿主兼容要求以
 [OpenClaw manifest](../plugins/openclaw/octopmemory/package.json) 和 Hermes provider contract 为准；
 Hermes 适配要求具备 `MemoryProvider` 接口的 v0.10.0+。安装说明不代表所有后续宿主版本均已验收。
+
+## 终端客户端
+
+`plugins/harness` 为 Claude Code、Codex、Cursor、Kiro、DSH 安装召回与上报 hook。分发包名是 `octop-memory-harness`。它使用在 Octop 创建的用户级 MCP token 调用 Octop 的 memory MCP，不打开本地记忆库，也不把凭据写进仓库。
+
+安装器在 `develop` 分支。`main` 分支还没有这些脚本，所以下面的一行安装地址使用 `develop`。
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
+  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+```
+
+脚本依次尝试 `uvx`、`pipx`、临时虚拟环境。也可以 `pip install octop-memory-harness`（源码树里是 `pip install ./plugins/harness`），再执行 `octop-memory-harness install --url ... --token ...`。
+
+- `--terminals claude-code,codex,cursor,kiro,dsh` 选择终端。非交互运行读取这个参数。
+- `--project <dir>` 只注册一个仓库。hook 脚本和含 token 的文件仍留在用户目录。
+- `octop-memory-harness uninstall` 卸掉本安装器写入的注册和文件。
+
+Stop hook 把新增的 transcript 字节交给本地解析器，再调用 `memory_capture(events=...)`。服务端不解析 transcript。字节游标只在上报成功后前进。DSH 加载原生插件 `dsh-octop-memory`（`dsh.engines.dsh` 至少 `0.2.0`），不走 hook 桥接。Codex 需要一次 hook 信任，安装后应重开终端。
+
+各终端目录、`config.json` 形状，以及可以整页交给助手的说明，见 [plugins/harness/README.md](../plugins/harness/README.md) 和 [AI-SETUP.md](../plugins/harness/AI-SETUP.md)。
 
 ## OpenClaw
 
@@ -259,11 +289,30 @@ hermes octopmemory search "Python" -n 5 --corpus all
 即使 memory backend 为 PG，该文件索引仍是独立 SQLite；索引命中不代表已完成手动文档语义审核。
 迁移使用核心 CLI 的 `portable list-sources / pack / adopt / doctor`；导出的 `.hmpkg` 含记忆数据，不提交到仓库。
 
+## 升级原始记忆搜索索引
+
+宿主升级时，使用新版 CLI 和宿主实际使用的数据库配置，在恢复写入前执行对应命令。
+
+```bash
+octop-memory --backend sqlite --db "$MEMORY_DB" --namespace "$AGENT_NAMESPACE" db upgrade-index
+octop-memory --backend postgres --dsn "$MEMORY_DSN" db upgrade-index
+```
+
+SQLite 按文件和命名空间各执行一次，重建期间占用整库文件的写锁。升级前先停止旧版本的 SQLite 写入进程，
+升级后用新版库重新启动，因为新触发器依赖新版库注册的 SQL 函数。
+PostgreSQL 每个数据库执行一次，所有命名空间共用。建索引期间，写入原始事件表的操作会等待。
+失败会回滚，可以重跑。成功后再次执行返回 `already_current`。
+
+新库自带当前版本的空索引。旧库漏迁仍可正常记录对话、自动召回长期记忆和按路径读取原文。
+显式 `memory_search` 会返回其他来源的可用结果，并在 `warning` 中提示升级命令。没有命中时，`empty_reason` 也会提示升级。
+升级一旦提交，下次搜索就能查到历史配文和漏迁期间新写入的文字。
+
 ## 修改适配器
 
 共用业务逻辑放 `application/`；宿主层只转换 hook/tool contract。现有 OpenClaw/Hermes 适配暴露
 `memory_search(query, maxResults?, minScore?, corpus?)` 与 `memory_get(path, from?, lines?, corpus?)`。
 搜索结果含 `hits[]`，路径读取返回 `path/excerpt`；corpus 和字段以实际工具 schema 为准。
+原始事件用文字配文检索和排序，过滤序列化图片块和独占一行的图片占位语。通过 Memory 读取原始虚拟路径仍可取得原始证据。
 
 Hermes 的 `initialize` 必须接受 `hermes_home`；provider 方法和 manifest 事件 hook 是两类接口，不能混放。
 `sync_turn` 负责后台 capture，`prefetch` 同步召回，`queue_prefetch` 当前是 no-op；

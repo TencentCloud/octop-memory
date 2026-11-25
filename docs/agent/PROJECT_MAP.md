@@ -45,7 +45,7 @@ Paths in this table are relative to `src/octop_memory/`.
 | `operations/migration/`, `operations/migration/portable/` | JSONL export/import, namespace migration, backfill, portable packages |
 | `operations/retention.py` | Historical runtime-error governance, semantic manual-document reconciliation, audit metadata |
 
-Root `plugins/<host>/` contains external adapters, currently OpenClaw/Hermes; see the [integration guide](../integrations.md).
+Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
 `tests/` contains behavior tests, `evals/recall/` synthetic evaluation, and `examples/basic_usage.py` a public-API
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.
@@ -245,6 +245,12 @@ Ordinary page apply retains legacy backend signatures; explicit version conditio
 
 ## Recall and reads
 
+`pipeline/recall/names.py` resolves the longest known name or alias at each mention using one batched lookup. An ambiguous mention suppresses automatic atom injection. With a unique anchor, `multi_source._gather_atoms` searches both the owner's atoms and the global topic index. A global hit owned elsewhere must explicitly mention the requested entity in its assertion or quotation. Reciprocal rank fusion combines both lists before existing reranking and budgeting. A topic without an anchor searches globally. Date restrictions apply before the backend candidate limit.
+
+`pipeline/recall/fields.py` identifies supported combinations of subject and requested value from the residual query. It expands the existing lexical searches and requires a matching value in the assertion. Scoped cross-owner field hits require a reference to the target in the evidence for that value. Extractor v2.5 accepts optional `search_phrases` in the candidate payload. Promotion copies bounded phrases into the atom index. Replacing an assertion discards its generated phrases.
+
+`pipeline/lifecycle/dreaming.py` audits a cursor-bounded page of active atoms. The idle worker, background `review_new_memory`, and CLI `entity dream` reuse it. Journal entries under `entity_review` identify the source atom, quote, owner and suggested matches. Inspect them with `journal list --action entity_review`. Name-only evidence cannot change ownership. Candidate approval accepts an explicit entity ID for reviewed ambiguities.
+
 Main pipeline: cache → parse → route → atom-only source restriction → gather → raw policy → rerank → diversify → suppress → budget → render.
 `recall_for_prompt(atom_only=True)` is the automatic-injection default, gathering atom and optional vector atom hits only.
 No atom match returns empty; raw, page_headline, and episode cannot fill the prompt. Service, Hermes prefetch, and CLI use this default.
@@ -253,8 +259,14 @@ OpenClaw hybrid prefetch sends `atomOnly: true`; Runtime then skips non-atom sou
 host-prefetched/returned results and prompt rendering to canonical atom paths. Explicit tools keep existing sources.
 Cache scope includes atom-only mode, raw policy, current session, and manual-document snapshots to prevent cross-mode reuse.
 With multi-source retrieval, raw fallback excludes raw when durable results exist rather than topping up the count;
-current session/thread scope excludes that conversation's raw. The legacy `recall_multi_source` helper is unchanged.
-`memory_get` reads the virtual path returned by search; hosts should not guess IDs.
+current session/thread scope excludes that conversation's raw.
+Both recall pipelines use the raw text projection for candidates and snippets. SQLite FTS5 and PostgreSQL GIN index
+that projection before matching, ranking, and limiting. Image-only events contribute no search text, and SQLite excludes
+them from BM25 statistics. Fresh stores install empty current indexes. `db upgrade-index` calls `Memory.upgrade_search_index()` for historical
+rows. Explicit tool search checks SQLite version markers or the versioned PostgreSQL index's validity, skips
+pending raw search and reports an upgrade hint alongside other hits. Low-level raw search raises
+`SearchIndexUpgradeRequired` until maintenance commits. `Memory.search_raw()` returns
+original records for matching captions. `memory_get` reads the original evidence through a virtual path.
 
 ## Storage and connections
 

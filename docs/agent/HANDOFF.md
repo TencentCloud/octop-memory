@@ -24,6 +24,34 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Raw image search
+
+- **Status** — Under review in [Memory PR #54](https://github.com/TencentCloud/octop-memory/pull/54) for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).
+- **⚠️ Recall/write path change** — Index and rank captions from raw events. Skip serialized image blocks and image-only placeholders before applying the result limit. Keep original records and virtual-path reads for evidence. Fresh stores initialize empty indexes. Existing stores require `db upgrade-index` during the deployment window.
+  Raw recall returns an actionable pending status while capture, evidence reads, and automatic atom recall continue.
+- **Validation** — `make all` with disposable PostgreSQL 16, the SQLite namespace-copy regression, and both GIN variants. On old stores created by `c66e353`, the actual Harness tool returned the upgrade hint with and without atom hits. Capture and original reads stayed available, and a live reader found old and pending-period captions after the CLI ran. The Harness tool, service and recall-boundary suites passed 101 cases against the proposed Memory source.
+### Entity identity, lexical recall, and background review
+
+⚠️ Recall/write path change on local branch `feat/entity-recall-dreaming`, based on `c66e353`.
+Typed writes and promotion retain ambiguous identity for review. The prompt pipeline combines entity-scoped and global topical evidence.
+A bounded background audit records legacy assignment and alias evidence. See ADR-046 and [retrieval risks](KNOWN_RISKS.md#retrieval-quality-and-validation).
+
+The frozen 115-atom replay contains 26 answerable and six unanswerable questions. On SQLite, hit@5 rose from 15 to 23, first hits from 13 to 22, and unwanted injections fell from five to one. Among 22 project-specific questions, five previously included a fact from an unrelated project and none do now. On dedicated PostgreSQL the same replay went from five to 23 hit@5, three to 22 first hits, four to one unwanted injections, and zero to zero questions with unrelated project facts. Both new backends retrieve both relationship facts held by a person. At revision `4bb9a69` the remaining unwanted injection supplied a signatory for a telephone question. These are retrieval measurements on synthetic atoms. Production behavior and large-database latency remain unmeasured.
+
+The full library gate passed with real PostgreSQL (1,638 passed, 12 skipped). The three Harness service, middleware and prompt replay suites passed all 96 cases against the local memory source with the dedicated PostgreSQL database. The ten-project same-field control retained 10/10 first hits before and after on SQLite.
+
+Reproduce per-question results with `python -m evals.recall.entity_cases` and the PostgreSQL variant in [TEST_MATRIX](TEST_MATRIX.md#validation-by-change-scope).
+
+### Paraphrases and answer-field evidence
+
+⚠️ Recall/write path change. The baseline is the entity-aware dual retriever at `4bb9a69`. Atom candidate collection expands recognized topic/field pairs in the existing lexical queries. A precursor to this change missed an old PostgreSQL fact among 1,171 atoms because fragments of an already recognized compound crowded the top results. Keeping that subject whole recovered the fact. Contact lookups bind a labeled value to the requested role. Extractor v2.5 can index up to three additional topic phrases without an extra model call. Old atoms participate immediately through query expansion.
+
+On the frozen 115-atom replay, both backends moved from 23/26 to 26/26 hit@5 and from 22/26 to 25/26 first hits. Unwanted injection went from 1/6 to 0/6. Neither version injected an unrelated project in the 22 targeted questions. At 1,171 atoms both new backends also achieved 26/26 first hits. The separate 13-question general SQLite suite retained precision 0.808 and MRR 0.846. The frozen corpus has legacy index keys throughout. Generated phrases were exercised separately with a deterministic extractor response.
+
+Each version, corpus and backend received 512 timed public recall calls with warm storage and no result cache. On 115 atoms SQLite P50/P95 in milliseconds moved from 1.98/5.59 to 2.07/4.86, and PostgreSQL from 2.10/4.80 to 2.14/3.66. The four previously failing questions had median times of 1.98→2.69 ms on SQLite and 2.46→2.54 ms on PostgreSQL. On 19 atoms SQLite P95 increased from 1.95 to 4.32 ms. These are single-client local measurements. See [TEST_MATRIX](TEST_MATRIX.md#validation-by-change-scope) for replay commands.
+
+The library gate passed with the dedicated PG instance (1,646 passed, 12 skipped). All 14 focused entity and lexical field parity cases ran, including every PG variant. The three Harness integration suites passed all 96 cases. The separate ten-project same-field SQLite control retained 10/10 first hits.
+
 ### Checkpoint retention
 
 The old lifecycle prune could leave historical checkpoints pointing to deleted replay dependencies.

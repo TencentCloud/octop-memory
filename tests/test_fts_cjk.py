@@ -12,10 +12,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-from octop_memory import Memory
+from octop_memory import Memory, MemoryService
+from octop_memory.adapters.cli import main
 from octop_memory.application.host_files import HostFilesIndex
-from octop_memory.storage.backends.fts_text import FTS_TEXT_VERSION, fts_match_phrase, segment_cjk
+from octop_memory.storage.backends import SearchIndexUpgradeRequired
+from octop_memory.storage.backends.fts_text import (
+    FTS_TEXT_VERSION,
+    fts_match_phrase,
+    register_fts_functions,
+    segment_cjk,
+)
 from octop_memory.types import AtomCard
 
 
@@ -102,12 +110,86 @@ class TestChineseRecall:
 
 
 # ---------------------------------------------------------------------------
-# Legacy database migration (pre-v2 index → rebuilt on open)
+# Legacy database migration (pre-v2 index → explicit upgrade)
 # ---------------------------------------------------------------------------
 
 
 class TestLegacyMigration:
-    def test_v1_database_rebuilt_on_open(self, tmp_path: Path) -> None:
+    def test_legacy_raw_index_is_rebuilt_with_text_only(self, tmp_path: Path) -> None:
+        db = tmp_path / "legacy-raw.sqlite"
+        config = {"db_path": str(db)}
+        memory = Memory(namespace="t", backend="sqlite", backend_config=config)
+        image = '{"type":"image_url","workspace_path":"inbound/privateattachment.png"}'
+        raw = memory.add_raw(f"发布计划\n{image}", event_type="user_message")
+        pure = memory.add_raw(image, event_type="user_message")
+        memory.backend.close()
+
+        with sqlite3.connect(db) as legacy:
+            register_fts_functions(legacy)
+            legacy.execute("INSERT INTO t_raw_events_fts(t_raw_events_fts) VALUES ('delete-all')")
+            legacy.execute(
+                "INSERT INTO t_raw_events_fts(rowid, content) SELECT rowid, hm_cjk_seg(content) FROM t_raw_events"
+            )
+            legacy.execute("DROP TRIGGER t_raw_events_ai")
+            legacy.execute(
+                "CREATE TRIGGER t_raw_events_ai AFTER INSERT ON t_raw_events BEGIN "
+                "INSERT INTO t_raw_events_fts(rowid,content) VALUES(new.rowid,hm_cjk_seg(new.content)); END"
+            )
+            legacy.execute("DELETE FROM t_meta WHERE key = 'raw_fts_text_version'")
+            assert legacy.execute(
+                "SELECT COUNT(*) FROM t_raw_events_fts WHERE t_raw_events_fts MATCH 'privateattachment'"
+            ).fetchone() == (2,)
+        legacy.close()
+
+        memory = Memory(namespace="t", backend="sqlite", backend_config=config)
+        service = MemoryService(memory)
+        runner = CliRunner()
+        args = ["--backend", "sqlite", "--db", str(db), "--namespace", "t"]
+        try:
+            with pytest.raises(SearchIndexUpgradeRequired):
+                memory.search_raw("privateattachment")
+            assert memory.get_meta("raw_fts_text_version") is None
+            result = runner.invoke(main, [*args, "raw", "search", "privateattachment"])
+            assert result.exit_code == 1 and "db upgrade-index" in result.output
+            service.capture_turn(user="pendingcaption from this conversation", thread_id="writing")
+            assert memory.list_raw(thread_id="writing")[0].content.startswith("pendingcaption")
+            service.save("Durable fact about papercraft")
+            partial = service.search("papercraft")
+            assert partial["hits"][0]["layer"] == "atom" and "db upgrade-index" in partial["warning"]
+            assert service.recall("papercraft").snippets[0].layer == "atom"
+            assert "db upgrade-index" in service.search("pendingcaption", thread_id="reader")["empty_reason"]
+            # An interrupted projection rolls back the trigger swap and the FTS rows.
+            conn = memory.backend._conn
+            conn.create_function("hm_raw_search_text", 1, lambda _: 1 / 0)
+            with pytest.raises(sqlite3.OperationalError):
+                memory.upgrade_search_index()
+            register_fts_functions(conn)
+            assert not memory.raw_search_index_ready()
+            assert (
+                conn.execute(
+                    "SELECT count(*) FROM t_raw_events_fts WHERE t_raw_events_fts MATCH 'privateattachment'"
+                ).fetchone()[0]
+                == 2
+            )
+            for status in ("upgraded", "already_current"):
+                result = runner.invoke(main, [*args, "--json", "db", "upgrade-index"])
+                assert result.exit_code == 0, result.output
+                assert result.output.strip() == '{"status": "' + status + '"}'
+            # Same long-lived reader and query observe the committed maintenance.
+            assert service.search("pendingcaption", thread_id="reader")["hits"][0]["layer"] == "raw"
+        finally:
+            memory.backend.close()
+
+        for _ in range(2):
+            memory = Memory(namespace="t", backend="sqlite", backend_config=config)
+            assert memory.search_raw("privateattachment") == []
+            assert [event.id for event in memory.search_raw("发布")] == [raw.id]
+            assert memory.get_raw(raw.id) == raw
+            assert memory.get_raw(pure.id) == pure
+            assert memory.backend._conn.execute("SELECT COUNT(*) FROM t_raw_events_fts_docsize").fetchone()[0] == 3
+            memory.backend.close()
+
+    def test_v1_database_rebuilt_by_explicit_upgrade(self, tmp_path: Path) -> None:
         db = tmp_path / "legacy.sqlite"
         m = Memory(namespace="t", backend="sqlite", backend_config={"db_path": str(db)})
         m.add_raw("用户决定把部署方案从docker切换到裸机部署", event_type="user_message")
@@ -128,7 +210,10 @@ class TestLegacyMigration:
         conn.close()
 
         m2 = Memory(namespace="t", backend="sqlite", backend_config={"db_path": str(db)})
-        # Old rows searchable after the automatic rebuild...
+        with pytest.raises(SearchIndexUpgradeRequired):
+            m2.search_raw("部署")
+        assert m2.upgrade_search_index()
+        # Old rows searchable after the explicit rebuild...
         assert len(m2.search_raw("部署")) == 1
         # ...and new writes go through the segmented trigger.
         m2.add_raw("会议改到周五下午", event_type="user_message")

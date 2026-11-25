@@ -42,6 +42,7 @@ from octop_memory.pipeline.lifecycle.vacuum import (
     compact_vacuum,
     nudge_vacuum,
 )
+from octop_memory.storage.driver_errors import DRIVER_ERRORS
 
 
 @click.group(name="db")
@@ -51,6 +52,31 @@ def db_group() -> None:
 
 db_group.add_command(checkpoints_cmd)
 db_group.add_command(slim_cmd)
+
+
+@db_group.command(name="upgrade-index")
+@click.pass_context
+def upgrade_index_cmd(ctx: click.Context) -> None:
+    """Upgrade historical raw memory search during a maintenance window.
+
+    Run once per SQLite file and namespace, or once per PostgreSQL database.
+    Pause older writers first. The rebuild holds a write lock for its duration.
+    Re-running an up-to-date store skips the rebuild.
+    """
+    memory = get_memory(ctx)
+    try:
+        upgraded = memory.upgrade_search_index()
+    except DRIVER_ERRORS as exc:
+        raise click.ClickException(f"Index upgrade failed: {exc}") from exc
+    finally:
+        close = getattr(memory.backend, "close", None)
+        if close is not None:
+            close()
+    status = "upgraded" if upgraded else "already_current"
+    if ctx.obj["output_json"]:
+        click.echo(json.dumps({"status": status}))
+    else:
+        click.echo(f"Raw memory search index: {status}")
 
 
 @db_group.command(name="check")

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
+from octop_memory.domain.raw_search import raw_search_text
 from octop_memory.types import AtomCard, ConfidenceLevel, ImportanceLevel, RawEvent
 
 # ---------------------------------------------------------------------------
@@ -214,7 +215,7 @@ def from_raw(event: RawEvent, *, rank_index: int = 0) -> RerankCandidate:
     return RerankCandidate(
         source_id=event.id,
         layer="raw",
-        text=event.content,
+        text=raw_search_text(event.content),
         occurred_at=event.timestamp,
         importance="medium",
         confidence="medium",

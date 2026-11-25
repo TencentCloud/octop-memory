@@ -898,7 +898,7 @@ def promote_candidate(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
     if cand.status == "pending":
         result = memory.promote_candidates([cand])
     else:
-        decision = PromotionWorker(memory).approve(cand)
+        decision = PromotionWorker(memory).approve(cand, entity_id=_opt_str(params, "entity_id"))
         result = PromotionResult(decisions=[decision])
     return {
         "promoted": result.promoted,

@@ -2,11 +2,11 @@
 
 **English** · [中文](integrations_CN.md)
 
-Host integration, adapters, and validation for the current OpenClaw/Hermes implementations.
+Host integration, adapters, and validation for OpenClaw, Hermes, and the terminal client installer.
 See the [README](../README.md), [CONTRIBUTING](../CONTRIBUTING.md), and [documentation index](README.md)
 for core APIs, development, and navigation.
 
-Read by task: [Python hosts](#python-hosts) · [JSON-RPC bridge](#json-rpc-bridge) · [OpenClaw](#openclaw) ·
+Read by task: [Python hosts](#python-hosts) · [JSON-RPC bridge](#json-rpc-bridge) · [Terminal clients](#terminal-clients) · [OpenClaw](#openclaw) ·
 [Hermes](#hermes) · [Troubleshooting](#shared-verification-and-troubleshooting) ·
 [Existing installations](#renaming-and-migrating-existing-installations).
 
@@ -90,6 +90,36 @@ Batching and durable progress share the [Runtime contract](agent/PROJECT_MAP.md#
 Use Python 3.12+ and SQLite with FTS5. Host requirements follow the
 [OpenClaw manifest](../plugins/openclaw/octopmemory/package.json) and Hermes provider contract.
 Hermes needs v0.10.0+ with `MemoryProvider`; installation instructions are not acceptance of every later host version.
+
+## Terminal clients
+
+`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. It calls an Octop memory MCP endpoint with a user token created in Octop. It does not open a local memory database and does not embed a credential in the repository.
+
+The installer is on the `develop` branch. The `main` branch does not contain these scripts yet, so the one-line installers below use `develop`.
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
+  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+```
+
+The script tries `uvx`, then `pipx`, then a temporary virtualenv. A manual install is `pip install octop-memory-harness` (or `pip install ./plugins/harness` from a checkout) followed by `octop-memory-harness install --url ... --token ...`.
+
+- `--terminals claude-code,codex,cursor,kiro,dsh` selects hosts. Non-interactive runs read this flag.
+- `--project <dir>` registers one repository. Hook scripts and the token file stay in the user directory.
+- `octop-memory-harness uninstall` removes this installer's registrations and files.
+
+Stop hooks pass new transcript bytes to a local parser, which calls `memory_capture(events=...)`. The server does not parse the transcript. The saved byte offset advances only after a successful capture. DSH loads the native plugin `dsh-octop-memory` (`dsh.engines.dsh` at least `0.2.0`) instead of the hook bridge. Codex needs a one-time hook trust, and the terminal should be restarted after install.
+
+Host directories, the `config.json` shape, and the page that can be handed to an assistant are in [plugins/harness/README.md](../plugins/harness/README.md) and [AI-SETUP.md](../plugins/harness/AI-SETUP.md).
 
 ## OpenClaw
 
@@ -264,12 +294,35 @@ and `topics/*.md`/`projects/*.md`. Custom allowlists use safe relative Markdown 
 Hits are SQLite index snapshots, even with PG memory; file indexing is not completed semantic document review.
 Migration uses core CLI `portable list-sources / pack / adopt / doctor`; exported `.hmpkg` contains memory and must not be committed.
 
+## Upgrading the raw search index
+
+Run the new CLI during the host upgrade, before resuming writers. Use the same database settings as the host.
+
+```bash
+octop-memory --backend sqlite --db "$MEMORY_DB" --namespace "$AGENT_NAMESPACE" db upgrade-index
+octop-memory --backend postgres --dsn "$MEMORY_DSN" db upgrade-index
+```
+
+Run once per SQLite file **and namespace**, or once per PostgreSQL database for all namespaces.
+SQLite holds the file's writer lock while rebuilding. Stop older SQLite processes before the upgrade
+and restart them with the new library, since the new triggers require its SQL functions.
+PostgreSQL blocks writes to the shared raw event table while building its GIN index.
+A failed rebuild rolls back and the same command can be retried. A repeat after success reports `already_current`.
+
+Fresh stores start with an empty current index. Opening an older store or searching it leaves the historical
+index pending. Capture, automatic atom recall and original path reads continue. Explicit `memory_search`
+returns available hits with a `warning` containing the upgrade command. With zero hits, `empty_reason`
+also carries the hint. After the upgrade commits, the next search can use captured turns, including those
+written while the upgrade was pending.
+
 ## Modifying adapters
 
 Put shared behavior in `application/`; host adapters only translate hook/tool contracts.
 Current adapters expose `memory_search(query, maxResults?, minScore?, corpus?)` and
 `memory_get(path, from?, lines?, corpus?)`. Search returns `hits[]`, reads return `path/excerpt`;
 follow the actual tool schema for corpus and fields.
+Raw events match and rank using text captions. Serialized image blocks and standalone image placeholders are excluded.
+Reading a raw virtual path through Memory returns the original evidence.
 
 Hermes `initialize` accepts `hermes_home`; provider methods and manifest event hooks are separate interfaces.
 `sync_turn` captures in the background, `prefetch` recalls synchronously, and `queue_prefetch` is currently a no-op.

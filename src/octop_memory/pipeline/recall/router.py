@@ -10,7 +10,7 @@ Decision matrix (design doc §9.2):
 | co-reference only ("that project")  | active-entity stack → atom | needs thread_id           |
 | empty / nothing                     | none                        | recall returns empty      |
 
-The router doesn't run I/O itself; it returns a routing decision the
+The router resolves names and thread state and returns a decision the
 caller passes to :func:`octop_memory.pipeline.recall.multi_source.gather_candidates`
 plus thread-state side effects (push hits / mentions to the active
 entity stack).
@@ -22,6 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from octop_memory.pipeline.recall.names import resolve_mentions
 from octop_memory.pipeline.recall.parser import ParsedQuery
 from octop_memory.storage.driver_errors import DRIVER_ERRORS
 
@@ -50,6 +51,7 @@ class RoutingDecision:
     active stack, the resulting entity id. The router has already
     added it to ``resolved_entity_ids`` when it does — exposed
     separately for diagnostics."""
+    topic: str | None = None
 
 
 def route(
@@ -67,17 +69,14 @@ def route(
     if not parsed.text:
         return RoutingDecision(sources=())
 
-    resolved: list[str] = []
-
-    # ---- entity hints (D41a-C) -----------------------------------------
-    for alias in parsed.entity_hints:
-        try:
-            entity = memory.find_entity_by_alias(alias)
-        except DRIVER_ERRORS:
-            _log.warning("recall alias lookup failed for %r", alias, exc_info=True)
-            continue
-        if entity is not None:
-            resolved.append(entity.id)
+    try:
+        resolved, topic, ambiguous = resolve_mentions(memory, parsed.text)
+    except DRIVER_ERRORS:
+        _log.warning("recall entity lookup failed", exc_info=True)
+        return RoutingDecision(sources=("raw",))
+    if ambiguous:
+        # Only explicit tool searches can consult raw evidence for clarification.
+        return RoutingDecision(sources=("raw",), topic=topic)
 
     # ---- co-reference resolution (D41a-A reverse — read from stack) ----
     coref_eid: str | None = None
@@ -110,6 +109,7 @@ def route(
 
     return RoutingDecision(
         sources=sources,
+        topic=topic,
         resolved_entity_ids=tuple(resolved),
         coref_resolved_entity_id=coref_eid,
     )

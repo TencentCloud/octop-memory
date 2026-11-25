@@ -27,13 +27,16 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from octop_memory.domain.raw_search import raw_search_text
+
 FTS_TEXT_VERSION = "2"
 """Bump whenever :func:`segment_cjk` output changes for any input.
 
-Stored per-namespace in the ``{ns}_meta`` table; a mismatch at backend
-init triggers a full FTS trigger re-creation + index rebuild so old
-databases pick up the new segmentation transparently.
+Stored per-namespace in the ``{ns}_meta`` table; the explicit index upgrade rebuilds outdated
+triggers and FTS rows before recording the new version.
 """
+
+RAW_FTS_TEXT_VERSION = "1"
 
 # CJK Unified Ideographs + Extension A + Compatibility Ideographs.
 # Kana / Hangul deliberately excluded — consistent with the project's
@@ -74,17 +77,27 @@ def fts_match_phrase(query: str) -> str:
 
 
 def register_fts_functions(conn: sqlite3.Connection) -> None:
-    """Register ``hm_cjk_seg`` on ``conn``.
+    """Register the text projections on ``conn``.
 
     MUST be called on every connection that writes to a table with
     FTS-sync triggers (the triggers call the function). Idempotent —
     re-registering simply replaces the function.
     """
     conn.create_function(_SQL_FUNC_NAME, 1, segment_cjk, deterministic=True)
+    conn.create_function("hm_raw_search_text", 1, raw_search_text, deterministic=True)
+
+
+def fts_index_value(expression: str, *, raw: bool) -> str:
+    """Render an indexed value for SQLite trigger and rebuild statements."""
+    if raw:
+        expression = f"hm_raw_search_text({expression})"
+    return f"hm_cjk_seg({expression})"
 
 
 __all__ = [
     "FTS_TEXT_VERSION",
+    "RAW_FTS_TEXT_VERSION",
+    "fts_index_value",
     "fts_match_phrase",
     "register_fts_functions",
     "segment_cjk",

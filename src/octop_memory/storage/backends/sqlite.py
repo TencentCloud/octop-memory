@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import Any, Concatenate
 
 from octop_memory.domain.datetime import as_utc, parse_datetime_utc
-from octop_memory.storage.backends import _UNSET, _Unset
+from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.fts_text import (
     FTS_TEXT_VERSION,
+    RAW_FTS_TEXT_VERSION,
+    fts_index_value,
     fts_match_phrase,
     register_fts_functions,
 )
@@ -42,6 +44,8 @@ from octop_memory.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FTS_VERSIONS = {"fts_text_version": FTS_TEXT_VERSION, "raw_fts_text_version": RAW_FTS_TEXT_VERSION}
 
 # Stamped into {ns}_meta on every open. External tools (portable doctor,
 # portable list-sources) read it to distinguish a healthy octop-memory
@@ -181,6 +185,19 @@ class SqliteMemoryBackend:
 
     def _init_schema(self) -> None:
         ns = self._ns
+        # A new namespace starts with current empty indexes. Existing stores
+        # (including old layouts without metadata) require explicit maintenance.
+        meta_exists = "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?"
+        if self._conn.execute(meta_exists, (f"{ns}_meta",)).fetchone() is None:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(f"CREATE TABLE IF NOT EXISTS {ns}_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                existing = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+                    (f"{ns}_raw_events", f"{ns}_memory_nodes"),
+                ).fetchone()
+                if existing is None:
+                    self._conn.executemany(f"INSERT OR IGNORE INTO {ns}_meta VALUES (?, ?)", _FTS_VERSIONS.items())
         self._conn.executescript(f"""
             CREATE TABLE IF NOT EXISTS {ns}_memory_nodes (
                 id TEXT PRIMARY KEY,
@@ -526,30 +543,33 @@ class SqliteMemoryBackend:
     )
 
     def _create_fts_triggers(self) -> None:
-        """(Re)create the FTS-sync triggers with CJK-segmented bodies."""
+        """Create the FTS-sync triggers without committing the caller's transaction."""
         ns = self._ns
-        statements: list[str] = []
         for prefix, base_suffix, fts_suffix, rowid_expr, columns, with_update in self._FTS_SYNC_SPECS:
             base = f"{ns}_{base_suffix}"
             fts = f"{ns}_{fts_suffix}"
+            raw = base_suffix == "raw_events"
             col_list = ", ".join(name for name, _ in columns)
-            new_vals = ", ".join(f"hm_cjk_seg({expr.format(row='new')})" for _, expr in columns)
-            old_vals = ", ".join(f"hm_cjk_seg({expr.format(row='old')})" for _, expr in columns)
-            statements.append(
+            new_vals = ", ".join(fts_index_value(expr.format(row="new"), raw=raw) for _, expr in columns)
+            old_vals = ", ".join(fts_index_value(expr.format(row="old"), raw=raw) for _, expr in columns)
+            # Omitting empty raw documents also keeps them out of FTS5's BM25 statistics.
+            insert_when = f"WHEN {new_vals} <> '' " if raw else ""
+            delete_when = f"WHEN {old_vals} <> '' " if raw else ""
+            self._conn.execute(
                 f"CREATE TRIGGER IF NOT EXISTS {ns}_{prefix}_ai "
-                f"AFTER INSERT ON {base} BEGIN "
+                f"AFTER INSERT ON {base} {insert_when}BEGIN "
                 f"INSERT INTO {fts}(rowid, {col_list}) VALUES (new.{rowid_expr}, {new_vals}); "
                 f"END;"
             )
-            statements.append(
+            self._conn.execute(
                 f"CREATE TRIGGER IF NOT EXISTS {ns}_{prefix}_ad "
-                f"AFTER DELETE ON {base} BEGIN "
+                f"AFTER DELETE ON {base} {delete_when}BEGIN "
                 f"INSERT INTO {fts}({fts}, rowid, {col_list}) "
                 f"VALUES ('delete', old.{rowid_expr}, {old_vals}); "
                 f"END;"
             )
             if with_update:
-                statements.append(
+                self._conn.execute(
                     f"CREATE TRIGGER IF NOT EXISTS {ns}_{prefix}_au "
                     f"AFTER UPDATE ON {base} BEGIN "
                     f"INSERT INTO {fts}({fts}, rowid, {col_list}) "
@@ -557,49 +577,57 @@ class SqliteMemoryBackend:
                     f"INSERT INTO {fts}(rowid, {col_list}) VALUES (new.{rowid_expr}, {new_vals}); "
                     f"END;"
                 )
-        self._conn.executescript("\n".join(statements))
 
-    def _migrate_fts_text_version(self) -> None:
-        """Rebuild FTS triggers + index when the segmentation version changes.
-
-        Pre-v2 databases indexed raw text with unicode61, which collapses
-        a contiguous Han run into a single token — Chinese queries matched
-        almost nothing. The rebuild drops the old triggers (CREATE TRIGGER
-        IF NOT EXISTS would keep them), recreates them with hm_cjk_seg()
-        bodies, and re-derives every FTS row from its base table.
-        """
-        ns = self._ns
-        self._conn.execute(f"CREATE TABLE IF NOT EXISTS {ns}_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        row = self._conn.execute(f"SELECT value FROM {ns}_meta WHERE key = 'fts_text_version'").fetchone()
-        if row is not None and row[0] == FTS_TEXT_VERSION:
-            return
-
-        for prefix, base_suffix, _fts, _rowid, _cols, _wu in self._FTS_SYNC_SPECS:
-            # Drop both naming schemes: _init_schema uses the trigger
-            # prefix ({ns}_memory_ai), operations/migration/rename.py historically
-            # used the base-table suffix ({ns}_memory_nodes_ai). Leaving
-            # either behind would double-insert into FTS.
-            for name in {prefix, base_suffix}:
-                for suffix in ("ai", "ad", "au"):
-                    self._conn.execute(f"DROP TRIGGER IF EXISTS {ns}_{name}_{suffix}")
-        self._create_fts_triggers()
-
-        for _prefix, base_suffix, fts_suffix, rowid_expr, columns, _wu in self._FTS_SYNC_SPECS:
-            base = f"{ns}_{base_suffix}"
-            fts = f"{ns}_{fts_suffix}"
-            col_list = ", ".join(name for name, _ in columns)
-            col_select = ", ".join(f"hm_cjk_seg({expr.format(row=base)})" for _, expr in columns)
-            self._conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('delete-all')")
+    def _fts_versions(self) -> dict[str, str]:
+        return dict(
             self._conn.execute(
-                f"INSERT INTO {fts}(rowid, {col_list}) SELECT {base}.{rowid_expr}, {col_select} FROM {base}"
+                f"SELECT key, value FROM {self._ns}_meta WHERE key IN ('fts_text_version', 'raw_fts_text_version')"
             )
-
-        self._conn.execute(
-            f"INSERT INTO {ns}_meta (key, value) VALUES ('fts_text_version', ?) "
-            f"ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (FTS_TEXT_VERSION,),
         )
-        self._commit()
+
+    @locked_sqlite_operation
+    def raw_search_index_ready(self) -> bool:
+        return self._fts_versions() == _FTS_VERSIONS
+
+    @locked_sqlite_operation
+    def upgrade_search_index(self) -> bool:
+        """Replace old triggers, rebuild their FTS rows and publish versions atomically."""
+        ns = self._ns
+        if self._in_transaction:
+            raise RuntimeError("Run the index upgrade outside a business transaction")
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            stored = self._fts_versions()
+            if stored == _FTS_VERSIONS:
+                return False
+
+            specs = self._FTS_SYNC_SPECS
+            if stored.get("fts_text_version") == FTS_TEXT_VERSION:
+                specs = tuple(spec for spec in specs if spec[1] == "raw_events")
+            for prefix, base_suffix, _fts, _rowid, _cols, _wu in specs:
+                # Drop both canonical and historical rename trigger names.
+                for name in {prefix, base_suffix}:
+                    for suffix in ("ai", "ad", "au"):
+                        self._conn.execute(f"DROP TRIGGER IF EXISTS {ns}_{name}_{suffix}")
+            self._create_fts_triggers()
+
+            for _prefix, base_suffix, fts_suffix, rowid_expr, columns, _wu in specs:
+                base = f"{ns}_{base_suffix}"
+                fts = f"{ns}_{fts_suffix}"
+                raw = base_suffix == "raw_events"
+                col_list = ", ".join(name for name, _ in columns)
+                col_select = ", ".join(fts_index_value(expr.format(row=base), raw=raw) for _, expr in columns)
+                where = f" WHERE {col_select} <> ''" if raw else ""
+                self._conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('delete-all')")
+                self._conn.execute(
+                    f"INSERT INTO {fts}(rowid, {col_list}) SELECT {base}.{rowid_expr}, {col_select} FROM {base}{where}"
+                )
+            self._conn.executemany(
+                f"INSERT INTO {ns}_meta (key, value) VALUES (?, ?) "
+                f"ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                _FTS_VERSIONS.items(),
+            )
+        return True
 
     def _migrate_schema(self) -> None:
         """Apply incremental schema migrations for existing databases.
@@ -631,10 +659,6 @@ class SqliteMemoryBackend:
             page_cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({page_table})").fetchall()}
             if "mutation_version" not in page_cols:
                 self._conn.execute(f"ALTER TABLE {page_table} ADD COLUMN mutation_version INTEGER NOT NULL DEFAULT 0")
-
-        # CJK FTS segmentation (fts_text v2): rebuild triggers + index
-        # for databases created before the segmentation fix.
-        self._migrate_fts_text_version()
 
         # RISK-026 / ADR-024: journal target_* indexes → partial.
         self._migrate_journal_target_indexes_to_partial()
@@ -1038,8 +1062,10 @@ class SqliteMemoryBackend:
 
     @locked_sqlite_operation
     def search_raw(self, query: str, *, limit: int = 10) -> list[RawEvent]:
-        """FTS5 full-text search over raw event content."""
+        """Match and rank projected raw text, returning the original events."""
         ns = self._ns
+        if not self.raw_search_index_ready():
+            raise SearchIndexUpgradeRequired()
         # Wrap as phrase so operators like '-' don't trigger NOT.
         safe_query = fts_match_phrase(query)
         rows = self._conn.execute(
@@ -1482,6 +1508,41 @@ class SqliteMemoryBackend:
         return [self._row_to_atom(r) for r in rows]
 
     @locked_sqlite_operation
+    def search_atom_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        entity_ids: Sequence[str] = (),
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 20,
+    ) -> list[AtomCard]:
+        ns = self._ns
+        clauses = ["a.deprecated_at IS NULL"]
+        params: list[object] = []
+        table = f"{ns}_atoms a"
+        order = "a.occurred_at DESC"
+        if terms:
+            table += f" JOIN {ns}_atoms_fts f ON a.rowid = f.rowid"
+            clauses.append(f"f.{ns}_atoms_fts MATCH ?")
+            params.append(" OR ".join(fts_match_phrase(term) for term in terms))
+            order = "rank"
+        if entity_ids:
+            clauses.append("a.entity_id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(list(entity_ids)))
+        if start is not None:
+            clauses.append("a.occurred_at >= ?")
+            params.append(start.isoformat())
+        if end is not None:
+            clauses.append("a.occurred_at < ?")
+            params.append(end.isoformat())
+        rows = self._conn.execute(
+            f"SELECT a.* FROM {table} WHERE {' AND '.join(clauses)} ORDER BY {order}, a.id LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    @locked_sqlite_operation
     def search_atoms_by_time_range(
         self,
         *,
@@ -1559,20 +1620,20 @@ class SqliteMemoryBackend:
     ) -> Entity | None:
         ns = self._ns
         if entity_type is not None:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 f"""SELECT * FROM {ns}_entities
                     WHERE canonical_name = ? COLLATE NOCASE AND entity_type = ?
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (canonical_name, entity_type),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 f"""SELECT * FROM {ns}_entities
                     WHERE canonical_name = ? COLLATE NOCASE
-                    LIMIT 1""",
+                    LIMIT 2""",
                 (canonical_name,),
-            ).fetchone()
-        return self._row_to_entity(row) if row else None
+            ).fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     @locked_sqlite_operation
     def list_entities(
@@ -1659,6 +1720,47 @@ class SqliteMemoryBackend:
         self._commit()
 
     @locked_sqlite_operation
+    def scan_live_atoms(self, after_id: str, *, limit: int) -> list[AtomCard]:
+        rows = self._conn.execute(
+            f"""SELECT * FROM {self._ns}_atoms WHERE id > ? AND deprecated_at IS NULL
+                        ORDER BY id LIMIT ?""",
+            (after_id, limit),
+        ).fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    @locked_sqlite_operation
+    def similar_name_candidates(self, entity: Entity, prefix: str, *, limit: int) -> list[Entity]:
+        rows = self._conn.execute(
+            f"""SELECT * FROM {self._ns}_entities WHERE entity_type = ? AND id <> ?
+                    AND instr(lower(canonical_name), ?) = 1
+                        ORDER BY lower(canonical_name), id LIMIT ?""",
+            (entity.entity_type, entity.id, prefix, limit),
+        ).fetchall()
+        return [self._row_to_entity(row) for row in rows]
+
+    @locked_sqlite_operation
+    def match_entity_names(self, names: Sequence[str]) -> dict[str, list[Entity]]:
+        """Find all owners, including legacy canonical names without alias rows."""
+        if not names:
+            return {}
+        ns = self._ns
+        keys = json.dumps(list(names))
+        rows = self._conn.execute(
+            f"""SELECT a.alias AS matched_name, e.* FROM {ns}_aliases a
+                JOIN {ns}_entities e ON e.id = a.entity_id
+                WHERE a.alias IN (SELECT value FROM json_each(?))
+                UNION ALL
+                SELECT lower(canonical_name) AS matched_name, e.* FROM {ns}_entities e
+                WHERE canonical_name COLLATE NOCASE IN (SELECT value FROM json_each(?))""",
+            (keys, keys),
+        ).fetchall()
+        matches: dict[str, dict[str, Entity]] = {}
+        for row in rows:
+            entity = self._row_to_entity(row)
+            matches.setdefault(row["matched_name"], {})[entity.id] = entity
+        return {name: list(owners.values()) for name, owners in matches.items()}
+
+    @locked_sqlite_operation
     def find_entity_by_alias(self, alias: str) -> Entity | None:
         """Resolve a (normalized) alias to its entity, or ``None`` if not found.
 
@@ -1667,14 +1769,14 @@ class SqliteMemoryBackend:
         can decide their own normalization scheme.
         """
         ns = self._ns
-        row = self._conn.execute(
+        rows = self._conn.execute(
             f"""SELECT e.* FROM {ns}_aliases a
                 JOIN {ns}_entities e ON a.entity_id = e.id
                 WHERE a.alias = ?
-                LIMIT 1""",
+                LIMIT 2""",
             (alias,),
-        ).fetchone()
-        return self._row_to_entity(row) if row else None
+        ).fetchall()
+        return self._row_to_entity(rows[0]) if len(rows) == 1 else None
 
     @locked_sqlite_operation
     def list_aliases(
@@ -1981,13 +2083,14 @@ class SqliteMemoryBackend:
     @locked_sqlite_operation
     def append_journal(self, entry: JournalEntry) -> None:
         """Append a journal entry. Pipeline rows are expired by ``delete_journal``."""
+        duplicate = "ON CONFLICT(id) DO NOTHING" if entry.action == "entity_review" else ""
         ns = self._ns
         self._conn.execute(
             f"""INSERT INTO {ns}_journal
                 (id, timestamp, action, actor,
                  target_entity_id, target_atom_id, target_candidate_id,
                  before, after, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) {duplicate}""",
             (
                 entry.id,
                 entry.timestamp.isoformat(),
