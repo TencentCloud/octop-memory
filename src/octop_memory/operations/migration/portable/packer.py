@@ -30,7 +30,7 @@ from octop_memory.operations.migration.portable.models import (
 from octop_memory.operations.migration.portable.sources import list_sources
 
 try:
-    from octop_memory._version import __version__ as _HM_VERSION  # type: ignore[import-untyped]
+    from octop_memory._version import __version__ as _HM_VERSION
 except ImportError:
     _HM_VERSION = "unknown"
 
