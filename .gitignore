@@ -64,9 +64,6 @@ coverage.xml
 # uv
 .uv/
 
-# hatch-vcs auto-generated version file
-src/octop_memory/_version.py
-
 # Personal assistant settings; shared project rules live in AGENTS.md.
 # Track the shared publish skill (Octop-style); ignore everything else under these dirs.
 /.codebuddy/*
