@@ -53,6 +53,11 @@ def test_memory_service_does_not_import_bridge_adapter() -> None:
     assert not any(imp.startswith("octop_memory.adapters.bridge") for imp in imports)
 
 
+def test_package_declares_inline_types() -> None:
+    marker = (SRC / "py.typed").read_text(encoding="utf-8")
+    assert "partial" not in marker
+
+
 def test_project_map_uses_current_package_layout() -> None:
     project_map = (ROOT / "docs" / "agent" / "PROJECT_MAP.md").read_text(encoding="utf-8")
     legacy_markers = [
