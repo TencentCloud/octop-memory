@@ -43,6 +43,11 @@ Your host manages agent execution and model scheduling; Octop Memory handles cap
 
 <a id="highlights"></a>
 
+## Standalone service
+
+Run `octop-memory serve` to expose memory tools over HTTP MCP. Give each client installation its own token for the space.
+See the [standalone server guide](SERVER.md) for setup and the admin API.
+
 ## ✨ Highlights
 
 | | What stands out | What you get |

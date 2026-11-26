@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from octop_memory.core import Memory
 from octop_memory.domain.alias import normalize_alias
 from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 from octop_memory.types import (
@@ -2192,6 +2193,97 @@ class TestEntityIdentityAndRecall:
         assert memory.find_entity_by_alias("信使") is None
 
 
+@pytest.fixture
+def deterministic_recall(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These are storage/lexical assertions. Exercise the real database reads
+    # even if a scheduled worker or database takes longer than an interactive turn.
+    from octop_memory.pipeline.recall import multi_source
+    from octop_memory.pipeline.recall.timeout import Stopwatch
+
+    monkeypatch.setattr(Stopwatch, "elapsed_ms", property(lambda _: 0))
+    monkeypatch.setattr(multi_source, "with_deadline", lambda search, **_: search())
+
+
+@pytest.mark.usefixtures("deterministic_recall")
+class TestRecallAdmission:
+    @pytest.fixture
+    def memory(self, backend: Any) -> Memory:
+        return Memory(namespace="admission", backend=backend)
+
+    def test_rejected_atoms_do_not_take_entity_slots(self, memory: Memory) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        good, owner, _ = memory.create_atom("Amber zinnia signoff.", entity_name="Atlas", importance="low")
+        for text in ("Amber paperwork.", "Amber weekly check.", "Amber status."):
+            memory.create_atom(text, entity_id=owner.id, importance="high")
+        result = recall_for_prompt(memory, "amber zinnia", min_token_coverage=1, weights=(0, 1, 0, 0, 0))
+        assert [s.source_id for s in result.snippets] == [good.id]
+
+    def test_rejected_near_duplicate_does_not_suppress_eligible_atom(self, memory: Memory) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        text = "Amber launch requires signoff by every owner before official release"
+        _, owner, _ = memory.create_atom(text, entity_name="Atlas", importance="high")
+        good, _, _ = memory.create_atom(text + " zinnia", entity_id=owner.id, importance="low")
+        result = recall_for_prompt(memory, "amber zinnia", min_token_coverage=1, weights=(0, 1, 0, 0, 0))
+        assert [s.source_id for s in result.snippets] == [good.id]
+
+    @pytest.mark.parametrize("quoted", [False, True])
+    def test_only_eligible_atoms_block_raw_fallback(self, memory: Memory, quoted: bool) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        raw = memory.add_raw("Amber zinnia signoff is Friday.", session_id="history", event_type="user_message")
+        if quoted:
+            memory.add_entity(_make_entity())
+            atom = _make_atom(
+                assertion="Amber ledger.", raw_event_ids=[raw.id], quote_event_id=raw.id, verbatim_quote=raw.content
+            )
+            memory.add_atom(atom)
+        else:
+            atom, _, _ = memory.create_atom("Amber ledger.", entity_name="Ledger")
+        args = {"min_token_coverage": 1.0, "atom_only": False}
+        assert [s.source_id for s in recall_for_prompt(memory, "amber zinnia", **args).snippets] == [raw.id]
+        assert not recall_for_prompt(memory, "amber zinnia", session_id="history", **args).snippets
+        assert not recall_for_prompt(memory, "amber zinnia", min_token_coverage=1).snippets
+        assert [s.source_id for s in recall_for_prompt(memory, "amber", **args).snippets] == [atom.id]
+
+    def test_resolved_project_name_and_alias_supply_scope(self, memory: Memory) -> None:
+        from octop_memory import MemoryService
+
+        atom, owner, _ = memory.create_atom("Invoices require approval.", entity_name="Fjord", entity_type="Project")
+        memory.add_alias(Alias("fjord-team", owner.id, "Project", "user", owner.created_at))
+        memory.create_atom("Invoices require a receipt.", entity_name="Beacon", entity_type="Project")
+        service = MemoryService(memory)
+        for query in ("Fjord", "fjord-team", "Fjord invoices"):
+            assert [s.source_id for s in service.recall(query, min_token_coverage=1).snippets] == [atom.id]
+        assert not service.recall("Fjord invoices cobalt", min_token_coverage=1).snippets
+
+    @pytest.mark.parametrize("query", ["port 8088", "端口8088", "8088"])
+    def test_exact_coverage_counts_numeric_ports(self, memory: Memory, query: str) -> None:
+        from octop_memory import MemoryService
+
+        good, _, _ = memory.create_atom("Service port 8088 / 端口8088.", entity_name="Web")
+        memory.create_atom("Service port 5432 / 端口5432.", entity_name="Storage")
+        hits = MemoryService(memory).recall(query, min_token_coverage=1).snippets
+        assert [s.source_id for s in hits] == [good.id]
+
+    @pytest.mark.parametrize(("first", "second"), [(1, 5), (5, 1)])
+    def test_cached_limit_agrees_with_fresh_recall(self, memory: Memory, first: int, second: int) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+        from octop_memory.pipeline.recall.cache import RecallCache
+
+        memory.create_atom("Amber invoice approval.", entity_name="Finance")
+        memory.create_atom("Amber deploy freeze.", entity_name="Engineering")
+        cache = RecallCache()
+        initial = recall_for_prompt(memory, "amber", thread_id="t", limit=first, cache=cache)
+        reused = recall_for_prompt(memory, "amber", thread_id="t", limit=second, cache=cache)
+        fresh = recall_for_prompt(memory, "amber", thread_id="t", limit=second, cache=RecallCache())
+        assert len(initial.snippets) == min(first, 2)
+        assert len(fresh.snippets) == min(second, 2)
+        assert reused == fresh
+
+
+@pytest.mark.usefixtures("deterministic_recall")
 class TestLexicalFieldRecall:
     def test_only_returns_numbers_for_the_queried_project_and_role(self, backend: Any) -> None:
         from dataclasses import replace
@@ -2294,3 +2386,95 @@ class TestLexicalFieldRecall:
         assert corrected is not None and corrected.search_terms == ["榆树"]
         assert service.recall("故障分诊").snippets == []
         assert len(model.calls) == 1
+
+
+def test_codex_reconciles_only_durable_evidence(backend: Any) -> None:
+    from dataclasses import replace
+
+    from octop_memory import Memory
+    from octop_memory.pipeline.promotion import PromotionWorker
+    from octop_memory.types import CodexFact
+
+    memory = Memory(namespace="review", backend=backend)
+
+    def fact(text: str, assertion: str, *, quote: str | None = None, **kwargs: Any) -> CodexFact:
+        event = memory.add_raw(
+            text,
+            event_type="user_message",
+            host="codex",
+            user="writer",
+            session_id="codex:one",
+            payload={"turn_id": text, "codex_review": True},
+        )
+        return CodexFact(
+            event.id, "Preference", assertion, quote or text, scope="user", aspect="report language", **kwargs
+        )
+
+    def submit(item: CodexFact) -> list[Any]:
+        return memory.propose_codex_facts([item], caller="writer")
+
+    a = fact("我平时看中文周报。", "用户习惯阅读中文版周报。", value="中文")
+    [draft] = submit(a)
+    b = fact("周报我一直看中文的。", "用户习惯于阅读中文周报。", value="中文", relation="repeat", target_id=draft.id)
+    assert submit(b)[0].id == submit(b)[0].id == draft.id
+    assert memory.get_candidate(draft.id).raw_event_ids == [a.event_id, b.event_id]
+    assert memory.related_codex_facts("someone_else", [a.quote]) == []
+    decided = PromotionWorker(memory).approve(memory.get_candidate(draft.id))
+    atom = decided.atom
+    assert atom is not None and len(atom.raw_event_ids) == 2
+    c = fact("我仍然要中文周报。", "用户持续选择中文版周报。", value="中文", relation="repeat", target_id=atom.id)
+    assert submit(c)[0].id == draft.id
+    assert memory.get_atom(atom.id).raw_event_ids == [a.event_id, b.event_id, c.event_id]
+    for temporary in ("这次周报改用英文，下次照旧。", "以后周报能不能用英文？"):
+        assert submit(fact(temporary, "用户要求英文周报。", quote="英文", relation="change", target_id=atom.id)) == []
+    assert (
+        submit(
+            fact(
+                "这次用日语，以后我的周报默认用中文。",
+                "用户长期选择中文周报。",
+                quote="以后我的周报默认用中文",
+                value="中文",
+                relation="repeat",
+                target_id=atom.id,
+            )
+        )[0].id
+        == draft.id
+    )
+    delayed = fact(
+        "以后我的周报改用法语。", "用户之后选择法语周报。", value="法语", relation="change", target_id=atom.id
+    )
+    uncertain = fact(
+        "我可能更喜欢英文周报。", "用户可能偏好阅读英文周报。", value="英文", relation="change", target_id=atom.id
+    )
+    assert submit(uncertain)[0].status == "conflict" and memory.get_atom(atom.id).deprecated_at is None
+    change = fact(
+        "以后我的周报改用英文。", "用户今后的周报采用英语。", value="英文", relation="change", target_id=atom.id
+    )
+    [changed] = submit(change)
+    assert changed.status == "promoted"
+    [live] = memory.list_atoms()
+    assert live.assertion == changed.assertion and live.quote_event_id == change.event_id
+    assert memory.get_atom(atom.id).superseded_by == live.id
+    assert submit(change)[0].id == changed.id
+    assert submit(b)[0].id == draft.id  # replay cannot resurrect a superseded value
+    wrong_scope = replace(
+        fact("以后甲组周报改用法语。", "甲组将改发法语周报。", value="法语", relation="change", target_id=live.id),
+        scope="甲组",
+    )
+    assert submit(wrong_scope)[0].status == "conflict"
+    assert [x.id for x in memory.list_atoms()] == [live.id]
+    stale = memory.get_candidate(submit(uncertain)[0].id)
+    with pytest.raises(ValueError, match="since changed"):
+        PromotionWorker(memory).approve(stale)
+    assert "codex_target" not in submit(wrong_scope)[0].payload
+    assert submit(delayed)[0].status == "conflict" and memory.get_atom(live.id).deprecated_at is None
+    manual = memory.store("用户偏好纯文字的周报版式。", metadata={"caller": "writer"})
+    owned = memory.related_codex_facts("writer", ["周报版式"])
+    assert manual.atom_id in {row["target_id"] for row in owned}
+    assert not memory.related_codex_facts("someone_else", ["周报版式"])
+    edited = memory.replace_atom(live.id, assertion="用户的周报改用双语。")
+    assert edited is not None
+    [matching] = [r for r in memory.related_codex_facts("writer", ["双语周报"]) if r["target_id"] == edited.id]
+    assert matching["value"] is None and matching["assertion"] == edited.assertion
+    independent = PromotionWorker(memory).approve(submit(wrong_scope)[0]).atom
+    assert independent is not None and memory.get_atom(edited.id).deprecated_at is None

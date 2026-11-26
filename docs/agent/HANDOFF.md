@@ -24,6 +24,54 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Codex memory setup prompt
+
+⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.
+
+Both review paths were exercised on the paired local deployment with an isolated space. A real Codex CLI review
+and a delegated model each produced two pending candidates from one user turn with separate assertions and
+quotes. A transient delegated request produced none. SQLite and PostgreSQL cover legacy single quotes, atomic
+batch rejection, redelivery and proposal counts. Existing Codex chats with a cached tool schema need an MCP reload.
+
+The Octop model panel reads the observed mode and last completed review for the selected space and terminal token.
+Memory records accepted captures and completed reviews. For older hooks it can use matching turn evidence and the
+saved Stop receipt. The status response contains timestamps, mode and model. The panel can show a saved Octop model
+as pending while the terminal continues reviewing locally. The server tests cover SQLite and PostgreSQL.
+
+Opt-in Codex hooks also pull the explicitly published mode from the configured Octop origin at Stop.
+The Memory API verifies the live read/write token and returns its identity to Octop. The hook acknowledges the
+published revision after storing it. See [terminal setup](../../plugins/harness/AI-SETUP.md).
+
+- **⚠️ Recall/write path change** — The terminal installer registers native Codex `memory_get` and
+  `memory_save`; recall now includes readable paths. The read-only mode exposes `memory_get` and skips
+  transcript capture. Authentication uses the existing local credential file.
+- **⚠️ Recall/write path change** — Opt-in Codex Stop continuation uses the current turn model for quote-backed,
+  per-fact proposals. Both review modes skip temporary directives and questions, attach repeated evidence to the
+  same fact, and supersede a confirmed value only on explicit changes. Uncertain conflicts require review. The token dialog lets the installer select Codex or standalone server extraction.
+- The companion Octop dashboard worktree adds a Codex setup prompt to the token dialog. Its official
+  installer URL requires the matching installer code before it can be used for a fresh installation.
+- **Validation** — The Memory full gate passed on SQLite and dedicated PostgreSQL (1,714 passed, three
+  optional skips). With an isolated responses provider and real Codex client, the installed Stop hook
+  continued the original model turn, submitted one candidate over HTTP, and retained its raw evidence.
+  Repeated submissions and continued Stop events produced no duplicate candidate or extra continuation.
+  A second real Codex turn with a local test provider completed with no proposal and a verified Stop receipt.
+  Setup now checks the installed server in the originating chat. The Stop prompt requests an empty
+  final response after review, preserving the separate dashboard receipt.
+  Overview shows the most recent Codex evidence separately from the previous server extraction.
+  The live MCP catalog and hook trust were verified separately. Windows execution was not exercised.
+
+### Standalone memory space isolation
+
+- Local follow-up to [Memory PR #59](https://github.com/TencentCloud/octop-memory/pull/59), based on `c32e45a`.
+- **⚠️ Recall/write path change** — The standalone server checks token scope changes in the control-store transaction and requires a registered space before MCP access. Registration and opening reject a shared SQLite table prefix in the same physical file, including file aliases and older configurations. PostgreSQL namespaces remain unique across the control store.
+- Space registration resolves the configured database for both CLI and API callers. Repeating the same binding confirms it. A different target returns HTTP 409 and keeps the original registration. The paired [Octop PR](https://github.com/TencentCloud/Octop/pull/2887) still needs to stop token issuance on conflict.
+- **⚠️ Recall/write path change** — Standalone MCP search defaults to durable atoms. Explicit `raw` uses the existing event search and returns readable paths. `memory_get` supports `start` and returns the excerpt as `content` for existing clients.
+- **Validation** — `make all` passed against dedicated PostgreSQL 16 with 1,712 passed and 3 platform or optional-host skips. All 33 [standalone server checks](TEST_MATRIX.md#validation-by-change-scope) ran, including token rebinding on an older control database, configured CLI and API registration, same-ID retries and concurrent conflicts, file aliases, shared-file MCP isolation, per-installation revocation and paginated recall. All 14 terminal plugin tests passed. A temporary POSIX project received distinct Codex and Cursor configurations. Windows rendering was tested without running PowerShell.
+- **⚠️ Recall/write path change** — Each installation receives its own space token. Usage, capture ownership and review attribution follow the token ID. Older shared or partially disabled credentials are retired on upgrade. The server ignores earlier secondary grants. Clients with Octop-only credentials need a new space token.
+### Configurable memory extraction rules
+
+⚠️ Recall/write path change. [Octop #2963](https://github.com/TencentCloud/Octop/issues/2963) adds optional keep and skip guidance to the Candidate and Episode prompts. The worktree based on `c951d7a` passed `make all` with a dedicated PostgreSQL database (1,663 passed, 12 skipped). The local Harness integration test captured both prompts through the real memory service. Package releases and consumer dependency updates are pending.
+
 ### Raw image search
 
 - **Status** — Under review in [Memory PR #54](https://github.com/TencentCloud/octop-memory/pull/54) for [Octop #2989](https://github.com/TencentCloud/Octop/issues/2989).
@@ -108,6 +156,16 @@ and 17 skips. Its PG approval tests exercise both scheduled deferral and explici
 - **Validation:** `make all RUN='.venv/bin/python -m'` with dedicated PostgreSQL 16: format/lint/strict mypy pass, 1608 tests pass, 12 optional host cases skip. Focused Service/recall/retention/manual/Hermes/bridge/backend tests: 402 pass, 8 optional Harness cases skip. `pytest tests/test_backend_parity.py -k AtomOnlyRecall -q -rs` runs all 12 SQLite/real-PG cases without skips, including host-file exclusion. OpenClaw `npm test` passes 69 cases; `npm run typecheck` and `npm run build` pass.
 - **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
 - **Continuation:** PR #41 awaits a future release/adoption; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
+
+### Recall token-coverage admission floor
+
+[PR #56](https://github.com/TencentCloud/octop-memory/pull/56) adds an opt-in lexical admission threshold. A matching word or phrase can admit a candidate whose remaining content is irrelevant. Increasing the threshold can also drop a useful paraphrase.
+
+- **⚠️ Recall/write path change** — The follow-up checks coverage in `pipeline/recall/multi_source.py` before evidence deduplication, raw fallback, entity caps, and near-duplicate suppression. A single resolved owner satisfies the project name, and literal numbers count toward coverage. The default is zero. Thread cache keys include the requested result limit and the effective threshold.
+- **Verification** — The server test sends authenticated atom searches with the threshold disabled and enabled. Cached calls are compared with fresh calls in both directions and between positive thresholds. The lexical parity suite exercises actual SQLite and PostgreSQL reads independently of scheduling latency. Production per-source deadlines have separate tests.
+- **Local acceptance** — The library and harness suites passed on SQLite and dedicated PostgreSQL 16. The paired host replay used the same questions, corpus and result limit at multiple thresholds and restored its original configuration. Select a threshold using judged useful and irrelevant hits on the intended workload.
+- The [memory configuration reference](PROJECT_MAP.md#memory-configuration) identifies which callers read the threshold and which supply their own limits. The documentation checks, architecture checks, threshold regression suite, and standalone MCP threshold test passed.
+- **Follow-up verification** — Shared SQLite/PostgreSQL cases cover both cache request orders, scoped queries, numeric terms, and eligible raw fallback. Read-only searches through the local gateway reached isolated spaces on both backends at floors `0`, `0.05`, and `1`. Ordinary requests continued to use the original service. Dedicated tests exercise the thread cache because standalone MCP searches do not take a thread ID.
 
 ### Pre-1.0 PostgreSQL schema recovery
 

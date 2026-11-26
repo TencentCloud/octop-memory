@@ -331,6 +331,7 @@ def recall_for_prompt(
     weights: tuple[float, float, float, float, float] | None = None,
     per_entity_cap: int = 3,
     suppress_threshold: float = 0.85,
+    min_token_coverage: float = 0.0,
     total_budget_tokens: int = 1500,
     total_budget_ms: int = 200,
     cache: object | None = None,
@@ -352,8 +353,8 @@ def recall_for_prompt(
     2. parse query → entity / time / co-reference hints
     3. route → pick sources, resolve co-reference from active stack
     4. push query mentions to active stack (D41a-C)
-    5. gather candidates from each source under per-source timeouts
-       (D43-A clamped to remaining global budget)
+    5. gather candidates from each source under per-source timeouts.
+       Apply the optional coverage floor before deduplication and fallback.
     5b. apply ``raw_policy`` and drop raw from the current session
         (event ``session_id`` / ``thread_id`` intersecting the current
         session scope) so auto-inject does not echo this conversation
@@ -381,6 +382,7 @@ def recall_for_prompt(
             weights=weights,
             per_entity_cap=per_entity_cap,
             suppress_threshold=suppress_threshold,
+            min_token_coverage=min_token_coverage,
             total_budget_tokens=total_budget_tokens,
             total_budget_ms=total_budget_ms,
             cache=cache,
@@ -404,6 +406,7 @@ def _recall_for_prompt_impl(
     weights: tuple[float, float, float, float, float] | None,
     per_entity_cap: int,
     suppress_threshold: float,
+    min_token_coverage: float,
     total_budget_tokens: int,
     total_budget_ms: int,
     cache: object | None,
@@ -434,12 +437,15 @@ def _recall_for_prompt_impl(
     # 1. Cache lookup --------------------------------------------------
     typed_cache: RecallCache | None = cache if isinstance(cache, RecallCache) else None
     manual_policy = memory.get_meta(MANUAL_DOCUMENTS_RECALL_KEY)
+    floor = min_token_coverage if min_token_coverage > 0 else 0.0
     cache_thread = thread_id
     if thread_id is not None:
         cache_revision = json.dumps(
             {
                 "atom_only": atom_only,
                 "raw_policy": raw_policy,
+                "min_token_coverage": floor,
+                "limit": limit,
                 "session_id": session_id or thread_id,
                 "manual_policy": manual_policy,
                 "manual_context": manual_context,
@@ -464,7 +470,6 @@ def _recall_for_prompt_impl(
         if (not atom_only or s in {"atom", "vector"}) and (s != "raw" or raw_policy != "never")
     )
     parsed = replace(parsed, topic=decision.topic)
-    sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
 
     if not sources:
         return RecallResult(snippets=[], rendered="")
@@ -490,6 +495,7 @@ def _recall_for_prompt_impl(
         sw=sw,
         entity_anchor_ids=decision.resolved_entity_ids,
         manual_context=manual_context,
+        min_token_coverage=floor,
     )
     candidates = _filter_prompt_raw(
         candidates,

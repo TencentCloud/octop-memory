@@ -38,7 +38,8 @@ async function main() {
   const lines = [MARKER];
   for (const hit of hits) {
     const when = String(hit.occurred_at || "").slice(0, 19);
-    lines.push(`- [${hit.layer}] (${hit.role_hint ?? hit.layer} @ ${when}) ${hit.snippet}`);
+    const path = hit.path ? ` path=${hit.path}` : "";
+    lines.push(`- [${hit.layer}] (${hit.role_hint ?? hit.layer} @ ${when})${path} ${hit.snippet}`);
   }
   lines.push("若需要原文/证据，用 memory_get(path=…) 读全文；与本次工作无关则忽略。");
   process.stdout.write(

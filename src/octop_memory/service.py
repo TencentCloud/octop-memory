@@ -54,6 +54,9 @@ class MemoryService:
             MEMORY.md. Background review reads it; ``save`` does not.
     """
 
+    # Hosts can feature-detect rule support during independent package upgrades.
+    supports_extraction_rules = True
+
     def __init__(
         self,
         memory: Memory,
@@ -92,6 +95,7 @@ class MemoryService:
         session_id: str | None = None,
         limit: int = DEFAULT_RECALL_LIMIT,
         manual_context: dict[str, str] | None = None,
+        min_token_coverage: float = 0.0,
     ) -> RecallResult:
         """Recall canonical atoms as prompt-injectable text.
 
@@ -113,6 +117,7 @@ class MemoryService:
             session_id=session_id,
             limit=limit,
             manual_context=manual_context,
+            min_token_coverage=min_token_coverage,
         )
 
     def set_manual_review_scheduler(self, scheduler: Callable[[], None] | None) -> None:

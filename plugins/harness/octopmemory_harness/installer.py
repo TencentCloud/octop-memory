@@ -1,10 +1,9 @@
 """Bootstrap a local terminal so it talks to this memory service.
 
 This module renders the installer scripts; the ``octop-memory-harness`` CLI runs them
-locally, so the credential is a **user-level MCP token** (``omcp_…``, created in Octop
-under ``/api/memory-mcp/tokens``) passed in by the person running it, never fetched::
+locally, so the credential is an MCP token issued for this installation passed in by the person running it, never fetched::
 
-    octop-memory-harness install --url https://<octop>/mcp/memory/ --token omcp_…
+    octop-memory-harness install --url https://<memory-host>/mcp/ --token omcp_…
     #   → 检测到：1) Claude Code  2) Kiro  3) DSH  4) Codex  5) Cursor
     #   → 要配置哪些？   MCP token: ****（不回显）
 
@@ -21,9 +20,9 @@ DSH native plugin this installer wrote (does not delete server-side memory)::
     octop-memory-harness uninstall --terminals cursor
 
 Nothing is assumed about where an installer runs. The script detects which terminals
-exist, asks which to configure, prompts for the MCP token and the expert id (reading
+exist, asks which one to configure, prompts for its MCP token (reading
 ``/dev/tty`` — a piped script must not consume its own stdin), then installs a copy of
-the hook scripts next to *each* terminal, in the directory that terminal uses, and
+the hook scripts in the selected terminal's own directory, and
 registers them in that terminal's own hook config:
 
 =========================  =========================================  =============================
@@ -44,8 +43,7 @@ plugin, links it into the selected profile's ``node_modules``, registers the
 up the legacy ``dsh-memory-share`` preset and the ``~/.dsh/hooks`` bridge so the two
 wirings never trigger twice.
 
-Each hook copy carries its own ``config.json`` (endpoint, token). The token is a user-level
-MCP token that is **bound to exactly one expert**, and it is the only credential: entries and
+Each installation has its own ``config.json`` (endpoint, token). The token is bound to one space, and it is the only credential: entries and
 hooks send ``Authorization: Bearer <token>`` and nothing else — no expert id header, because
 the token already says which expert the memory belongs to. The hook roles are fixed: **UserPromptSubmit / beforeSubmitPrompt → memory_search** (pull background in)
 and **Stop / stop → memory_capture** (ship the session transcript).
@@ -64,7 +62,7 @@ _LIB_FILES = ("lib/octop-memory-client.mjs", "lib/octop_ingest.py", "lib/transcr
 HOST_FILES: dict[str, tuple[str, ...]] = {
     "claude-code": ("claude-code/stop-capture.mjs", "claude-code/user-prompt-recall.mjs"),
     "kiro": ("kiro/stop-capture.mjs",),
-    "codex": ("codex/stop-capture.mjs", "codex/user-prompt-recall.mjs"),
+    "codex": ("codex/stop-capture.mjs", "codex/user-prompt-recall.mjs", "codex/mcp-headers.mjs"),
     "cursor": ("cursor/stop-capture.mjs", "cursor/user-prompt-recall.mjs"),
 }
 """Which hook scripts a terminal gets. Each host has its own entry script — no
@@ -186,7 +184,58 @@ def main() -> int:
 sys.exit(main())
 """.strip()
 
-_MERGE_PY = '''
+_CODEX_TOML_PY = r'''
+import re
+
+
+def _toml_blocks(text):
+    """Keep existing TOML text while locating table headers."""
+    blocks = [[]]
+    for line in text.splitlines(keepends=True):
+        if re.fullmatch(r"\s*\[+[^][=\n]+\]+\s*(?:#.*)?", line.rstrip("\r\n")):
+            blocks.append([])
+        blocks[-1].append(line)
+    return blocks
+
+
+def _codex_mcp_table(block):
+    if not block:
+        return None
+    return re.fullmatch(
+        r"""\[mcp_servers\.(?P<key>[A-Za-z0-9_-]+|"[A-Za-z0-9_-]+"|'[A-Za-z0-9_-]+')"""
+        r"""(?P<suffix>\.[^\]]+)?\]\s*(?:#.*)?""",
+        block[0].strip(),
+    )
+
+
+def _codex_mcp_managed(block, scripts_dir):
+    return any(
+        line.lstrip().startswith("http_headers_helper")
+        and "mcp-headers." in line
+        and _codex_mentions_dir(line, scripts_dir)
+        for line in block[1:]
+    )
+
+
+def _codex_table_header(block):
+    return block[0].partition("#")[0].strip() if block else ""
+
+
+def _codex_mentions_dir(value, scripts_dir):
+    marker = str(scripts_dir).replace("\\", "/").rstrip("/") + "/"
+    return any(marker in re.sub(r"[\\/]+", "/", item) for item in _strings(value))
+
+
+def _codex_owns_hook(value, scripts_dir):
+    return any(
+        _codex_mentions_dir(item, scripts_dir)
+        and any(stem in item for stem in ("user-prompt-recall.", "stop-capture."))
+        for item in _strings(value)
+    )
+'''
+
+
+_MERGE_PY = _CODEX_TOML_PY + '''
 import base64
 import hashlib
 import json
@@ -275,7 +324,7 @@ def _mentions_dir(value, directory):
     return any(needle in text.replace("\\\\", "/") for text in _strings(value))
 
 
-def _install_hooks(target, host):
+def _install_hooks(target, host, codex_settings=None):
     """把共享传输模块 + 该宿主的入口脚本写进这个终端自己的 hooks 目录。
 
     脚本与 ``config.json`` 始终留在用户目录（项目级安装也一样）：项目里只写「注册」，
@@ -291,9 +340,11 @@ def _install_hooks(target, host):
         "url": HOOK_URL,
         "token": TOKEN,
         "tokenHeader": TOKEN_HEADER,
-        # 接入端标识：服务端按它统计/禁用「哪些客户端在用这个 token」。
-        "client": host,
     }
+    if host == "codex" and _codex_read_only():
+        config["readOnly"] = True
+    if codex_settings:
+        config.update(codex_settings)
     _dump(target / "config.json", config, private=True)
     print(f"  ✓ hook 脚本（{host} 专用，含共享传输模块）+ config.json → {target}")
     scratch = "%TEMP%" if os.name == "nt" else "$TMPDIR"
@@ -304,7 +355,7 @@ def _install_hooks(target, host):
 
 
 def _entry(transport=None):
-    # 用户级 MCP token 是唯一凭据：``Authorization: Bearer <token>``。
+    # 接入端专用 MCP token 是唯一凭据：``Authorization: Bearer <token>``。
     # token 绑定一个专家，「谁问的 / 落到哪个专家」全由它表达，不再有第二个身份头。
     headers = {
         "Authorization": f"Bearer {TOKEN}",
@@ -541,70 +592,107 @@ _CURSOR_HOOKS = (("beforeSubmitPrompt", "user-prompt-recall"), ("stop", "stop-ca
 
 
 def _toml_string(value):
-    """TOML 字面串：hook 命令里有双引号、没有单引号，用单引号串就不必转义。"""
-    return "'" + value + "'"
+    return json.dumps(value, ensure_ascii=False)
 
 
-def _toml_blocks(text):
-    """按表头行列把 TOML 切成块，保留原始文本（首块是文件头/杂项）。"""
-    blocks = [[]]
-    for line in text.splitlines(keepends=True):
-        if line.lstrip().startswith("[") and not line.lstrip().startswith("#"):
-            blocks.append([])
-        blocks[-1].append(line)
-    return blocks
+def _codex_read_only():
+    return os.environ.get("OCTOP_CODEX_READ_ONLY") == "1"
 
 
-def _codex_upsert(path, scripts_dir=None):
-    """把两条 hook 挂进 ``~/.codex/config.toml``（幂等）。
+def _codex_hook_commands(scripts_dir):
+    return {
+        event: hook_command(scripts_dir / "codex" / f"{script}.mjs")
+        for event, script in _CODEX_HOOKS
+    }
 
-    结构是 ``[[hooks.<Event>]]`` 容器 + ``[[hooks.<Event>.hooks]]`` 处理项，先删掉我们自己
-    写过的处理项（连它那个空容器），再把新处理项插到该事件最后一组之后 —— 不动已有 hook 的
-    先后位置，因为 codex 的 hook 信任状态按 ``<config>:<event>:<i>:<j>`` 记索引。
-    """
-    scripts_dir = scripts_dir or CODEX_DIR
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    blocks, kept = _toml_blocks(text), []
-    for block in blocks:
-        body = "".join(block)
-        header = block[0].strip() if block else ""
-        ours = _mentions_dir(body, scripts_dir)
-        if ours and header.startswith("[[hooks.") and header.endswith(".hooks]]"):
-            event = header[len("[[hooks.") : -len(".hooks]]")]
-            # 我们自己写的空容器也一起清掉（重装不堆空表）
-            if kept and kept[-1][0].strip() == f"[[hooks.{event}]]" and not _codex_container_body(
-                kept[-1]
-            ):
-                kept.pop()
+
+def _codex_upsert_hooks(text, scripts_dir, commands):
+    blocks = _toml_blocks(text)
+    for event, command in commands.items():
+        header = f"[[hooks.{event}.hooks]]"
+        if any(
+            _codex_table_header(block) == header and _codex_owns_hook(block, scripts_dir)
+            for block in blocks
+        ):
             continue
-        kept.append(block)
-
-    additions = {}
-    for event, script in _CODEX_HOOKS:
-        handler = (
-            f"[[hooks.{event}.hooks]]\\n"
-            f"command = {_toml_string(hook_command(f'{scripts_dir}/codex/{script}.mjs'))}\\n"
-            f'type = "command"\\n'
-        )
-        insert_at = None
-        for index, block in enumerate(kept):
-            header = block[0].strip() if block else ""
-            if header in (f"[[hooks.{event}]]", f"[[hooks.{event}.hooks]]"):
-                insert_at = index + 1
-        if insert_at is None:
-            additions[event] = f"[[hooks.{event}]]\\n\\n{handler}"
-        else:
-            kept.insert(insert_at, [handler, "\\n"])
-
-    body = "".join("".join(block) for block in kept).rstrip("\\n")
-    tail = "\\n\\n".join(additions[event] for event, _ in _CODEX_HOOKS if event in additions)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text((body + "\\n\\n" if body else "") + tail + "\\n", encoding="utf-8")
+        # Append missing groups and keep existing group indexes, which Codex uses for trust.
+        text = (
+            text.rstrip()
+            + f"\\n\\n[[hooks.{event}]]\\n\\n{header}\\n"
+            + f'command = {_toml_string(command)}\\ntype = "command"\\n'
+        ).lstrip("\\n")
+    return text
 
 
-def _codex_container_body(block):
-    """容器块是否只有表头（没有处理项）。"""
-    return not "".join(block[1:]).strip()
+def _codex_upsert_json_hooks(path, settings, scripts_dir, commands):
+    hooks = settings.setdefault("hooks", {})
+    modified = False
+    for event, command in commands.items():
+        groups = hooks.setdefault(event, [])
+        if not _codex_owns_hook(groups, scripts_dir):
+            groups.append({"hooks": [{"type": "command", "command": command}]})
+            modified = True
+    if modified:
+        _dump(path, settings)
+
+
+def _codex_update_mcp(text, scripts_dir, client_extraction):
+    blocks = _toml_blocks(text)
+    servers = {}
+    for block in blocks:
+        table = _codex_mcp_table(block)
+        if table and not table["suffix"]:
+            servers[table["key"].strip("\\\"'")] = block
+
+    name = next((name for name, block in servers.items() if _codex_mcp_managed(block, scripts_dir)), None)
+    if name is None:
+        for existing_name, block in servers.items():
+            if not existing_name.startswith("octop-memory"):
+                continue
+            # The endpoint alone does not identify a space. Adopt only a legacy
+            # helper already paired with this install's local credential.
+            if any(
+                line.lstrip().startswith("http_headers_helper")
+                and "config.json" in line
+                and _codex_mentions_dir(line, scripts_dir)
+                for line in block[1:]
+            ):
+                name = existing_name
+                break
+
+    if name is None:
+        name = "octop-memory"
+        index = 2
+        while name in servers:
+            name = f"octop-memory-{index}"
+            index += 1
+
+    helper = hook_command(scripts_dir / "codex" / "mcp-headers.mjs")
+    tools = ["memory_get"] if _codex_read_only() else ["memory_get", "memory_save"]
+    if client_extraction:
+        tools.extend(["memory_propose", "memory_codex_related"])
+    fields = {
+        "url": _toml_string(ENTRY_URL),
+        "http_headers_helper": _toml_string(helper),
+        "enabled_tools": json.dumps(tools),
+    }
+    lines = [f"{key} = {value}\\n" for key, value in fields.items()]
+    if name in servers:
+        block = servers[name]
+        trailing = []
+        in_tool_list = False
+        for line in block[1:]:
+            key, _, value = line.partition("=")
+            if in_tool_list:
+                in_tool_list = not line.lstrip().startswith("]")
+            elif key.strip() == "enabled_tools":
+                value = value.partition("#")[0].strip()
+                in_tool_list = value.startswith("[") and not value.endswith("]")
+            elif key.strip() not in fields:
+                trailing.append(line)
+        block[:] = [block[0].rstrip("\\r\\n") + "\\n", *lines, *trailing]
+        return "".join("".join(part) for part in blocks), name
+    return (text.rstrip() + f"\\n\\n[mcp_servers.{name}]\\n" + "".join(lines)).lstrip("\\n"), name
 
 
 def _cursor_upsert(path, scripts_dir=None):
@@ -625,22 +713,83 @@ def _cursor_upsert(path, scripts_dir=None):
 
 
 def do_codex():
-    """Codex：hook 写在 ``~/.codex/config.toml``（``[[hooks.<Event>]]`` + ``type="command"``）。
-
-    codex 对 hook 有信任机制：新写入的 hook 需要用户信任一次才会执行，所以这里只写配置、
-    不伪造 ``hooks.state`` 里的 ``trusted_hash``。项目级写进仓库的 ``.codex/config.toml``，
-    该仓库被 Codex 信任后才会加载（未信任只加载 skills）。
-    """
+    """Keep the existing hooks format and register tools in Codex's TOML config."""
     scripts_dir = _hooks_target("codex")
-    _install_hooks(scripts_dir, "codex")
     config = _project(".codex", "config.toml") if IN_PROJECT else home / ".codex" / "config.toml"
-    _codex_upsert(config, scripts_dir)
-    print(f"  ✓ Codex hooks（UserPromptSubmit → 召回；Stop → 上报）→ {config}")
-    print("      · 首次需在 codex 里信任该 hook（否则不执行）；自动化可加 --dangerously-bypass-hook-trust")
-    print("      · Codex 的 MCP 服务由它自己的配置管理，这里不动")
+    hooks_json = config.with_name("hooks.json")
+    text = config.read_text(encoding="utf-8") if config.exists() else ""
+    has_inline = any(
+        _codex_table_header(block).startswith("[[hooks.")
+        or (_codex_table_header(block) == "[hooks]" and any(
+                line.strip() and not line.lstrip().startswith("#") for line in block[1:]
+        ))
+        for block in _toml_blocks(text)
+    )
+    use_json = hooks_json.exists() and not has_inline
+    settings = _load(hooks_json) if use_json else None
+    if use_json and (
+        not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict)
+    ):
+        raise ValueError(f"Codex hooks 配置无效：{hooks_json}")
+
+    commands = _codex_hook_commands(scripts_dir)
+    updated = text if use_json else _codex_upsert_hooks(text, scripts_dir, commands)
+    existing = _load(scripts_dir / "config.json") or {}
+    default = existing.get("codexExtraction", "server") if existing.get("url") == HOOK_URL else "server"
+    mode = os.environ.get("OCTOP_CODEX_EXTRACTION", default)
+    if mode not in ("server", "codex", "octop"):
+        raise ValueError("OCTOP_CODEX_EXTRACTION must be server, codex or octop")
+    review_settings = {}
+    same_credential = existing.get("url") == HOOK_URL and existing.get("token") == TOKEN
+    sync_default = "1" if same_credential and existing.get("codexPanelSync") else "0"
+    panel_sync = os.environ.get("OCTOP_CODEX_PANEL_SYNC", sync_default) == "1" and not _codex_read_only()
+    if (mode == "octop" or panel_sync) and not _codex_read_only():
+        from urllib.parse import urlsplit
+        url = os.environ.get("OCTOP_CODEX_REVIEW_URL") or (
+            existing.get("codexReviewUrl") if existing.get("url") == HOOK_URL and existing.get("token") == TOKEN else ""
+        )
+        parsed = urlsplit(url or "")
+        secure = parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"))
+        if not secure or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or parsed.path != "/api/memory-mcp/codex-review":
+            raise ValueError("OCTOP_CODEX_REVIEW_URL requires the Octop HTTPS (or loopback) codex-review endpoint")
+        review_settings = {"codexExtraction": mode, "codexReviewUrl": url}
+    if panel_sync:
+        review_settings["codexPanelSync"] = True
+    client_extraction = mode == "codex" and not _codex_read_only()
+    registered, server_name = _codex_update_mcp(updated, scripts_dir, client_extraction or panel_sync)
+    _validate_codex_toml(registered)
+    if client_extraction or panel_sync:
+        review_settings.update({"codexExtraction": mode, "mcpServer": server_name})
+    _install_hooks(scripts_dir, "codex", review_settings)
+    if registered != text:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(registered, encoding="utf-8")
+    if use_json:
+        _codex_upsert_json_hooks(hooks_json, settings, scripts_dir, commands)
+    print(f"  ✓ Codex hooks → {hooks_json if use_json else config}")
+    if _codex_read_only():
+        print("      · 只读：召回开启，跳过会话上报")
+    elif client_extraction:
+        print(f"      · 安装后请在当前 Codex 对话查找 {server_name} 的 memory_propose")
+    if registered != updated:
+        tools = "memory_get" if _codex_read_only() else "memory_get、memory_save"
+        if client_extraction:
+            tools += "、memory_propose"
+        print(f"  ✓ Codex MCP（{tools}）→ {config}")
+    print("      · 若当前对话缺少工具：桌面端打开命令菜单（⌘K / Ctrl+K），搜索 MCP，在服务器标题旁重启；CLI 退出并恢复原会话。回到同一对话复查")
+    print("      · 首次在 Codex 中查看并信任新增 hooks")
     if IN_PROJECT:
         print("      · 项目级：仓库需被 Codex 信任后才加载这条配置（未信任只加载 skills）")
         _warn_global_also_installed("codex")
+
+
+def _validate_codex_toml(text):
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        # Python 3.10 still runs the terminal installer.
+        return
+    tomllib.loads(text)
 
 
 def do_cursor():
@@ -692,7 +841,7 @@ def _dsh_bundle_dir():
 
 
 def _dsh_native_config():
-    """原生插件的连接配置：与客户端 MCP 条目同一套语义（MCP 地址 + 用户级 MCP token）。
+    """原生插件的连接配置：与客户端 MCP 条目同一套语义（MCP 地址 + 接入端专用 MCP token）。
 
     ``tokenHeader`` 固定 ``Authorization``（值写成 ``Bearer <token>``）。token 绑定一个专家，
     插件不再需要（也不发送）任何专家标识头。
@@ -1087,7 +1236,7 @@ home = pathlib.Path(os.path.expanduser("~"))
 URL = os.environ["OCTOP_URL"]
 HOOK_URL = os.environ.get("OCTOP_HOOK_URL") or URL   # hooks 实际 POST 的地址（直连）
 TOKEN = os.environ["OCTOP_TOKEN"]
-# 用户级 MCP token 只有一个方言：``Authorization: Bearer <token>``（身份由 token 表达）。
+# 接入端专用 MCP token 只有一个方言：``Authorization: Bearer <token>``（身份由 token 表达）。
 TOKEN_HEADER = "Authorization"
 ENTRY_URL = URL
 NAME = os.environ["OCTOP_SERVER_NAME"]
@@ -1119,8 +1268,11 @@ def _global_hooks_present(host):
     if host == "kiro":
         return (home / ".kiro" / "hooks" / "memory-recall-on-start.json").exists()
     if host == "codex":
-        path = home / ".codex" / "config.toml"
-        return path.exists() and _mentions_dir(path.read_text(encoding="utf-8"), CODEX_DIR)
+        config_dir = home / ".codex"
+        return any(
+            path.exists() and _codex_owns_hook(path.read_text(encoding="utf-8"), CODEX_DIR)
+            for path in (config_dir / "config.toml", config_dir / "hooks.json")
+        )
     if host == "cursor":
         cfg = _load(home / ".cursor" / "hooks.json")
         return cfg is not None and _mentions_dir(cfg, CURSOR_DIR)
@@ -1262,18 +1414,15 @@ NATIVE_NAME = "dsh-octop-memory"
 NATIVE_PACKAGE = "dsh-octop-memory@^0.1.7"
 NATIVE_GITHUB = "github:ArvinQi/dsh-octop-memory#v0.1.7"
 
-for terminal in os.environ["OCTOP_TERMINALS"].split(","):
-    terminal = terminal.strip()
-    if not terminal:
-        continue
-    print(f"· {terminal}")
-    {
-        "claude-code": do_claude_code,
-        "kiro": do_kiro,
-        "dsh": do_dsh,
-        "codex": do_codex,
-        "cursor": do_cursor,
-    }[terminal]()
+terminal = os.environ["OCTOP_TERMINALS"].strip()
+print(f"· {terminal}")
+{
+    "claude-code": do_claude_code,
+    "kiro": do_kiro,
+    "dsh": do_dsh,
+    "codex": do_codex,
+    "cursor": do_cursor,
+}[terminal]()
 
 print("  · hook 角色：用户提交时召回（CC / Codex 的 UserPromptSubmit，Cursor 的 beforeSubmitPrompt）；")
 print("    回合结束时上报会话 transcript（Stop / Cursor 的 stop）")
@@ -1334,10 +1483,10 @@ def render_setup_script(
     the hooks POST to, defaulting to ``mcp_url`` (a deployment that fronts the MCP mount
     with an ingress can point the entries elsewhere).
 
-    ``default_token`` is an **optional prefill** for the user-level MCP token — callers pass
+    ``default_token`` is an **optional prefill** for the installation's MCP token — callers pass
     an empty string, because the installer must never ship a credential of its own. The
     script falls back to ``OCTOP_MEMORY_TOKEN`` first and only then uses this value.
-    ``terminals`` (comma list) only prefills the terminal prompt.
+    ``terminals`` selects the single terminal for this credential.
 
     ``agent_id`` is accepted for backwards compatibility and **ignored**: the MCP token is
     bound to one expert, so there is no expert id to install (and no ``X-Octop-Agent-Id``).
@@ -1426,66 +1575,21 @@ ask() {{  # ask <提示> <默认值>
   if [ -n "$_answer" ]; then printf '%s' "$_answer"; else printf '%s' "$2"; fi
 }}
 
-# ---- 2) 选终端：交互式清单（↑↓ 移动 · 空格 选择 · a 全选 · 回车 确认）；
-#         没有 tty 或没有 python3 时回退到数字输入。
+# One credential is installed into one terminal.
 TERMINALS="${{OCTOP_TERMINALS:-$DEFAULT_TERMINALS}}"
 if [ -z "$TERMINALS" ] && [ "$HAS_TTY" = 1 ]; then
-  _picked=''
-  if command -v python3 >/dev/null 2>&1; then
-    set --
-    [ "$have_claude" = 1 ] && set -- "$@" "claude-code|Claude Code　（hook 装到 ~/.claude/hooks-events）"
-    [ "$have_kiro" = 1 ] && set -- "$@" "kiro|Kiro　（hook 装到 ~/.kiro/hooks）"
-    [ "$have_dsh" = 1 ] && set -- "$@" "dsh|DSH　（装原生插件 dsh-octop-memory）"
-    [ "$have_codex" = 1 ] && set -- "$@" "codex|Codex　（hook 装到 ~/.codex/hooks）"
-    [ "$have_cursor" = 1 ] && set -- "$@" "cursor|Cursor　（hook 装到 ~/.cursor/hooks）"
-    _picked="$(python3 - "$@" 2>/dev/null <<'OCTOP_SELECT'
-{_SELECT_PY}
-OCTOP_SELECT
-)" || _picked=''
-  fi
-  if [ -n "$_picked" ]; then
-    TERMINALS="$_picked"
-  else
-    # 回退：数字输入（1,2 / 1 3 / 12 / a=全部；回车 = 全部检测到的；选不中会重问）
-    _attempt=0
-    while [ -z "$TERMINALS" ] && [ "$_attempt" -lt 3 ]; do
-      _attempt=$((_attempt + 1))
-      printf '要配置哪些？(可多选：1,2 / 1 3 / 12 / a=全部，回车=全部检测到的): ' > /dev/tty
-      read -r _pick < /dev/tty || _pick=''
-      _chosen=''
-      case "$_pick" in
-        ''|a|A|all|ALL|全部) _chosen="$DETECTED" ;;
-        *)
-          for _n in $(printf '%s' "$_pick" | tr ',' ' '); do
-            case "$_n" in
-              [0-9][0-9]*) _items="$(printf '%s' "$_n" | fold -w1 | tr '\\n' ' ')" ;;
-              *) _items="$_n" ;;
-            esac
-            for _i in $_items; do
-              case "$_i" in
-                1) _add="$([ "$have_claude" = 1 ] && echo claude-code)" ;;
-                2) _add="$([ "$have_kiro" = 1 ] && echo kiro)" ;;
-                3) _add="$([ "$have_dsh" = 1 ] && echo dsh)" ;;
-                4) _add="$([ "$have_codex" = 1 ] && echo codex)" ;;
-                5) _add="$([ "$have_cursor" = 1 ] && echo cursor)" ;;
-                *) _add='' ;;
-              esac
-              if [ -z "$_add" ]; then
-                echo "  ? 已忽略：${{_i}}（未检测到或无法识别）" >&2
-              else
-                case ",$_chosen," in *",$_add,"*) ;; *) _chosen="$_chosen,$_add" ;; esac
-              fi
-            done
-          done
-          ;;
-      esac
-      TERMINALS="$(printf '%s' "$_chosen" | sed 's/^,//')"
-      [ -n "$TERMINALS" ] || echo "  ! 没有选中任何已检测到的终端，请重选（1-5，或 a=全部）" >&2
-    done
-  fi
+  _first="${{DETECTED# }}"
+  _first="${{_first%% *}}"
+  TERMINALS="$(ask "请选择一个终端（名称或编号，默认 $_first）: " "$_first")"
+  case "$TERMINALS" in
+    1) TERMINALS=claude-code ;; 2) TERMINALS=kiro ;; 3) TERMINALS=dsh ;;
+    4) TERMINALS=codex ;; 5) TERMINALS=cursor ;;
+  esac
 fi
-
-[ -n "$TERMINALS" ] || {{ echo "没有可配置的终端" >&2; exit 1; }}
+case "$TERMINALS" in
+  claude-code|kiro|dsh|codex|cursor) ;;
+  *) echo "每枚 token 只安装到一个终端，请用 --terminals 指定一个终端名称。" >&2; exit 1 ;;
+esac
 
 # ---- 2.5) 安装范围：全局（默认）还是只装到某个项目
 # 项目级只在项目里写「注册」（hooks 命令 / MCP 条目）；hook 脚本与 config.json（含 token）
@@ -1537,12 +1641,12 @@ if [ -n "$PROJECT_DIR" ]; then
 fi
 export OCTOP_PROJECT_DIR="$PROJECT_DIR"
 
-# ---- 3) 凭据：用户级 MCP token（omcp_…），条目与 hooks 共用同一份
+# ---- 3) 凭据：接入端专用 MCP token（omcp_…），条目与 hooks 共用同一份
 TOKEN="${{OCTOP_MEMORY_TOKEN:-}}"
 {default_token_block}
 if [ -z "$TOKEN" ] && [ "$HAS_TTY" = 1 ]; then
   stty -echo < /dev/tty 2>/dev/null || true
-  printf 'MCP token（omcp_…，在 Octop 的 /api/memory-mcp/tokens 创建；不回显）: ' > /dev/tty
+  printf '此终端专用的 MCP token（omcp_…，不回显）: ' > /dev/tty
   read -r _t < /dev/tty || _t=''
   stty echo < /dev/tty 2>/dev/null || true
   printf '\\n' > /dev/tty
@@ -1626,7 +1730,7 @@ echo "  · 重开终端/IDE（Kiro 重载 hooks；Codex 首次需在 codex 里�
 """
 
 
-_UNINSTALL_PY = r'''
+_UNINSTALL_PY = _CODEX_TOML_PY + r'''
 import hashlib
 import json
 import os
@@ -2081,26 +2185,48 @@ def undo_dsh():
         print(f"  ✓ 已删除 DSH hooks 脚本目录 → {scripts}")
 
 
-def _toml_blocks(text):
-    blocks = [[]]
-    for line in text.splitlines(keepends=True):
-        if line.lstrip().startswith("[") and not line.lstrip().startswith("#"):
-            blocks.append([])
-        blocks[-1].append(line)
-    return blocks
-
-
 def undo_codex():
     path = _project(".codex", "config.toml") if IN_PROJECT else home / ".codex" / "config.toml"
     scripts_dir = _hooks_target("codex")
+    hooks_path = path.with_name("hooks.json")
+    if hooks_path.exists():
+        cfg = _load(hooks_path)
+        if cfg is not None:
+            hooks = cfg.get("hooks", {})
+            removed = False
+            for event, groups in list(hooks.items()):
+                kept_groups = []
+                for group in groups:
+                    handlers = group.get("hooks", [])
+                    kept_handlers = [hook for hook in handlers if not _codex_owns_hook(hook, scripts_dir)]
+                    if kept_handlers == handlers:
+                        kept_groups.append(group)
+                    elif kept_handlers:
+                        kept_groups.append({**group, "hooks": kept_handlers})
+                if kept_groups != groups:
+                    removed = True
+                    if kept_groups:
+                        hooks[event] = kept_groups
+                    else:
+                        del hooks[event]
+            if removed:
+                _dump(hooks_path, cfg)
     if path.exists():
         text = path.read_text(encoding="utf-8")
         blocks, kept = _toml_blocks(text), []
+        managed = set()
+        for block in blocks:
+            table = _codex_mcp_table(block)
+            if table and not table["suffix"] and _codex_mcp_managed(block, scripts_dir):
+                managed.add(table["key"].strip("\"'"))
         removed = 0
         for block in blocks:
-            body = "".join(block)
-            header = block[0].strip() if block else ""
-            ours = _mentions_dir(body, scripts_dir)
+            header = _codex_table_header(block)
+            table = _codex_mcp_table(block)
+            if table and table["key"].strip("\"'") in managed:
+                removed += 1
+                continue
+            ours = _codex_owns_hook(block, scripts_dir)
             if ours and header.startswith("[[hooks.") and header.endswith(".hooks]]"):
                 event = header[len("[[hooks.") : -len(".hooks]]")]
                 if kept and kept[-1][0].strip() == f"[[hooks.{event}]]" and not "".join(kept[-1][1:]).strip():
@@ -2110,7 +2236,7 @@ def undo_codex():
             kept.append(block)
         if removed:
             path.write_text("".join("".join(block) for block in kept), encoding="utf-8")
-            print(f"  ✓ 已从 Codex config.toml 去掉 octop hooks → {path}")
+            print(f"  ✓ 已从 Codex config.toml 去掉本次安装的 Octop hooks 和 MCP 服务 → {path}")
         else:
             print(f"  · Codex config.toml 无 octop hooks → {path}")
     else:
@@ -2421,42 +2547,18 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     if ($slotDetected[$key]) { Write-Host ("  {0}) {1}" -f $key, $slotHint[$key]) }
   }
 
-  # ---- 2) 选终端（1,2 / 1 3 / 12 / a=全部；回车=全部检测到的；选不中会重问）
+  # One credential is installed into one terminal.
   $terminals = $env:OCTOP_TERMINALS
   if (-not $terminals) { $terminals = $DEFAULT_TERMINALS }
   if (-not $terminals -and $interactive) {
-    $attempt = 0
-    while (-not $terminals -and $attempt -lt 3) {
-      $attempt++
-      $pick = Read-Host '要配置哪些？(可多选：1,2 / 1 3 / 12 / a=全部，回车=全部检测到的)'
-      $chosen = @()
-      if (-not $pick -or $pick -match '^(?i)(a|all|全部)$') {
-        $chosen = @($detected)
-      }
-      else {
-        $tokens = @()
-        foreach ($token in ($pick -replace '[,\s]+', ' ').Split(' ')) {
-          if (-not $token) { continue }
-          if ($token -match '^[0-9]{2,}$') {
-            foreach ($char in $token.ToCharArray()) { $tokens += [string]$char }
-          }
-          else { $tokens += $token }
-        }
-        foreach ($token in $tokens) {
-          $index = 0
-          if (-not [int]::TryParse($token, [ref]$index) -or -not $slotDetected[$index]) {
-            Write-Host "  ? 已忽略：$token（未检测到或无法识别）"
-            continue
-          }
-          $name = $slotName[$index]
-          if ($chosen -notcontains $name) { $chosen += $name }
-        }
-      }
-      if ($chosen.Count -gt 0) { $terminals = ($chosen -join ',') }
-      else { Write-Host '  ! 没有选中任何已检测到的终端，请重选（1-5，或 a=全部）' -ForegroundColor Yellow }
-    }
+    $pick = Read-Host "请选择一个终端（名称或编号，默认 $($detected[0])）"
+    if (-not $pick) { $terminals = $detected[0] }
+    elseif ($pick -match '^[1-5]$') { $terminals = $slotName[[int]$pick] }
+    else { $terminals = $pick }
   }
-  if (-not $terminals) { throw '没有可配置的终端（非交互请先设 $env:OCTOP_TERMINALS）' }
+  if ($terminals -cnotin $slotName.Values) {
+    throw '每枚 token 只安装到一个终端，请用 --terminals 指定一个终端名称。'
+  }
 
   # ---- 2.5) 安装范围：全局（默认）还是只装到某个项目
   # 项目级只在项目里写「注册」（hooks 命令 / MCP 条目）；hook 脚本与 config.json（含 token）
@@ -2503,7 +2605,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     }
   }
 
-  # ---- 3) 凭据：用户级 MCP token（omcp_…），条目与 hooks 共用同一份
+  # ---- 3) 凭据：接入端专用 MCP token（omcp_…），条目与 hooks 共用同一份
   $localNote = ''
   $isLocal = @('127.0.0.1', 'localhost') -contains ([Uri]$HOOK_URL).Host
   if ($isLocal) { $localNote = '（本机实例）' }
@@ -2513,7 +2615,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) { throw '需要 PowerShell 5.1 或更
     Write-Host '  · token：用安装链接预填的值（个人 MCP token）'
   }
   if (-not $token -and $interactive) {
-    $token = Read-Secret 'MCP token（omcp_…，在 Octop 的 /api/memory-mcp/tokens 创建；不回显）: '
+    $token = Read-Secret '此终端专用的 MCP token（omcp_…，不回显）: '
   }
   if (-not $token) { throw '缺少 MCP token：非交互运行时请先设 $env:OCTOP_MEMORY_TOKEN=<omcp_…>' }
   Write-Host "  · hook 直连：$HOOK_URL$localNote"

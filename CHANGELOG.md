@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-11-26
+
+### 新增
+
+- 安装 `octop-memory[server]` 可运行独立的 HTTP MCP 服务，按记忆空间隔离数据，并为每个终端单独签发、轮换和撤销凭据。
+- Codex 终端 hook 支持由当前对话模型或配套 Octop 服务复核记忆。启用面板同步后，终端可拉取并确认已发布的提取配置。复核按一条事实附一份原话证据提交，重复事实合并证据，明确变更可更新原记忆。
+- 宿主可用 `extraction.keep_rules` 和 `extraction.skip_rules` 指定提取时应保留或跳过的内容。
+- `memory_search` 和 `MemoryService.recall()` 支持设置词项覆盖率下限 `recall.min_token_coverage`。默认值 `0.0` 表示关闭。启用后，相关结果不足时可少于条数上限，也可以为空。
+
+### 修复
+
+- 开启召回覆盖率过滤后，未达标的候选不再占用同一项目的返回名额、压掉相似结果或阻止原始记录回退。已识别的项目名和别名可命中项目下的事实，端口号等独立数字也参与覆盖率计算。
+- 同一线程重复查询时，修改返回条数上限会按新上限取结果。
+
 ## [1.0.6] - 2026-11-25
 
 ### 新增

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
@@ -46,3 +48,11 @@ def test_posix_install_still_renders_shell(monkeypatch):
     cli.main(["install", "--url", "https://x/mcp/memory/", "--token", "omcp_x", "--terminals", "claude-code"])
     assert captured["suffix"] == ".sh"
     assert captured["script"].startswith("#!/bin/sh")
+
+
+def test_install_rejects_one_credential_for_two_terminals(monkeypatch):
+    captured = _fake_run(monkeypatch)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["install", "--url", "https://x/mcp/", "--token", "omcp_test", "--terminals", "codex,cursor"])
+    assert error.value.code == 2
+    assert not captured

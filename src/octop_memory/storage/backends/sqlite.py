@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 import threading
 from collections.abc import Callable, Generator, Sequence
@@ -15,7 +14,7 @@ from pathlib import Path
 from typing import Any, Concatenate
 
 from octop_memory.domain.datetime import as_utc, parse_datetime_utc
-from octop_memory.storage.backends import _UNSET, SearchIndexUpgradeRequired, _Unset
+from octop_memory.storage.backends import _UNSET, CodexReviewEvidence, SearchIndexUpgradeRequired, _Unset
 from octop_memory.storage.backends.fts_text import (
     FTS_TEXT_VERSION,
     RAW_FTS_TEXT_VERSION,
@@ -23,6 +22,7 @@ from octop_memory.storage.backends.fts_text import (
     fts_match_phrase,
     register_fts_functions,
 )
+from octop_memory.storage.backends.namespace import DEFAULT_SQLITE_DB_PATH, normalize_namespace
 from octop_memory.types import (
     ActiveEntity,
     Alias,
@@ -98,9 +98,9 @@ class SqliteMemoryBackend:
     def __init__(
         self,
         namespace: str,
-        db_path: str | Path = "~/.octop-memory/session.sqlite",
+        db_path: str | Path = DEFAULT_SQLITE_DB_PATH,
     ) -> None:
-        self._ns = re.sub(r"[^a-z0-9_]", "_", namespace.lower())
+        self._ns = normalize_namespace(namespace)
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._closed = False
@@ -1128,6 +1128,69 @@ class SqliteMemoryBackend:
         return False
 
     @locked_sqlite_operation
+    def codex_fact_targets(self, caller: str) -> list[dict[str, Any]]:
+        cur = self._conn
+        rows = cur.execute(
+            f"""SELECT c.id AS candidate_id, coalesce(a.id,c.id) AS target_id,
+               c.assertion AS candidate_assertion, coalesce(a.assertion,c.assertion) AS assertion,
+               json_extract(c.payload, '$.scope') AS scope,
+               json_extract(c.payload, '$.aspect') AS aspect,
+               json_extract(c.payload, '$.value') AS value, c.status, a.id AS atom_id
+        FROM {self._ns}_candidates c JOIN {self._ns}_raw_events r ON r.id=c.quote_event_id
+        LEFT JOIN {self._ns}_atoms a ON a.candidate_id=c.id
+        WHERE ((r.user=? AND r.host='codex') OR (r.host='manual' AND r.user IS NULL
+             AND r.event_type='manual' AND json_extract(r.payload,'$.metadata.caller')=?))
+          AND ((a.id IS NULL AND c.status IN ('pending','needs_review'))
+            OR (a.id IS NOT NULL AND a.deprecated_at IS NULL))
+        ORDER BY c.created_at DESC""",
+            (caller, caller),
+        )
+        return [dict(row) for row in rows.fetchall()]
+
+    @locked_sqlite_operation
+    def append_codex_evidence(self, candidate: Candidate, atom: AtomCard | None, event_id: str, quote: str) -> None:
+        cur = self._conn.cursor()
+        if event_id in candidate.raw_event_ids:
+            return
+        refs = [*candidate.raw_event_ids, event_id]
+        quotes = dict(candidate.payload.get("evidence_quotes") or {})
+        quotes.setdefault(candidate.quote_event_id, candidate.verbatim_quote)
+        quotes[event_id] = quote
+        payload = {**candidate.payload, "evidence_quotes": quotes}
+        cur.execute(
+            f"UPDATE {self._ns}_candidates SET raw_event_ids=?, payload=? WHERE id=? AND status=?",
+            (
+                json.dumps(refs, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
+                candidate.id,
+                candidate.status,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("candidate was reviewed concurrently")
+        if atom is not None:
+            atom_refs = list(dict.fromkeys([*atom.raw_event_ids, event_id]))
+            cur.execute(
+                f"UPDATE {self._ns}_atoms SET raw_event_ids=? WHERE id=? AND deprecated_at IS NULL",
+                (json.dumps(atom_refs, ensure_ascii=False), atom.id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("memory was updated concurrently")
+        self._commit()
+
+    @locked_sqlite_operation
+    def retire_codex_draft(self, candidate_id: str, successor: str) -> bool:
+        cur = self._conn.cursor()
+        cur.execute(
+            f"UPDATE {self._ns}_candidates SET status='rejected', promotion_reason=?, decided_by='rule', decided_at=?"
+            " WHERE id=? AND status IN ('needs_review','pending','conflict')",
+            (f"superseded by {successor}", datetime.now(UTC).isoformat(), candidate_id),
+        )
+        changed = cur.rowcount == 1
+        self._commit()
+        return changed
+
+    @locked_sqlite_operation
     def save_candidate(self, candidate: Candidate) -> None:
         """Insert a new candidate. Strict insert; duplicate id → IntegrityError."""
         ns = self._ns
@@ -1862,6 +1925,44 @@ class SqliteMemoryBackend:
             (entity_id,),
         ).fetchone()
         return self._row_to_entity_page(row) if row else None
+
+    @locked_sqlite_operation
+    def latest_codex_review_evidence(self, caller: str | None = None) -> CodexReviewEvidence | None:
+        ns = self._ns
+        row = self._conn.execute(
+            f"""
+            WITH latest AS (
+                SELECT id AS event_id, timestamp, session_id, user AS caller,
+                       json_extract(payload, '$.turn_id') AS turn_id, json_extract(payload, '$.source_model') AS model
+                FROM {ns}_raw_events
+                WHERE host = 'codex' AND event_type = 'user_message' AND session_id IS NOT NULL AND user IS NOT NULL
+                  AND (? IS NULL OR user = ?)
+                  AND json_extract(payload, '$.turn_id') != ''
+                  AND (json_extract(payload, '$.codex_review') = 1 OR json_extract(payload, '$.source_model') != '')
+                  AND coalesce(json_extract(payload, '$.content_redacted'), 0) = 0
+                ORDER BY timestamp DESC, id DESC LIMIT 1
+            )
+            SELECT latest.*, (
+                SELECT count(*) FROM {ns}_candidates c JOIN {ns}_raw_events r ON r.id = c.quote_event_id
+                WHERE c.extractor_version IN ('host-quote/v1', 'host-facts/v2') AND c.session_id = latest.session_id
+                  AND r.session_id = latest.session_id AND r.user = latest.caller AND r.host = 'codex'
+                  AND json_extract(r.payload, '$.turn_id') = latest.turn_id
+            ) AS proposals FROM latest
+        """,
+            (caller, caller),
+        ).fetchone()
+        if row is None:
+            return None
+        return CodexReviewEvidence(**{**dict(row), "timestamp": parse_datetime_utc(row["timestamp"])})
+
+    @locked_sqlite_operation
+    def advance_codex_review_cursor(self, cursor: str) -> None:
+        self._conn.execute(
+            f"""INSERT INTO {self._ns}_meta (key, value) VALUES ('codex_review_finished', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > value""",
+            (cursor,),
+        )
+        self._commit()
 
     @locked_sqlite_operation
     def count_stats(self) -> dict[str, int]:

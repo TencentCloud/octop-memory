@@ -63,6 +63,7 @@ For work spanning repositories:
 - Check `git status --short` and relevant diffs first; preserve existing user changes.
 - For nontrivial work, state the goal, files, expected behavior, minimal validation, and risks. Stage large work and keep scope focused.
 - Update affected code, tests, configuration, and documentation together. Avoid unrelated refactors and per-task document proliferation.
+- When adding, changing, or removing a memory setting, update the [memory configuration reference](docs/agent/PROJECT_MAP.md#memory-configuration) in the same change. Record its key, default, units or allowed values, which entry points read it, and how to apply and verify it. Follow the value from the host to its consumer before documenting its effect.
 - Communicate in the requester's language; preserve code identifiers, CLI flags, environment variables, and error messages verbatim.
 - Use English PR titles by default unless the requester explicitly asks for another language.
 - Use generic placeholders and temporary databases. Never commit personal paths, runtime records, credentials, memory exports, or real databases.

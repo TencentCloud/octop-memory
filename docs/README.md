@@ -21,6 +21,7 @@ Read the project map, relevant decisions, and test matrix in that order. Consult
 | Document | Contents |
 |---|---|
 | [PROJECT_MAP](agent/PROJECT_MAP.md) | Module entry points, public APIs, write/recall flows, repository ownership, and storage boundaries |
+| [Memory configuration](agent/PROJECT_MAP.md#memory-configuration) | Recall thresholds and result limits, capture and extraction defaults, and Codex hook settings |
 | [DECISIONS](agent/DECISIONS.md) | Stable ADR numbers, design reasons, costs, and supersession relationships |
 | [TEST_MATRIX](agent/TEST_MATRIX.md) | Commands by change scope, optional environments, and validation limits |
 | [KNOWN_RISKS](agent/KNOWN_RISKS.md) | Current limitations, triggers, and mitigations |

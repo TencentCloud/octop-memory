@@ -89,10 +89,20 @@ def test_runtime_flow_against_real_base(tmp_path: Path) -> None:
             provider.handle_tool_call("memory_search", {"query": "release window Tuesday", "maxResults": 5})
         )
         assert search.get("hits")
-        got = json.loads(provider.handle_tool_call("memory_get", {"path": search["hits"][0]["path"]}))
+        path = search["hits"][0]["path"]
+        assert path.startswith("raw/")
+        got = json.loads(provider.handle_tool_call("memory_get", {"path": path}))
         assert "release window" in got.get("excerpt", "").lower()
 
-        block = provider.prefetch("What is the release window?", session_id="e2e_sess")
-        assert "OctopMemory Recall" in block
+        query = "What is the release window?"
+        assert provider.prefetch(query, session_id="e2e_sess") == ""
+
+        assert provider._memory is not None
+        atom, _, _ = provider._memory.create_atom("The release window is Tuesday at 14:00.", entity_name="Rollout")
+        block = provider.prefetch(query, session_id="e2e_sess")
+        assert "## OctopMemory Recall" in block
+        assert f"atom/{atom.id}.md" in block
+        assert atom.assertion in block
+        assert "raw/" not in block
     finally:
         provider.shutdown()

@@ -217,6 +217,13 @@ def _word_tokens(query: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def tokenize_text(text: str) -> tuple[str, ...]:
+    """Coverage terms, including numbers beside punctuation or Han text."""
+    text = text or ""
+    numbers = re.findall(r"(?<![A-Za-z0-9_])[0-9]+(?![A-Za-z0-9_])", text)
+    return tuple(dict.fromkeys((*_word_tokens(text), *numbers)))
+
+
 def _entity_hints(query: str) -> tuple[str, ...]:
     """Extract candidate entity-name fragments from ``query``.
 

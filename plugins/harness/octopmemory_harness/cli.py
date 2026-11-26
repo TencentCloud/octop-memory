@@ -49,14 +49,14 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument(
         "--url",
         required=True,
-        help="MCP 地址，例如 https://octop.example.com/mcp/memory/",
+        help="MCP 地址，例如 https://memory.example.com/mcp/",
     )
     install.add_argument(
         "--token",
         default=None,
-        help="用户级 MCP token（omcp_…）；也可以先设 OCTOP_MEMORY_TOKEN",
+        help="该接入端专用的 MCP token（omcp_…）；也可以先设 OCTOP_MEMORY_TOKEN",
     )
-    install.add_argument("--terminals", default="", help="逗号分隔：claude-code,codex,cursor,kiro,dsh")
+    install.add_argument("--terminals", default=os.environ.get("OCTOP_TERMINALS", ""), help="选择此凭据对应的一个终端")
     install.add_argument("--project", default="", help="只装到某个项目目录（默认全局）")
 
     uninstall = sub.add_parser("uninstall", help="卸载 hooks 与 MCP 条目")
@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     env = dict(os.environ)
 
     if args.command == "install":
+        if args.terminals and args.terminals not in installer.TERMINALS:
+            parser.error("每枚 token 只安装到一个终端，请用 --terminals 指定一个终端名称")
         token = args.token or env.get("OCTOP_MEMORY_TOKEN", "")
         if not token:
             parser.error("缺少 token：用 --token 或 OCTOP_MEMORY_TOKEN 提供")

@@ -36,6 +36,8 @@ Paths in this table are relative to `src/octop_memory/`.
 | `application/config.py` | Runtime defaults and configuration conversion. OpenClaw expands profiles in TS; Python Runtime does not switch policy from a profile label |
 | `application/host_files.py`, `path_projection.py` | Host Markdown index and virtual paths |
 | `application/checkpoint_maintenance.py`, `storage/backends/sqlite_checkpoint*.py` | SQLite checkpoint content reuse, offline/online maintenance, reader compatibility |
+| `server/admin.py`, `server/control.py`, `server/registry.py` | Standalone space and token management. A token identifies one client installation in one space. Its ID owns request counts, capture attribution and revocation. Admin moves require permission for both the original and destination spaces. The CLI and admin API resolve storage through `server/config.py`. Registration confirms existing bindings and rejects a different target for the same ID within the control-store transaction. Opening rechecks the effective mappings, including configured spaces. SQLite reserves a normalized prefix per physical file and PostgreSQL reserves a normalized namespace across the control store. |
+| `server/mcp.py` | Standalone HTTP tools default to atom-only search through `MemoryRuntime`, expose explicit raw-event search through `Memory.search_raw`, and map paginated reads to the MCP response contract. |
 | `storage/backends/__init__.py`, `sqlite.py`, `postgres.py`, `postgres_pool.py` | `MemoryBackend` contract, SQL, FTS, transactions, namespaces, pools |
 | `storage/backends/postgres_legacy.py` | Pre-1.0 `harness_memory` schema: automatic copy on open, status, merge, purge marker (PG only) |
 | `storage/driver_errors.py` | Exception tuples allowed to degrade at each boundary |
@@ -46,9 +48,22 @@ Paths in this table are relative to `src/octop_memory/`.
 | `operations/retention.py` | Historical runtime-error governance, semantic manual-document reconciliation, audit metadata |
 
 Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
+
+The Codex installer registers a Streamable HTTP MCP server in `config.toml`. Its header helper reads the same
+local credential file as the hooks. Recall includes virtual paths for `memory_get`. Read-only setup exposes
+only `memory_get` and skips transcript capture. With `OCTOP_CODEX_EXTRACTION=codex`, writable Codex captures
+pass `extract=false` and request evidenced user event IDs for the active turn. Stop can continue that turn once.
+The authenticated `memory_propose` tool checks the caller and matches the quote against the stored user event
+before storing one atomic batch of up to three separate assertions with their evidence. Redelivery returns the original candidate IDs for that turn. Legacy single-quote clients remain supported. The captured model slug is client-reported provenance.
+The review prompt asks the model to end with an empty final response for both submissions and skips.
+The continued Stop sends a completion receipt through `memory_capture`. Overview reads
+`last_codex_review` from eligible user events, the matching receipt and submitted quote candidates.
+`last_extract_run` continues to describe server extraction.
 `tests/` contains behavior tests, `evals/recall/` synthetic evaluation, and `examples/basic_usage.py` a public-API
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.
+
+Codex delegated review (`OCTOP_CODEX_EXTRACTION=octop`) captures user evidence through the existing MCP and queues event IDs for the configured Octop review endpoint. The host uses `memory_codex_review_evidence` to verify the credential, space, turn and eligible source before calling its selected model. `memory_propose` validates each assertion's exact quote and uses the same transactional reconciliation as native review. Native review obtains policy and matching target IDs with `memory_codex_related`. Targets come from the same credential in the same space. Matching uses scoped attributes, values and target versions. Repetition appends evidence to the existing candidate and active atom. Explicit changes supersede a confirmed atom or retire an older draft. A conflicting suggestion leaves the old value active until a reviewer decides. Each turn receipt records the resulting IDs, including merges.
 
 ### Public API responsibilities
 
@@ -66,6 +81,71 @@ Service configuration feeds Runtime tool search, capture, privacy, and extractio
 `MemoryService.recall()` directly calls prompt recall without forwarding all Runtime recall configuration.
 Automatic injection is atom-only; Runtime raw/host-file configuration does not widen it.
 Tool search retains its multi-source policies and file sources.
+
+## Memory configuration
+
+### Recall threshold and result limits
+
+`recall.min_token_coverage` sets the minimum fraction of distinct query terms a candidate must cover.
+The default `0.0` skips this filter and leaves automatic recall running. At `0.05`, matching one of 20 terms
+qualifies. Numbers count as terms, including a port written beside Han text. At `1.0`, a query for
+`port 8088` requires both terms. When a query resolves to one entity, its own facts and page already
+satisfy the name or alias. Coverage for those candidates uses the remaining query terms. Searching only
+the project name can therefore return its facts even when their text omits the name.
+
+Coverage is checked during gathering. Only eligible hits can use an entity slot, suppress a similar
+candidate, or block explicit raw fallback. A rejected atom leaves its cited raw evidence eligible for
+explicit search under the usual session and manual-document exclusions. Results can be empty, and a
+higher threshold can discard useful paraphrases.
+
+| Entry point | Where the threshold or limit comes from | When it takes effect |
+|---|---|---|
+| Standalone MCP `memory_search` | Set `recall.min_token_coverage` in the server JSON. The registry shares it across served spaces. Accepted range is `0.0`–`1.0` inclusive. Missing, invalid, or out-of-range runtime values use `0.0`. | Restart the memory service. The default `atom` search uses the floor. Explicit `raw` searches use a separate raw-event lookup. |
+| Python `MemoryService.search()` / bridge `memory_search` | Set `recall.min_token_coverage` in the configuration passed to the service or runtime. | Applies to that instance's recall pipeline. The thread cache distinguishes the effective threshold and result limit. |
+| Python `MemoryService.recall()` | Pass `min_token_coverage=0.05` on the call. Omitting it uses `0.0` even when a service search threshold is configured. | That call only. |
+| Result count | Standalone MCP defaults to `max_results=8`. The Codex prompt hook requests `corpus="atom"` and reads `OCTOP_RECALL_MAX_RESULTS` from its environment, default `5`. Both counts are positive integers. | Per request. A higher cap allows more hits that qualify. |
+
+For standalone MCP, merge this field into the existing server configuration (by default
+`~/.octop-memory/config.json`, or the file selected by `--config`), then restart the service.
+
+```json
+{"recall": {"min_token_coverage": 0.05}}
+```
+
+To verify a change, run read-only `memory_search` calls before and after the restart with the same space,
+queries, `corpus="atom"`, and result cap. Compare the hit paths and count useful hits lost as well as
+irrelevant hits removed. The [threshold tests](../../tests/test_recall_token_coverage_floor.py) and
+[standalone MCP test](../../tests/test_server.py) cover the boundary and its wiring.
+
+### Embedded runtime settings
+
+Pass these groups when constructing `MemoryService(memory, config=...)` or starting the bridge with `--config-json`.
+Recreate the instance to load edited settings. The standalone JSON registry forwards the recall threshold and
+LLM settings. The other rows below describe the embedded runtime. Consult the
+[runtime defaults](../../src/octop_memory/application/config.py) and [runtime consumers](../../src/octop_memory/application/runtime.py).
+
+| Setting | Default | Effect and overrides |
+|---|---|---|
+| `recall.default_max_results`, `recall.default_corpus` | `5`, `"all"` | Bridge search defaults when a request omits the count or corpus. Python `MemoryService.search()` supplies its own arguments, which default to `5` and `"all"`. |
+| `recall.raw_policy`, `recall.host_files_policy` | `"fallback"`, `"include"` | Multi-source search can use raw events (`never`, `fallback`, `always`) and host files (`off`, `include`, `only`). Automatic prompt recall stays atom-only. |
+| `recall.layer_order` | `["atom", "host_file", "page", "raw"]` | Order result layers before applying the final tool search limit. Hits within a layer keep their relative order. |
+| `capture.include_roles`, `capture.min_message_chars`, `capture.skip_memory_echo` | `["user", "assistant"]`, `12`, `true` | Select eligible roles, set a minimum visible length (CJK-weighted), and skip messages containing recall-injection markers. |
+| `capture.include_tool_calls`, `capture.include_tool_results`, `privacy.store_tool_payloads` | All `false` | Keep tool-call fields, admit tool results, and retain tool payloads respectively. Capturing tool results also requires `tool` in `include_roles`. |
+| `privacy.redact_secrets`, `privacy.redact_patterns`, `privacy.store_raw_content` | `true`, `[]`, `true` | Apply built-in secret redaction, add regex patterns, and choose whether captured events retain raw text. These affect subsequent captures. |
+| `extraction.max_candidates`, `extraction.max_tokens` | `20`, `null` | Candidate budget and completion-token cap for the runtime extractor. A positive token cap overrides its built-in budget of 2,048 tokens. |
+| `extraction.keep_rules`, `extraction.skip_rules` | Both `null` | Optional text for the extractor describing what to retain or skip. Each rule is trimmed to 2,000 characters. |
+| `extraction.promote`, `extraction.regen_pages`, `extraction.page_regen_limit` | `true`, `true`, `5` | Run candidate promotion and regenerate up to five dirty pages by default. Explicit extract arguments override the two switches. Python `MemoryService.extract()` supplies both switches. |
+
+### Codex extraction settings
+
+| Installer variable | Fresh-install default | Scope |
+|---|---|---|
+| `OCTOP_CODEX_EXTRACTION` | `server` | With a writable token, `server` uses server extraction, `codex` uses the current chat model for review, and `octop` delegates review to the Octop-selected model. A setup prompt can select a mode explicitly. A same-URL upgrade defaults to the installed mode. |
+| `OCTOP_CODEX_PANEL_SYNC` | `0` | Install with `1` and a writable token to follow the mode published for that terminal credential. A subsequent Stop hook checks the published selection. A same-credential upgrade preserves enabled sync unless overridden. |
+| `OCTOP_CODEX_REVIEW_URL` | Unset | Required for writable delegated review or panel sync. Use the Octop `/api/memory-mcp/codex-review` endpoint over HTTPS or loopback HTTP. |
+
+The panel's **Apply to terminal** action publishes the extraction selection. The recall threshold is loaded by
+the memory service. See the [Codex integration guide](../integrations.md) and [installer](../../plugins/harness/octopmemory_harness/installer.py).
 
 ## Repository integration map
 
@@ -169,6 +249,8 @@ Absolute event times use aware UTC.
 
 ### Extraction and durable progress
 
+Hosts can check `MemoryService.supports_extraction_rules` before forwarding `extraction.keep_rules` and `extraction.skip_rules`. Candidate v2.6 and Episode v2 apply these preferences to new extraction calls. Empty rules preserve the original prompt text.
+
 `CandidateExtractor` in `pipeline/extractor/__init__.py` has no persistence side effects.
 Defaults split at **100 events** and **20,000 estimated characters**: body length plus 200 characters per event,
 not a strict serialized-prompt character/token limit. A single oversized event gets its own batch and is not truncated/dropped.
@@ -251,13 +333,13 @@ Ordinary page apply retains legacy backend signatures; explicit version conditio
 
 `pipeline/lifecycle/dreaming.py` audits a cursor-bounded page of active atoms. The idle worker, background `review_new_memory`, and CLI `entity dream` reuse it. Journal entries under `entity_review` identify the source atom, quote, owner and suggested matches. Inspect them with `journal list --action entity_review`. Name-only evidence cannot change ownership. Candidate approval accepts an explicit entity ID for reviewed ambiguities.
 
-Main pipeline: cache → parse → route → atom-only source restriction → gather → raw policy → rerank → diversify → suppress → budget → render.
+Main pipeline: cache → parse → route → atom-only source restriction → gather with coverage check → raw policy → rerank → diversify → suppress → budget → render.
 `recall_for_prompt(atom_only=True)` is the automatic-injection default, gathering atom and optional vector atom hits only.
 No atom match returns empty; raw, page_headline, and episode cannot fill the prompt. Service, Hermes prefetch, and CLI use this default.
 Runtime `memory_search` explicitly passes `atom_only=False` for ordinary tools and preserves configurable raw fallback and host Markdown.
 OpenClaw hybrid prefetch sends `atomOnly: true`; Runtime then skips non-atom sources and host files. The plugin also filters
 host-prefetched/returned results and prompt rendering to canonical atom paths. Explicit tools keep existing sources.
-Cache scope includes atom-only mode, raw policy, current session, and manual-document snapshots to prevent cross-mode reuse.
+Cache scope includes the result limit, coverage floor, atom-only mode, raw policy, current session, and manual-document snapshots.
 With multi-source retrieval, raw fallback excludes raw when durable results exist rather than topping up the count;
 current session/thread scope excludes that conversation's raw.
 Both recall pipelines use the raw text projection for candidates and snippets. SQLite FTS5 and PostgreSQL GIN index
