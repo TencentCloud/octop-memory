@@ -68,6 +68,9 @@ published revision after storing it. See [terminal setup](../../plugins/harness/
 - **⚠️ Recall/write path change** — Standalone MCP search defaults to durable atoms. Explicit `raw` uses the existing event search and returns readable paths. `memory_get` supports `start` and returns the excerpt as `content` for existing clients.
 - **Validation** — `make all` passed against dedicated PostgreSQL 16 with 1,712 passed and 3 platform or optional-host skips. All 33 [standalone server checks](TEST_MATRIX.md#validation-by-change-scope) ran, including token rebinding on an older control database, configured CLI and API registration, same-ID retries and concurrent conflicts, file aliases, shared-file MCP isolation, per-installation revocation and paginated recall. All 14 terminal plugin tests passed. A temporary POSIX project received distinct Codex and Cursor configurations. Windows rendering was tested without running PowerShell.
 - **⚠️ Recall/write path change** — Each installation receives its own space token. Usage, capture ownership and review attribution follow the token ID. Older shared or partially disabled credentials are retired on upgrade. The server ignores earlier secondary grants. Clients with Octop-only credentials need a new space token.
+### Configurable memory extraction rules
+
+⚠️ Recall/write path change. [Octop #2963](https://github.com/TencentCloud/Octop/issues/2963) adds optional keep and skip guidance to the Candidate and Episode prompts. The worktree based on `c951d7a` passed `make all` with a dedicated PostgreSQL database (1,663 passed, 12 skipped). The local Harness integration test captured both prompts through the real memory service. Package releases and consumer dependency updates are pending.
 
 ### Raw image search
 

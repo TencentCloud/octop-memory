@@ -12,12 +12,10 @@ from octop_memory.types import (
 )
 
 try:
-    from octop_memory._version import __version__  # type: ignore[import-untyped]
+    from octop_memory._version import __version__
 except ImportError:
-    # No build-time _version module (the version in pyproject.toml is static,
-    # so nothing generates one). Installed wheels must report the real version
-    # from distribution metadata instead of the "+unknown" placeholder, which
-    # previously leaked into `--version`, bridge --probe, and doctor output.
+    # Keep a metadata fallback for unusual source layouts where the package
+    # version module is unavailable.
     try:
         from importlib.metadata import PackageNotFoundError, version
 
