@@ -762,7 +762,8 @@ def stats_counts(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
     pending-candidate count, 7-day deltas computed from
     ``created_at`` (atoms / entities / episodes), and
     ``last_extract_run`` (latest extract summary from meta, or
-    ``None`` if extract has never run).
+    ``None`` if extract has never run). ``last_codex_review`` describes
+    the latest eligible Codex turn independently of server extraction.
     """
     _ = params
     # Widened: count_stats() is int-valued, but last_extract_run adds a dict.
@@ -784,6 +785,7 @@ def stats_counts(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
     base["entities_delta_7d"] = sum(1 for e in memory.list_entities(limit=10_000) if e.created_at >= cutoff)
     base["episodes_delta_7d"] = sum(1 for ep in episodes if ep.created_at >= cutoff)
     base["last_extract_run"] = memory.get_last_extract_run()
+    base["last_codex_review"] = memory.get_last_codex_review()
 
     return base
 

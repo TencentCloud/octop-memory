@@ -18,6 +18,7 @@ from octop_memory.application.config import (
     DEFAULT_RECALL_CFG,
     MemoryRuntimeConfig,
     coerce_runtime_config,
+    normalize_extraction_rule,
 )
 from octop_memory.application.host_files import HostFilesIndex
 from octop_memory.application.path_projection import (
@@ -505,6 +506,19 @@ class MemoryRuntime:
 
         return {
             "accepted": accepted,
+            **(
+                {
+                    "user_event_ids": [
+                        event.id
+                        for event in events_to_write
+                        if event.event_type == "user_message"
+                        and not event.payload.get("content_redacted")
+                        and event.payload.get("turn_id") == params["evidence_for_turn"]
+                    ]
+                }
+                if params.get("evidence_for_turn")
+                else {}
+            ),
             "skipped_recall_marker": skipped_marker,
             "skipped_too_short": skipped_short,
             "skipped_role": skipped_role,
@@ -636,7 +650,16 @@ class MemoryRuntime:
         if not new_events:
             return response
 
-        extractor = CandidateExtractor(llm=self._llm, max_candidates=max_candidates, max_tokens=max_tokens)
+        keep_rules = normalize_extraction_rule(extraction_cfg.get("keep_rules"))
+        skip_rules = normalize_extraction_rule(extraction_cfg.get("skip_rules"))
+
+        extractor = CandidateExtractor(
+            llm=self._llm,
+            max_candidates=max_candidates,
+            max_tokens=max_tokens,
+            keep_rules=keep_rules,
+            skip_rules=skip_rules,
+        )
         result = extractor.extract(new_events, session_id=session_id)
         response["warnings"] = result.warnings
         response["cap_warning"] = result.cap_warning
@@ -697,7 +720,12 @@ class MemoryRuntime:
         # are an enrichment layer, not load-bearing for atom recall.
         if self._llm_configured:
             try:
-                ep_extractor = EpisodeExtractor(llm=self._llm, max_tokens=max_tokens)
+                ep_extractor = EpisodeExtractor(
+                    llm=self._llm,
+                    max_tokens=max_tokens,
+                    keep_rules=keep_rules,
+                    skip_rules=skip_rules,
+                )
                 ep_result = ep_extractor.extract(new_events, session_id=session_id)
                 if ep_result.episodes:
                     self._memory.add_episodes(ep_result.episodes)

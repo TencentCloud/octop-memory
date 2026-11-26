@@ -439,12 +439,14 @@ def _recall_for_prompt_impl(
     # 1. Cache lookup --------------------------------------------------
     typed_cache: RecallCache | None = cache if isinstance(cache, RecallCache) else None
     manual_policy = memory.get_meta(MANUAL_DOCUMENTS_RECALL_KEY)
+    floor = min_token_coverage if min_token_coverage > 0 else 0.0
     cache_thread = thread_id
     if thread_id is not None:
         cache_revision = json.dumps(
             {
                 "atom_only": atom_only,
                 "raw_policy": raw_policy,
+                "min_token_coverage": floor,
                 "session_id": session_id or thread_id,
                 "manual_policy": manual_policy,
                 "manual_context": manual_context,
@@ -519,7 +521,6 @@ def _recall_for_prompt_impl(
     budget = make_budget_state(total_tokens=total_budget_tokens or DEFAULT_TOTAL_TOKENS)
     accepted: list[RecallSnippet] = []
     hit_entity_ids: list[str] = []
-    floor = min_token_coverage if min_token_coverage > 0 else 0.0
     query_tokens = frozenset(parsed.raw_tokens) if floor > 0 else frozenset()
     for ranked_snippet in suppressed.kept:
         if len(accepted) >= limit:

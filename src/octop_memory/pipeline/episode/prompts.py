@@ -7,7 +7,9 @@ against new prompt versions later.
 
 from __future__ import annotations
 
-EPISODE_EXTRACTOR_VERSION = "episode/v1"
+from octop_memory.application.config import normalize_extraction_rule
+
+EPISODE_EXTRACTOR_VERSION = "episode/v2"
 """Version tag persisted on every Episode (`extractor_version`)."""
 
 _FEW_SHOT = """\
@@ -133,7 +135,7 @@ Rules:
 - One episode = one coherent event. Don't merge two unrelated events
   ("老婆吵架" and "项目上线") into one row.
 - Do not include events the assistant brought up; only first-person user
-  experiences.
+  experiences.{custom_rules_section}
 
 {few_shot}
 
@@ -146,9 +148,41 @@ OUTPUT:
 """
 
 
-def render_episode_prompt(events_json: str, *, max_episodes: int = 10) -> str:
+def _format_custom_rules_section(
+    keep_rules: str | None,
+    skip_rules: str | None,
+) -> str:
+    """Format optional user-configured keep/skip rules for episode extraction."""
+    keep = normalize_extraction_rule(keep_rules)
+    skip = normalize_extraction_rule(skip_rules)
+    if keep is None and skip is None:
+        return ""
+    lines = [
+        "",
+        "",
+        "Additional retention rules (user-configured; apply these when deciding",
+        "which first-person lived events to keep or skip, while strictly preserving",
+        "the Episode JSON schema and user-experience boundaries above):",
+    ]
+    if keep is not None:
+        lines.append("- Prefer keeping:")
+        lines.append(keep)
+    if skip is not None:
+        lines.append("- Skip (do NOT store as episodes):")
+        lines.append(skip)
+    return "\n".join(lines)
+
+
+def render_episode_prompt(
+    events_json: str,
+    *,
+    max_episodes: int = 10,
+    keep_rules: str | None = None,
+    skip_rules: str | None = None,
+) -> str:
     return _PROMPT_TEMPLATE.format(
         max_episodes=max_episodes,
+        custom_rules_section=_format_custom_rules_section(keep_rules, skip_rules),
         few_shot=_FEW_SHOT,
         events_json=events_json,
     )

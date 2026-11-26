@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # octop-memory 终端接入（macOS / Linux）
 #
-#   ./install.sh --url https://<octop-host>/mcp/memory/ --token omcp_…
+#   ./install.sh --url https://<memory-host>/mcp/ --token omcp_…
 #
 # 也支持环境变量：OCTOP_MEMORY_URL / OCTOP_MEMORY_TOKEN / OCTOP_TERMINALS / OCTOP_PROJECT_DIR
 # 脚本只负责把安装器拉起来；token 不会写进仓库，只落在各终端 hook 目录的 config.json（0600）。
@@ -18,11 +18,11 @@ PROJECT="${OCTOP_PROJECT_DIR:-}"
 
 usage() {
   cat <<'USAGE'
-用法: install.sh --url <MCP 地址> [--token <omcp_…>] [--terminals a,b] [--project <dir>]
+用法: install.sh --url <MCP 地址> [--token <omcp_…>] [--terminals codex] [--project <dir>]
 
-  --url       必填，例如 https://octop.example.com/mcp/memory/
-  --token     用户级 MCP token；也可用环境变量 OCTOP_MEMORY_TOKEN
-  --terminals 逗号分隔：claude-code,codex,cursor,kiro,dsh（默认交互选择）
+  --url       必填，例如 https://memory.example.com/mcp/
+  --token     该接入端专用的空间 token；也可用环境变量 OCTOP_MEMORY_TOKEN
+  --terminals 单选：claude-code、codex、cursor、kiro 或 dsh（默认交互选择）
   --project   只装到这个项目目录（默认全局）
 USAGE
 }
@@ -43,17 +43,15 @@ if [ -z "$TOKEN" ]; then echo "缺少 --token（或用 OCTOP_MEMORY_TOKEN）" >&
 
 run_installer() {
   OCTOP_MEMORY_TOKEN="$TOKEN" "$@" install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+    --url "$URL" --terminals "$TERMINALS" --project "$PROJECT"
 }
 
 if command -v uvx >/dev/null 2>&1; then
-  OCTOP_MEMORY_TOKEN="$TOKEN" uvx --from "$SPEC" octop-memory-harness install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+  run_installer uvx --from "$SPEC" octop-memory-harness
   exit 0
 fi
 if command -v pipx >/dev/null 2>&1; then
-  OCTOP_MEMORY_TOKEN="$TOKEN" pipx run --spec "$SPEC" octop-memory-harness install \
-    --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+  run_installer pipx run --spec "$SPEC" octop-memory-harness
   exit 0
 fi
 
@@ -63,12 +61,13 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
   exit 1
 fi
 
-VENV="${TMPDIR:-/tmp}/octop-memory-harness-venv"
+# Isolate the fallback install by repository and revision, just as uvx/pipx do.
+INSTALL_KEY=$("$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:20])' "$SPEC")
+VENV="${TMPDIR:-/tmp}/octop-memory-harness-venv-$INSTALL_KEY"
 if [ ! -x "$VENV/bin/octop-memory-harness" ]; then
   echo "· 创建临时虚拟环境: $VENV"
   "$PYTHON" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   "$VENV/bin/python" -m pip install --quiet "git+${REPO}@${REF}#subdirectory=plugins/harness"
 fi
-OCTOP_MEMORY_TOKEN="$TOKEN" "$VENV/bin/octop-memory-harness" install \
-  --url "$URL" --token "$TOKEN" --terminals "$TERMINALS" --project "$PROJECT"
+run_installer "$VENV/bin/octop-memory-harness"

@@ -13,7 +13,8 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from octop_memory.storage.backends import _UNSET, MemoryBackend, SearchIndexMaintenance, _Unset
+from octop_memory.domain import codex_review
+from octop_memory.storage.backends import _UNSET, CodexReviewBackend, MemoryBackend, SearchIndexMaintenance, _Unset
 from octop_memory.storage.driver_errors import DRIVER_ERRORS, VECTOR_ERRORS
 from octop_memory.types import (
     ActiveEntity,
@@ -22,6 +23,7 @@ from octop_memory.types import (
     Candidate,
     CandidateStatus,
     CandidateType,
+    CodexFact,
     ConfidenceLevel,
     DigestPeriod,
     DigestRecord,
@@ -413,6 +415,226 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         return self._backend.get_candidate(candidate_id)
+
+    def propose_quote(
+        self,
+        event_id: str,
+        quote: str,
+        *,
+        caller: str,
+        kind: Literal["Preference", "Decision", "Fact"],
+        review_model: str | None = None,
+    ) -> Candidate:
+        """Queue an exact excerpt from the caller's stored user message for review."""
+        fact = CodexFact(event_id, kind, quote.strip(), quote.strip())
+        event = self._proposal_evidence(fact, caller)
+        candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"octop:proposal:{event.id}:{fact.quote}"))
+        existing = self.get_candidate(candidate_id)
+        if existing:
+            return existing
+        proposal = self._quote_candidate(fact, event, candidate_id, "host-quote/v1", review_model)
+        try:
+            with self._backend.transaction():
+                self.add_candidate(proposal)
+        except DRIVER_ERRORS:
+            # Another server process may have committed the same quote first.
+            if existing := self.get_candidate(candidate_id):
+                return existing
+            raise
+        return proposal
+
+    def _proposal_evidence(self, fact: CodexFact, caller: str) -> RawEvent:
+        event = self.get_raw(fact.event_id)
+        if not caller or event is None or event.user != caller or event.event_type != "user_message":
+            raise ValueError("user evidence is unavailable")
+        if (
+            event.payload.get("content_redacted")
+            or not fact.quote.strip()
+            or len(fact.quote) > 200
+            or fact.quote not in event.content
+        ):
+            raise ValueError("quote must match the stored user evidence")
+        return event
+
+    def propose_codex_facts(
+        self, facts: list[CodexFact], *, caller: str, review_model: str | None = None
+    ) -> list[Candidate]:
+        """Accept one atomic batch per captured Codex turn; retry returns the first batch."""
+        if not 1 <= len(facts) <= 3:
+            raise ValueError("expected one to three facts")
+        events = [self._proposal_evidence(fact, caller) for fact in facts]
+        first = events[0]
+        turn = first.payload.get("turn_id")
+        if (
+            not turn
+            or not first.session_id
+            or any(
+                event.host != "codex"
+                or event.session_id != first.session_id
+                or event.payload.get("turn_id") != turn
+                or not (event.payload.get("codex_review") or event.payload.get("octop_model_review"))
+                for event in events
+            )
+        ):
+            raise ValueError("facts must cite eligible user evidence from the same Codex turn")
+        assertions = [fact.assertion.strip() for fact in facts]
+        if len(set(assertions)) != len(facts) or any(not 1 <= len(text) <= 400 for text in assertions):
+            raise ValueError("each fact needs a distinct, non-empty assertion of at most 400 characters")
+
+        sentence_endings = " .!?。！？"  # noqa: RUF001 — includes Chinese sentence punctuation
+        if any(
+            assertion.rstrip(sentence_endings) == fact.quote.strip().rstrip(sentence_endings)
+            for assertion, fact in zip(assertions, facts, strict=True)
+        ):
+            raise ValueError(
+                "write an independent statement for assertion; preserve the user's exact words only in quote"
+            )
+
+        # Fixed slots identify a complete turn even if a model rephrases facts on redelivery.
+        key = json.dumps([caller, first.session_id, turn], ensure_ascii=False)
+        slots = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"octop:codex-facts:{key}:{i}")) for i in range(3)]
+
+        def existing_batch() -> list[Candidate]:
+            first_candidate = self.get_candidate(slots[0])
+            if first_candidate is None:
+                return []
+            return [first_candidate, *(c for slot in slots[1:] if (c := self.get_candidate(slot)) is not None)]
+
+        receipt = "codex.facts." + slots[0]
+        with self._backend.transaction():
+            # Acquire the same writer lock before reading a turn or any of its targets.
+            self.set_meta("codex.writer." + caller, "1")
+            prior = self.get_meta(receipt)
+            if prior is not None:
+                return [c for cid in json.loads(prior) if (c := self.get_candidate(cid))]
+            if existing := existing_batch():
+                return existing  # turns captured before reconciliation receipts
+            accepted = []
+            for fact, event, slot in zip(facts, events, slots, strict=False):
+                eligible, explicit = codex_review.classify_evidence(event.content, fact.quote)
+                if eligible:
+                    accepted.append(self._apply_codex_fact(fact, event, slot, caller, review_model, explicit))
+            self.set_meta(receipt, json.dumps([c.id for c in accepted]))
+            return accepted
+
+    def related_codex_facts(self, caller: str, texts: list[str]) -> list[dict[str, Any]]:
+        return codex_review.related(self._codex_fact_targets(caller), texts)
+
+    def _codex_fact_targets(self, caller: str) -> list[dict[str, Any]]:
+        records = self._backend.codex_fact_targets(caller)
+        for record in records:
+            if record.pop("candidate_assertion") != record["assertion"]:
+                # A dashboard edit may change even the subject of this atom.
+                record.update(scope=None, aspect=None, value=None)
+        return records
+
+    def _apply_codex_fact(
+        self, fact: CodexFact, event: RawEvent, slot: str, caller: str, review_model: str | None, explicit: bool
+    ) -> Candidate:
+        from octop_memory.pipeline.promotion import PromotionWorker
+
+        labels = {k: getattr(fact, k).strip() for k in ("scope", "aspect", "value")}
+        if any(len(label) > 160 for label in labels.values()):
+            raise ValueError("fact labels must be at most 160 characters")
+        candidate = self._quote_candidate(fact, event, slot, "host-facts/v2", review_model)
+        candidate.payload.update(labels)
+        records = self._codex_fact_targets(caller)
+        choices = codex_review.related(records, [event.content])
+        norm = codex_review.normalized
+        same_slot = [
+            row
+            for row in records
+            if labels["scope"]
+            and labels["aspect"]
+            and all(norm(row[k] or "") == norm(labels[k]) for k in ("scope", "aspect"))
+        ]
+        target = next((r for r in choices if r["target_id"] == fact.target_id), None)
+        relation = fact.relation
+        if target is None and not fact.target_id:
+            exact = [r for r in choices if norm(r["assertion"]) == norm(candidate.assertion)]
+            if len(same_slot) == 1:
+                target = same_slot[0]
+            elif len(exact) == 1:
+                target = exact[0]
+        if target:
+            original = self.get_candidate(target["candidate_id"])
+            atom = self.get_atom(target["atom_id"]) if target["atom_id"] else None
+            assert original is not None
+            known_slot = bool(target["scope"] and target["aspect"])
+            matches_scope = not known_slot or target in same_slot
+            old_value = norm(target["value"] or "")
+            new_value = norm(labels["value"])
+            if (
+                relation != "conflict"
+                and matches_scope
+                and (len(same_slot) <= 1)
+                and (
+                    (old_value and old_value == new_value)
+                    or norm(target["assertion"]) == norm(candidate.assertion)
+                    or (relation == "repeat" and not (old_value and new_value and old_value != new_value))
+                )
+            ):
+                self._backend.append_codex_evidence(original, atom, event.id, fact.quote)
+                return original
+            if not matches_scope and relation == "new":
+                target = None
+            else:
+                if matches_scope and len(same_slot) <= 1:
+                    candidate.payload["codex_target"] = target["target_id"]
+                # An out-of-order turn cannot replace a later decision.
+                sources = self.get_raw_events_by_ids(atom.raw_event_ids if atom else original.raw_event_ids)
+                newer = all(src.timestamp <= event.timestamp for src in sources)
+                if (
+                    relation == "change"
+                    and fact.target_id == target["target_id"]
+                    and explicit
+                    and matches_scope
+                    and len(same_slot) <= 1
+                    and newer
+                    and (not atom or original.assertion == atom.assertion or atom.created_at <= event.timestamp)
+                ):
+                    self.add_candidate(candidate)
+                    if atom:
+                        PromotionWorker(self).replace_from_evidence(candidate, atom, actor="auto")
+                    elif not self._backend.retire_codex_draft(original.id, candidate.id):
+                        raise ValueError("draft changed during review")
+                    return self.get_candidate(candidate.id) or candidate
+        if target or fact.target_id or len(same_slot) > 1 or relation != "new":
+            candidate.status = "conflict"
+            candidate.promotion_reason = "Review the possible change against the previous fact."
+        self.add_candidate(candidate)
+        return candidate
+
+    @staticmethod
+    def _quote_candidate(
+        fact: CodexFact, event: RawEvent, candidate_id: str, version: str, review_model: str | None
+    ) -> Candidate:
+        assertion = fact.assertion.strip()
+        return Candidate(
+            id=candidate_id,
+            raw_event_ids=[event.id],
+            candidate_type=fact.kind,
+            status="needs_review",
+            title=assertion[:80],
+            assertion=assertion,
+            verbatim_quote=fact.quote,
+            quote_event_id=event.id,
+            subject_name="User" if fact.kind == "Preference" else assertion[:80],
+            subject_entity_type="User" if fact.kind == "Preference" else fact.kind,
+            target_entity_id=None,
+            confidence="medium",
+            importance="medium",
+            recommended_action="needs_review",
+            promotion_reason="Proposed by the conversation model for human review",
+            extractor_version=version,
+            created_at=datetime.now(UTC),
+            session_id=event.session_id,
+            payload={
+                "source_model": review_model
+                if event.payload.get("octop_model_review")
+                else event.payload.get("source_model")
+            },
+        )
 
     def list_candidates(
         self,
@@ -1113,6 +1335,85 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
 
     def set_meta(self, key: str, value: str) -> None:
         self._backend.set_meta(key, value)
+
+    def get_last_codex_review(self, caller: str | None = None) -> dict[str, Any] | None:
+        """Project the last eligible turn, distinguishing delivery, completion and submission."""
+        if not isinstance(self._backend, CodexReviewBackend):
+            return None
+        evidence = self._backend.latest_codex_review_evidence(caller)
+        if evidence is None:
+            return None
+        status = "captured"
+        key = json.dumps([evidence.caller, evidence.session_id, evidence.turn_id], ensure_ascii=False)
+        first_slot = uuid.uuid5(uuid.NAMESPACE_URL, f"octop:codex-facts:{key}:0")
+        reconciled = json.loads(self.get_meta("codex.facts." + str(first_slot)) or "[]")
+        proposals = max(evidence.proposals, len(reconciled))
+        if proposals:
+            status = "proposed"
+        elif self.get_meta("codex_review_finished") == evidence.cursor:
+            status = "finished_without_proposal"
+        return {
+            "timestamp": evidence.timestamp.isoformat(),
+            "model": evidence.model,
+            "proposals": proposals,
+            "status": status,
+        }
+
+    def get_codex_terminal_status(self, caller: str) -> dict[str, Any]:
+        """Return only mode, model and time for one terminal credential."""
+        observed = json.loads(self.get_meta(f"codex_terminal_mode.{caller}") or "null")
+        last_run = json.loads(self.get_meta(f"codex_terminal_run.{caller}") or "null")
+        historical = self.get_last_codex_review(caller=caller)
+        if historical:
+            local = {"mode": "codex", "timestamp": historical["timestamp"]}
+            if observed is None:
+                observed = local
+            if historical["status"] in {"proposed", "finished_without_proposal"}:
+                if not last_run or datetime.fromisoformat(local["timestamp"]) > datetime.fromisoformat(
+                    last_run["timestamp"]
+                ):
+                    last_run = {**local, "model": historical["model"]}
+            elif not last_run:
+                # An older installation has one completion cursor per space. A newer
+                # pending turn must not hide that receipt or attribute it to another token.
+                cursor = self.get_meta("codex_review_finished")
+                if cursor:
+                    _, _, event_id = cursor.rpartition("/")
+                    event = self.get_raw(event_id)
+                    if (
+                        event
+                        and event.user == caller
+                        and event.host == "codex"
+                        and not event.payload.get("content_redacted")
+                    ):
+                        last_run = {
+                            "mode": "codex",
+                            "timestamp": event.timestamp.astimezone(UTC).isoformat(),
+                            "model": event.payload.get("source_model"),
+                        }
+        return {"observed": observed, "last_run": last_run}
+
+    def finish_codex_review(self, *, session_id: str, turn_id: str, caller: str) -> None:
+        """A repeated or late Stop receipt must never mark a different turn complete."""
+        if not caller or not isinstance(self._backend, CodexReviewBackend):
+            return
+        evidence = self._backend.latest_codex_review_evidence(caller)
+        if evidence and (evidence.session_id, evidence.turn_id, evidence.caller) == (session_id, turn_id, caller):
+            self._backend.advance_codex_review_cursor(evidence.cursor)
+            # A repeated Stop from a local run may arrive after a newer server run.
+            previous = json.loads(self.get_meta(f"codex_terminal_run.{caller}") or "null")
+            if previous and datetime.fromisoformat(previous["timestamp"]) >= evidence.timestamp:
+                return
+            self.set_meta(
+                f"codex_terminal_run.{caller}",
+                json.dumps(
+                    {
+                        "mode": "codex",
+                        "model": evidence.model,
+                        "timestamp": evidence.timestamp.isoformat(),
+                    }
+                ),
+            )
 
     def get_last_extract_run(self) -> dict[str, Any] | None:
         """Latest extract pass summary (meta, not journal). ``None`` if never run."""
@@ -1938,11 +2239,12 @@ def _resolve_memory_backend(
 ) -> MemoryBackend:
     """Resolve a backend type string to a MemoryBackend instance."""
     if backend_type == "sqlite":
+        from octop_memory.storage.backends.namespace import sqlite_database_path
         from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 
         return SqliteMemoryBackend(
             namespace=namespace,
-            db_path=config.get("db_path", "~/.octop-memory/session.sqlite"),
+            db_path=sqlite_database_path(config),
         )
     if backend_type == "postgres":
         try:

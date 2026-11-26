@@ -10,7 +10,9 @@ because some LLM hosts only expose ``prompt`` and ignore ``system``).
 
 from __future__ import annotations
 
-EXTRACTOR_VERSION = "v2.5"
+from octop_memory.application.config import normalize_extraction_rule
+
+EXTRACTOR_VERSION = "v2.6"
 """Version tag persisted on every Candidate (`extractor_version` field).
 
 Bump when:
@@ -19,6 +21,8 @@ Bump when:
 - The output JSON schema changes
 
 Do NOT bump for whitespace-only or comment changes.
+
+v2.6 accepts optional host retention rules.
 
 v2.5 requests optional lexical paraphrases in the same extraction call.
 
@@ -414,7 +418,7 @@ Extraction rules:
   or trailing commentary.
 - HARD LIMIT: at most {max_candidates} candidates per batch. If more,
   prioritize highest importance + confidence and add a final entry with
-  title="__cap_warning__" and assertion="batch truncated, N original candidates".
+  title="__cap_warning__" and assertion="batch truncated, N original candidates".{custom_rules_section}
 
 Anti-dilution rules (CRITICAL — violating these makes the output unusable):
 - When importance="high", set assertion = verbatim_quote VERBATIM. Do NOT
@@ -438,7 +442,39 @@ OUTPUT:
 """
 
 
-def render_prompt(events_json: str, *, max_candidates: int = 20) -> str:
+def _format_custom_rules_section(
+    keep_rules: str | None,
+    skip_rules: str | None,
+) -> str:
+    """Format optional user-configured keep/skip rules as a prompt section."""
+    keep = normalize_extraction_rule(keep_rules)
+    skip = normalize_extraction_rule(skip_rules)
+    if keep is None and skip is None:
+        return ""
+    lines = [
+        "",
+        "",
+        "Additional retention rules (user-configured; apply these when deciding what",
+        "to keep or skip, while strictly preserving the JSON output schema,",
+        "anti-dilution rules, source_refs grounding, and transient-error exclusions",
+        "above):",
+    ]
+    if keep is not None:
+        lines.append("- Prefer keeping as long-term memory:")
+        lines.append(keep)
+    if skip is not None:
+        lines.append("- Skip (do NOT store as long-term memory):")
+        lines.append(skip)
+    return "\n".join(lines)
+
+
+def render_prompt(
+    events_json: str,
+    *,
+    max_candidates: int = 20,
+    keep_rules: str | None = None,
+    skip_rules: str | None = None,
+) -> str:
     """Render the full Candidate Extractor prompt for a batch of raw events.
 
     Args:
@@ -447,12 +483,16 @@ def render_prompt(events_json: str, *, max_candidates: int = 20) -> str:
             window.
         max_candidates: Hard cap on the number of candidates the LLM may
             emit per batch. Embedded into the prompt's HARD LIMIT clause.
+        keep_rules: Optional user-configured retention guidance for what is
+            worth keeping as long-term memory.
+        skip_rules: Optional user-configured guidance for what to skip.
 
     Returns:
         The complete prompt string ready to pass to ``LLMClient.call_llm``.
     """
     return _PROMPT_BODY_TEMPLATE.format(
         max_candidates=max_candidates,
+        custom_rules_section=_format_custom_rules_section(keep_rules, skip_rules),
         few_shot=_FEW_SHOT_EXAMPLES,
         events_json=events_json,
     )

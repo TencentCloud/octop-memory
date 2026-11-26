@@ -6,9 +6,8 @@
 // under ``<host>/`` that decides what to read and which ``source`` /
 // ``session_id`` prefix to use — so changing one host never touches another.
 //
-// Config precedence: environment variable -> ``config.json`` next to the entry
-// script (the /mcp/memory/setup installer writes that file, so a hooked-up
-// terminal needs no secret in its hook command line).
+// Each installation uses its own endpoint and credential together. Environment
+// settings support hooks that have no installed connection.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -64,23 +63,21 @@ export function loadConfig() {
   } catch {
     // no config file (env-only setups keep working)
   }
+  const connection = fromFile.token ? fromFile : {
+    url: process.env.OCTOP_MEMORY_MCP_URL,
+    token: process.env.OCTOP_MEMORY_MCP_TOKEN,
+    tokenHeader: process.env.OCTOP_TOKEN_HEADER,
+  };
   return {
-    endpoint: process.env.OCTOP_MEMORY_MCP_URL || fromFile.url || "",
-    token: process.env.OCTOP_MEMORY_MCP_TOKEN || fromFile.token || "",
-    // Configurable header name; ``Authorization`` (the default) takes a bearer.
-    tokenHeader: process.env.OCTOP_TOKEN_HEADER || fromFile.tokenHeader || "Authorization",
-    // 接入端标识（安装时按宿主写入），服务端据此统计与开关。
-    client: process.env.OCTOP_CLIENT || fromFile.client || "",
+    endpoint: connection.url || "",
+    token: connection.token || "",
+    tokenHeader: connection.tokenHeader || "Authorization",
+    readOnly: connection.readOnly === true,
+    codexExtraction: connection.codexExtraction,
+    codexPanelSync: connection.codexPanelSync === true,
+    codexReviewUrl: connection.codexReviewUrl,
+    mcpServer: connection.mcpServer,
   };
-}
-
-function baseHeaders(config) {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-  };
-  if (config && config.client) headers["X-Octop-Client"] = config.client;
-  return headers;
 }
 
 export function authHeaders(config) {
@@ -88,7 +85,7 @@ export function authHeaders(config) {
   // takes ``Bearer <token>``, any other header name is written verbatim.
   // The MCP token is bound to one expert server-side, so a client sends no
   // identity header at all — neither a user id nor an expert id.
-  const headers = baseHeaders(config);
+  const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   const header = config.tokenHeader || "Authorization";
   headers[header] = header.toLowerCase() === "authorization" ? `Bearer ${config.token}` : config.token;
   return headers;
@@ -205,13 +202,14 @@ export function decompressZstdContainer(buffer) {
 }
 
 /** Call one memory MCP tool; returns ``{ok, status, detail, raw}`` (never throws). */
-export async function callTool(config, name, args) {
-  return rpc(config, "tools/call", { name, arguments: args });
+export async function callTool(config, name, args, signal) {
+  return rpc(config, "tools/call", { name, arguments: args }, signal);
 }
 
 /** One raw JSON-RPC call; returns ``{ok, status, detail, error, raw}`` (never throws). */
-export async function rpc(config, method, params) {
+export async function rpc(config, method, params, signal) {
   const response = await fetch(config.endpoint, {
+    signal,
     method: "POST",
     headers: authHeaders(config),
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -304,7 +302,7 @@ export async function capture(ctx) {
     // rewritten/compacted file falls back to a full (idempotent) re-send.
     if (start > 0 && start < buffer.length && buffer[start - 1] !== 0x0a) start = 0;
   }
-  if (start >= buffer.length) {
+  if (start >= buffer.length && !(config.codexExtraction === "octop" && ctx.turnId)) {
     log(`${event} session=${sessionId} no new bytes (offset=${start}) -> skip`);
     return { skipped: true };
   }
@@ -329,6 +327,10 @@ export async function capture(ctx) {
     "--prefix",
     sessionPrefix || "",
   ];
+  if (config.codexExtraction === "octop") args.push("--state-dir", paths.scratchDir);
+  if (source === "codex" && config.codexPanelSync) args.push("--codex-mode", config.codexExtraction);
+  if (ctx.turnId) args.push("--turn-id", ctx.turnId);
+  if (ctx.model) args.push("--model", ctx.model);
   try {
     const child = spawnSync(python, args, { encoding: "utf8", timeout: 180000 });
     const last = (child.stdout || "").trim().split("\n").pop() || "{}";

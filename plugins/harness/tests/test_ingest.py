@@ -101,6 +101,31 @@ def test_events_are_batched_with_stable_session_and_eof(monkeypatch, tmp_path, c
     assert len(keys) == len(set(keys)) == 401
 
 
+def test_codex_only_requests_evidence_for_the_hook_turn(monkeypatch, tmp_path, capsys):
+    cfg = _config(tmp_path)
+    cfg.write_text(json.dumps({"url": "http://stub", "token": "test", "codexExtraction": "codex"}))
+    records = [
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}
+        if kind == "start" else {"type": "event_msg", "payload": {"type": "user_message", "message": text}}
+        for turn, kind, text in [("prior", "start", ""), ("prior", "user", "old"), ("now", "start", ""), ("now", "user", "new")]
+    ]
+    path = tmp_path / "rollout.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in records))
+    calls = []
+
+    def post(url, headers, body):
+        calls.append(body["params"]["arguments"])
+        return 200, {"result": {"structuredContent": {"accepted": 2, "user_event_ids": ["evt_abcdef123456"]}}}
+
+    monkeypatch.setattr(octop_ingest, "_post", post)
+    assert octop_ingest.main(["--config", str(cfg), "--source", "codex", "--session", "s", "--path", str(path),
+                              "--turn-id", "now", "--model", "test-model"]) == 0
+    [call] = calls
+    assert call["extract"] is False and call["evidence_for_turn"] == "now"
+    assert [event["payload"].get("source_model") for event in call["events"]] == [None, "test-model"]
+    assert _out(capsys)["user_event_ids"] == ["evt_abcdef123456"]
+
+
 def _uuid_parser():
     """Mirrors Claude uuid keys: stable ids, never ``lineN`` (mapped=False)."""
 

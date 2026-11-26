@@ -93,31 +93,41 @@ Hermes needs v0.10.0+ with `MemoryProvider`; installation instructions are not a
 
 ## Terminal clients
 
-`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. It calls an Octop memory MCP endpoint with a user token created in Octop. It does not open a local memory database and does not embed a credential in the repository.
+`plugins/harness` installs recall and capture hooks for Claude Code, Codex, Cursor, Kiro, and DSH. The distribution name is `octop-memory-harness`. Each terminal installation calls the memory MCP endpoint with its own space token. It does not open a local memory database and does not embed a credential in the repository.
 
-The installer is on the `develop` branch. The `main` branch does not contain these scripts yet, so the one-line installers below use `develop`.
+The one-line installers use the published `main` branch. Use a local checkout to try installer changes before publication.
 
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.sh \
-  | sh -s -- --url https://<octop-host>/mcp/memory/ --token "$OCTOP_TOKEN"
+curl -fsSL https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.sh \
+  | sh -s -- --url https://<memory-host>/mcp/ --token "$OCTOP_TOKEN"
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/TencentCloud/octop-memory/develop/plugins/harness/install.ps1 -OutFile install.ps1
-.\install.ps1 -Url https://<octop-host>/mcp/memory/ -Token $env:OCTOP_TOKEN
+irm https://raw.githubusercontent.com/TencentCloud/octop-memory/main/plugins/harness/install.ps1 -OutFile install.ps1
+.\install.ps1 -Url https://<memory-host>/mcp/ -Token $env:OCTOP_TOKEN
 ```
 
 The script tries `uvx`, then `pipx`, then a temporary virtualenv. A manual install is `pip install octop-memory-harness` (or `pip install ./plugins/harness` from a checkout) followed by `octop-memory-harness install --url ... --token ...`.
 
-- `--terminals claude-code,codex,cursor,kiro,dsh` selects hosts. Non-interactive runs read this flag.
+- Select one installation per token, for example `--terminals codex`. Issue another token for a second installation in the same space.
 - `--project <dir>` registers one repository. Hook scripts and the token file stay in the user directory.
 - `octop-memory-harness uninstall` removes this installer's registrations and files.
 
-Stop hooks pass new transcript bytes to a local parser, which calls `memory_capture(events=...)`. The server does not parse the transcript. The saved byte offset advances only after a successful capture. DSH loads the native plugin `dsh-octop-memory` (`dsh.engines.dsh` at least `0.2.0`) instead of the hook bridge. Codex needs a one-time hook trust, and the terminal should be restarted after install.
+Stop hooks pass new transcript bytes to a local parser, which calls `memory_capture(events=...)`. The server does not parse the transcript. The saved byte offset advances only after a successful capture. DSH loads the native plugin `dsh-octop-memory` (`dsh.engines.dsh` at least `0.2.0`) instead of the hook bridge.
+
+The Codex installer also exposes `memory_get` and `memory_save` through Streamable HTTP MCP. Recall hits include a `path` that `memory_get` can open. A local header helper reads the token from the hook configuration. Set `OCTOP_CODEX_READ_ONLY=1` for a read-only token to expose only `memory_get` and disable capture. After installation, restart the MCP connection in Settings, check `/mcp`, and review the hooks in Settings or with `/hooks` in the CLI.
+
+With a writable token, set `OCTOP_CODEX_EXTRACTION=codex` at install time to use the current Codex chat model. After capture, Stop requests one continuation for a turn with stored user evidence. The model may use `memory_propose` to submit a single batch of up to three independently updateable facts, each with a standalone assertion and its own event ID and exact evidence quote. This uses Codex model quota. `memory_save` remains an explicit durable write. Choose `OCTOP_CODEX_EXTRACTION=server` to restore server extraction. Both the installer and server must support proposals.
+
+For a Codex terminal using an Octop-hosted model, choose a model on its read/write token in Shared Memory and run the generated setup prompt. The installer sets `OCTOP_CODEX_EXTRACTION=octop` and `OCTOP_CODEX_REVIEW_URL` to the Octop review endpoint (HTTPS or loopback). The Stop hook queues evidence IDs, the selected model reviews only this token’s captured user messages, and sends each assertion with a separate exact evidence quote. The provider credential stays in Octop.
+
+Both review modes classify each clause by intent and duration. A standing request phrased as a question can qualify. Temporary instructions and information requests are skipped. Codex looks up matching records with `memory_codex_related`; delegated review includes them with the verified evidence. A new fact enters review. A repetition appends evidence to the existing record. An explicit change to the same property and scope supersedes the confirmed value and retains its history. An uncertain change goes to review.
+
+The Memory overview shows when Codex delivered a user message, when the review turn finished without a recorded proposal, or how many candidates it submitted. Older hooks can show delivery and submitted candidates. A confirmed zero-proposal result requires a completion receipt from the updated hook. Server extraction has its own timestamp and result.
 
 Host directories, the `config.json` shape, and the page that can be handed to an assistant are in [plugins/harness/README.md](../plugins/harness/README.md) and [AI-SETUP.md](../plugins/harness/AI-SETUP.md).
 

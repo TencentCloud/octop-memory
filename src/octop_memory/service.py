@@ -54,6 +54,9 @@ class MemoryService:
             MEMORY.md. Background review reads it; ``save`` does not.
     """
 
+    # Hosts can feature-detect rule support during independent package upgrades.
+    supports_extraction_rules = True
+
     def __init__(
         self,
         memory: Memory,

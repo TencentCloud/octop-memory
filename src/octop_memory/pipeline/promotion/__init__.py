@@ -253,10 +253,38 @@ class PromotionWorker:
             entity_outcome=entity_outcome,
         )
 
+    def replace_from_evidence(
+        self, candidate: Candidate, target: AtomCard, *, actor: Literal["auto", "user"]
+    ) -> CandidateDecision:
+        outcome = PromotionOutcome(
+            kind="promote",
+            reason="Replace the previous value using new evidence",
+            entity_id=target.entity_id,
+            matched_atom_id=target.id,
+        )
+        return self._apply_promote(
+            candidate, entity_id=target.entity_id, entity_outcome=outcome, actor=actor, supersede_atom_id=target.id
+        )
+
     def _approve_one(self, candidate: Candidate, *, selected_id: str | None) -> CandidateDecision:
         """Force-promote after resolving the entity (and maybe superseding)."""
         # A reviewer's approval confirms the saved suggestion. Check its type
         # again and reject stale suggestions contradicted by a current exact name.
+        if candidate.status == "conflict" and (target_id := candidate.payload.get("codex_target")):
+            with self._memory.backend.transaction():
+                target_atom = self._memory.get_atom(target_id)
+                if target_atom:
+                    if target_atom.deprecated_at is not None:
+                        raise ValueError("the referenced memory has since changed")
+                    return self.replace_from_evidence(candidate, target_atom, actor="user")
+                if not self._memory.backend.retire_codex_draft(target_id, candidate.id):
+                    raise ValueError("the referenced draft has since changed")
+                # The reviewer approves the new draft in the same transaction.
+                candidate.payload.pop("codex_target")
+                try:
+                    return self._approve_one(candidate, selected_id=selected_id)
+                finally:
+                    candidate.payload["codex_target"] = target_id
         entity_outcome = check_entity(candidate, resolver=self._memory)
         target_id = selected_id or candidate.target_entity_id
         target = self._memory.get_entity(target_id) if target_id else None
@@ -285,6 +313,14 @@ class PromotionWorker:
                 canonical_name=entity_outcome.new_entity_canonical_name or candidate.subject_name,
                 entity_type=entity_outcome.new_entity_type or candidate.subject_entity_type,
             )
+
+        if (
+            candidate.status == "conflict"
+            and candidate.extractor_version == "host-facts/v2"
+            and not candidate.payload.get("codex_target")
+        ):
+            # Approval can create this fact, but has no verified record to supersede.
+            return self._apply_promote(candidate, entity_id=entity_id, entity_outcome=entity_outcome, actor="user")
 
         duplicate = check_duplicate(
             candidate,

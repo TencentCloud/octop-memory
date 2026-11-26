@@ -20,9 +20,14 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 
 ## Validation by change scope
 
+For panel-controlled Codex extraction, run `plugins/harness/tests/test_codex_install.py` and
+`tests/test_server.py`. Check the companion Octop terminal configuration endpoint and dashboard tests for
+credential isolation, draft versus published choices, version acknowledgements and actual review receipts.
+
 | Change | Focused commands and assertions |
 |---|---|
 | Package / host naming | `uv run pytest tests/test_cli_entry.py tests/test_cli_config.py tests/test_bridge_server.py tests/test_hermes_adapter.py tests/test_hermes_install.py -q`; `uv build`; in `plugins/openclaw/octopmemory/`, run `npm test`, `npm run typecheck`, `npm run build` |
+| Standalone HTTP MCP | `uv run pytest tests/test_server.py -q -rs` with dedicated `TEST_POSTGRES_DSN`. Cover scoped and global admin sessions, independent client revocation, legacy shared credentials, single-space binding before and after a move, including an older control database with a secondary grant, configured defaults and explicit overrides in the API and CLI, repeated and concurrent bindings for the same ID, equivalent PostgreSQL DSNs, SQLite file aliases and table-prefix collisions, configured and legacy spaces, PostgreSQL namespaces, MCP write and recall isolation, search modes and paginated reads on both backends. |
 | Documentation / import boundaries | `uv run pytest tests/test_agent_docs.py tests/test_architecture_boundaries.py -q` |
 | Host-file globs / Windows paths | `uv run pytest tests/test_bridge_host_files.py tests/test_portable_sources.py -q`; PureWindowsPath cases reject rooted/drive-relative/UNC paths on any platform; portable fixtures isolate home expansion through Path.parts |
 | Memory / Runtime | `uv run pytest tests/test_core.py tests/test_service.py -q` |
@@ -32,11 +37,11 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 | Paraphrases, fields and latency | `pytest tests/test_backend_parity.py -k LexicalFieldRecall -q -rs` on SQLite and dedicated real PG. Covers role/field negatives, positive contacts, cross-owner evidence, distractors above the pool cap, extracted keys and edits. Replay frozen questions with `python -m evals.recall.entity_cases --extra-per-project 0 32 384 --timing-runs 8`, optionally adding `--dsn "$TEST_POSTGRES_DSN"`. Run before/after/after/before sequentially, keep default deadlines, exclude seeding and one warmup sweep per run. |
 | Entity identity, dual retrieval and background audit | `pytest tests/test_backend_parity.py -k EntityIdentityAndRecall -q -rs` with dedicated PG. Use `en_US.UTF-8` libc collation to reproduce the regression where the audit missed `Hermes2` when reviewing `Hermes`. Check same-name types, unresolved aliases, long names, cited cross-entity facts and an idempotent review cursor. `python -m evals.recall.entity_cases` repeats the frozen 19/115-atom suites. Add `--dsn "$TEST_POSTGRES_DSN"` for dedicated PG. Compare top-1, top-5, off-project hits and unwanted injection per question. |
 | Atom-only automatic injection | `uv run pytest tests/test_backend_parity.py -k AtomOnlyRecall -q -rs` with dedicated real PG; verify raw-only/page-only stores inject nothing, atoms remain available, explicit search still returns evidence, bridge atomOnly mode and cache separation. Run `tests/test_hermes_adapter.py`, OpenClaw `npm test`, `npm run typecheck`, and `npm run build` for prefetch/prompt consumers |
-| Extraction / batching / parsing | `uv run pytest tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_bridge_extract.py -q`; verify default budgets, preservation of oversized single events, and stopping after a failed batch |
+| Extraction / batching / parsing | `uv run pytest tests/test_extraction_rules.py tests/test_extractor.py tests/test_extract_session.py tests/test_extractor_parser.py tests/test_extractor_prompts.py tests/test_bridge_extract.py -q`; verify default budgets, preservation of oversized single events, and stopping after a failed batch |
 | Durable cursor / atomic commit / retry | `uv run pytest tests/test_extract_cursor_persistence.py tests/test_extract_cursor_failure_retry.py -q -rs`; the latter shares SQLite/real-PG assertions for first/second candidate write failure, cursor failure, rollback, same-process/reopen retry, and no duplicates after normal commit |
 | Promotion | `uv run pytest tests/test_promotion.py tests/test_promotion_fallback.py tests/test_promotion_llm_hook.py tests/test_promotion_tree_alignment.py -q` |
 | Hermes configuration / provider contract | `uv run pytest tests/test_hermes_adapter.py tests/test_hermes_contract.py tests/test_hermes_install.py -q`; forwarding/capture/prefetch/shutdown tests do not establish automatic-extraction wiring; validate the real host separately |
-| Terminal client installer | `uv run pytest plugins/harness/tests -q`; covers ingest batching, offset advance, and rendered scripts that do not embed a token. Real IDE, DSH, and Windows end-to-end runs are separate |
+| Terminal client installer | `uv run pytest plugins/harness/tests -q` covers ingest batching, offset advance, credential-free scripts, and Codex tool registration, hook order on reinstall, read-only capture, extraction-mode selection, and cleanup. The standalone server suite checks fact batches, separate assertions and exact quotes, atomic rejection, legacy proposals, token ownership, retries, caller-bound Stop receipts, late or repeated completions, and candidate-only visibility on SQLite and PostgreSQL. For a Codex smoke test, check the originating chat’s tool catalog after install and after reload. In Codex extraction mode, check that a silent review can submit a candidate or skip while the dashboard receives its completion receipt. Real Windows and DSH runs are separate |
 | Runtime-error isolation / historical governance | `uv run pytest tests/test_runtime_error_retention.py tests/test_bridge_server.py tests/test_backend_parity.py -q -rs`; real PG covers structured-only filtering, unknown-source review lists, arbitrary explicit-save wording, absence of intent exceptions, raw fallback, promotion, manual protection, idempotency, rollback |
 | Manual-document governance | `uv run pytest tests/test_manual_documents.py tests/test_backend_parity.py -q -rs`; dedicated-PG `-k ManualDocument` shares SQLite assertions for conflict/replacement candidates, original evidence, raw fallback, snapshots, idempotency, rollback. Unit cases cover invalid/inconclusive evidence, stale adoption, cache invalidation, continuation, and save/extract/promote not blocking on review |
 | Legacy audit metadata upgrade | `uv run pytest tests/test_backend_parity.py -k ManualDocumentAuditUpgrade -q -rs`; real PG/SQLite cover read-only pending status for old uncertain/complete records lacking uncertain, bounded re-audit, no repeat after Service reconstruction, confirmed empty unresolved state, and no remaining active atoms |
@@ -53,8 +58,12 @@ English/Chinese versions. Layout/link tests do not validate behavior or heading 
 | Recall evaluation | `uv run python -m evals.recall.run` |
 | Example / evaluation static checks | `uv run ruff check examples evals` and `uv run ruff format --check examples evals` |
 
-The manual-document session-context duplicate test runs real SQLite retrieval and the recall policy with a fixed elapsed
-clock and synchronous source calls. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
+On both supported databases, `test_codex_reconciles_only_durable_evidence` checks repeated pending and confirmed facts, quoted exceptions, questions, mixed clauses, ambiguous and explicit changes, replay, manual records, version history and caller isolation.
+
+Codex delegated review is covered by `test_delegated_codex_review_only_reads_the_credential_and_turns_evidence` on SQLite and PostgreSQL and by `plugins/harness/tests/test_codex_install.py` for model mode switching.
+
+The manual-document session-context duplicate test and `TestLexicalFieldRecall` run real backend reads with
+a fixed elapsed clock and synchronous source calls to verify lexical semantics independently of machine load. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
 
 ## PostgreSQL and real host environments
 

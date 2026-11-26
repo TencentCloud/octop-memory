@@ -36,6 +36,8 @@ Paths in this table are relative to `src/octop_memory/`.
 | `application/config.py` | Runtime defaults and configuration conversion. OpenClaw expands profiles in TS; Python Runtime does not switch policy from a profile label |
 | `application/host_files.py`, `path_projection.py` | Host Markdown index and virtual paths |
 | `application/checkpoint_maintenance.py`, `storage/backends/sqlite_checkpoint*.py` | SQLite checkpoint content reuse, offline/online maintenance, reader compatibility |
+| `server/admin.py`, `server/control.py`, `server/registry.py` | Standalone space and token management. A token identifies one client installation in one space. Its ID owns request counts, capture attribution and revocation. Admin moves require permission for both the original and destination spaces. The CLI and admin API resolve storage through `server/config.py`. Registration confirms existing bindings and rejects a different target for the same ID within the control-store transaction. Opening rechecks the effective mappings, including configured spaces. SQLite reserves a normalized prefix per physical file and PostgreSQL reserves a normalized namespace across the control store. |
+| `server/mcp.py` | Standalone HTTP tools default to atom-only search through `MemoryRuntime`, expose explicit raw-event search through `Memory.search_raw`, and map paginated reads to the MCP response contract. |
 | `storage/backends/__init__.py`, `sqlite.py`, `postgres.py`, `postgres_pool.py` | `MemoryBackend` contract, SQL, FTS, transactions, namespaces, pools |
 | `storage/backends/postgres_legacy.py` | Pre-1.0 `harness_memory` schema: automatic copy on open, status, merge, purge marker (PG only) |
 | `storage/driver_errors.py` | Exception tuples allowed to degrade at each boundary |
@@ -46,9 +48,22 @@ Paths in this table are relative to `src/octop_memory/`.
 | `operations/retention.py` | Historical runtime-error governance, semantic manual-document reconciliation, audit metadata |
 
 Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
+
+The Codex installer registers a Streamable HTTP MCP server in `config.toml`. Its header helper reads the same
+local credential file as the hooks. Recall includes virtual paths for `memory_get`. Read-only setup exposes
+only `memory_get` and skips transcript capture. With `OCTOP_CODEX_EXTRACTION=codex`, writable Codex captures
+pass `extract=false` and request evidenced user event IDs for the active turn. Stop can continue that turn once.
+The authenticated `memory_propose` tool checks the caller and matches the quote against the stored user event
+before storing one atomic batch of up to three separate assertions with their evidence. Redelivery returns the original candidate IDs for that turn. Legacy single-quote clients remain supported. The captured model slug is client-reported provenance.
+The review prompt asks the model to end with an empty final response for both submissions and skips.
+The continued Stop sends a completion receipt through `memory_capture`. Overview reads
+`last_codex_review` from eligible user events, the matching receipt and submitted quote candidates.
+`last_extract_run` continues to describe server extraction.
 `tests/` contains behavior tests, `evals/recall/` synthetic evaluation, and `examples/basic_usage.py` a public-API
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.
+
+Codex delegated review (`OCTOP_CODEX_EXTRACTION=octop`) captures user evidence through the existing MCP and queues event IDs for the configured Octop review endpoint. The host uses `memory_codex_review_evidence` to verify the credential, space, turn and eligible source before calling its selected model. `memory_propose` validates each assertion's exact quote and uses the same transactional reconciliation as native review. Native review obtains policy and matching target IDs with `memory_codex_related`. Targets come from the same credential in the same space. Matching uses scoped attributes, values and target versions. Repetition appends evidence to the existing candidate and active atom. Explicit changes supersede a confirmed atom or retire an older draft. A conflicting suggestion leaves the old value active until a reviewer decides. Each turn receipt records the resulting IDs, including merges.
 
 ### Public API responsibilities
 
@@ -69,7 +84,8 @@ Tool search retains its multi-source policies and file sources.
 `recall.min_token_coverage` (default 0.0, off) is the one relevance knob both paths share: Runtime
 `memory_search` reads it from Service configuration, `MemoryService.recall()` takes it as a parameter, and
 `recall_for_prompt()` drops any candidate whose matched-query-token share falls below it — so a query can
-return fewer than `limit` snippets, including none, instead of padding the list.
+return fewer than `limit` snippets, including none. The standalone MCP registry forwards this setting,
+and the thread cache key includes the effective floor.
 
 ## Repository integration map
 
@@ -172,6 +188,8 @@ Manual correction creates a successor, supersedes an active old atom only, and j
 Absolute event times use aware UTC.
 
 ### Extraction and durable progress
+
+Hosts can check `MemoryService.supports_extraction_rules` before forwarding `extraction.keep_rules` and `extraction.skip_rules`. Candidate v2.6 and Episode v2 apply these preferences to new extraction calls. Empty rules preserve the original prompt text.
 
 `CandidateExtractor` in `pipeline/extractor/__init__.py` has no persistence side effects.
 Defaults split at **100 events** and **20,000 estimated characters**: body length plus 200 characters per event,

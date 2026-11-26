@@ -11,6 +11,7 @@ import pytest
 from octop_memory.application.config import DEFAULT_RECALL_CFG
 from octop_memory.core import Memory
 from octop_memory.pipeline.recall import recall_for_prompt
+from octop_memory.pipeline.recall.cache import RecallCache
 from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 from octop_memory.types import AtomCard, Entity, RawEvent
 
@@ -102,3 +103,20 @@ def test_floor_does_not_blank_untokenizable_query(overlapping: Memory) -> None:
     # Punctuation-only query carries no tokens; the floor must not decide.
     result = recall_for_prompt(overlapping, "？？", limit=5, now=_NOW, min_token_coverage=0.9)
     assert isinstance(result.snippets, list)
+
+
+@pytest.mark.parametrize(("first", "second"), [(0.0, 0.75), (0.75, 0.0), (0.75, 0.5)])
+def test_cached_recall_uses_the_requested_floor(overlapping: Memory, first: float, second: float) -> None:
+    cache = RecallCache()
+
+    def recall(floor: float, reuse: RecallCache) -> list[str]:
+        result = recall_for_prompt(
+            overlapping, "OpenClaw checklist", thread_id="thread", now=_NOW, cache=reuse, min_token_coverage=floor
+        )
+        return [snippet.source_id for snippet in result.snippets]
+
+    initial = recall(first, cache)
+    fresh = recall(second, RecallCache())
+    assert initial != fresh
+    assert recall(second, cache) == fresh
+    assert recall(first, cache) == initial
