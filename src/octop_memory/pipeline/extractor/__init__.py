@@ -174,6 +174,8 @@ class CandidateExtractor:
         max_tokens: int | None = DEFAULT_EXTRACT_MAX_TOKENS,
         max_events_per_batch: int = DEFAULT_MAX_EVENTS_PER_BATCH,
         max_chars_per_batch: int = DEFAULT_MAX_CHARS_PER_BATCH,
+        keep_rules: str | None = None,
+        skip_rules: str | None = None,
     ) -> None:
         self._llm = llm
         self._max_candidates = max_candidates
@@ -190,6 +192,8 @@ class CandidateExtractor:
             raise ValueError("max_chars_per_batch must be >= 1")
         self._max_events_per_batch = max_events_per_batch
         self._max_chars_per_batch = max_chars_per_batch
+        self._keep_rules = keep_rules
+        self._skip_rules = skip_rules
 
     @property
     def extractor_version(self) -> str:
@@ -230,7 +234,12 @@ class CandidateExtractor:
         results: list[ExtractionResult] = []
         for batch in batches:
             events_json = _serialize_events_for_prompt(batch)
-            prompt = render_prompt(events_json, max_candidates=self._max_candidates)
+            prompt = render_prompt(
+                events_json,
+                max_candidates=self._max_candidates,
+                keep_rules=self._keep_rules,
+                skip_rules=self._skip_rules,
+            )
             raw_event_ids = {e.id for e in batch}
             result = self._call_with_retry(
                 prompt=prompt,

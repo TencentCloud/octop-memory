@@ -169,6 +169,8 @@ Absolute event times use aware UTC.
 
 ### Extraction and durable progress
 
+Hosts can check `MemoryService.supports_extraction_rules` before forwarding `extraction.keep_rules` and `extraction.skip_rules`. Candidate v2.6 and Episode v2 apply these preferences to new extraction calls. Empty rules preserve the original prompt text.
+
 `CandidateExtractor` in `pipeline/extractor/__init__.py` has no persistence side effects.
 Defaults split at **100 events** and **20,000 estimated characters**: body length plus 200 characters per event,
 not a strict serialized-prompt character/token limit. A single oversized event gets its own batch and is not truncated/dropped.
