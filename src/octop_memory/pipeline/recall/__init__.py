@@ -353,8 +353,8 @@ def recall_for_prompt(
     2. parse query → entity / time / co-reference hints
     3. route → pick sources, resolve co-reference from active stack
     4. push query mentions to active stack (D41a-C)
-    5. gather candidates from each source under per-source timeouts
-       (D43-A clamped to remaining global budget)
+    5. gather candidates from each source under per-source timeouts.
+       Apply the optional coverage floor before deduplication and fallback.
     5b. apply ``raw_policy`` and drop raw from the current session
         (event ``session_id`` / ``thread_id`` intersecting the current
         session scope) so auto-inject does not echo this conversation
@@ -362,8 +362,6 @@ def recall_for_prompt(
     7. diversify: ≤ ``per_entity_cap`` per entity
     8. suppress near-duplicates via Jaccard (D44-A rule path)
     9. budget enforcement: token-count via static char proxy (D45-A)
-    9b. relevance floor: drop a hit whose share of matched query
-        tokens is below ``min_token_coverage`` (0.0 disables the floor)
     10. push recall hits to active stack (D41a-A)
     11. render markdown block + cache the result
 
@@ -447,6 +445,7 @@ def _recall_for_prompt_impl(
                 "atom_only": atom_only,
                 "raw_policy": raw_policy,
                 "min_token_coverage": floor,
+                "limit": limit,
                 "session_id": session_id or thread_id,
                 "manual_policy": manual_policy,
                 "manual_context": manual_context,
@@ -471,7 +470,6 @@ def _recall_for_prompt_impl(
         if (not atom_only or s in {"atom", "vector"}) and (s != "raw" or raw_policy != "never")
     )
     parsed = replace(parsed, topic=decision.topic)
-    sources = tuple(s for s in decision.sources if not atom_only or s in {"atom", "vector"})
 
     if not sources:
         return RecallResult(snippets=[], rendered="")
@@ -497,6 +495,7 @@ def _recall_for_prompt_impl(
         sw=sw,
         entity_anchor_ids=decision.resolved_entity_ids,
         manual_context=manual_context,
+        min_token_coverage=floor,
     )
     candidates = _filter_prompt_raw(
         candidates,
@@ -521,15 +520,12 @@ def _recall_for_prompt_impl(
     budget = make_budget_state(total_tokens=total_budget_tokens or DEFAULT_TOTAL_TOKENS)
     accepted: list[RecallSnippet] = []
     hit_entity_ids: list[str] = []
-    query_tokens = frozenset(parsed.raw_tokens) if floor > 0 else frozenset()
     for ranked_snippet in suppressed.kept:
         if len(accepted) >= limit:
             break
         c = ranked_snippet.candidate
         text = c.text.strip()
         if not text:
-            continue
-        if floor > 0 and _token_coverage(query_tokens, text) < floor:
             continue
         bucket: str
         if c.layer == "atom":
@@ -565,24 +561,6 @@ def _recall_for_prompt_impl(
     if typed_cache is not None and cache_thread is not None:
         typed_cache.set(thread_id=cache_thread, query=query, value=result)
     return result
-
-
-def _token_coverage(query_tokens: frozenset[str], text: str) -> float:
-    """Share of query tokens that literally appear in the hit text.
-
-    Lexical overlap only: it is a cheap, backend-agnostic guard against
-    padding the prompt with hits that share no term with the question.
-    A query with no usable tokens (empty or stop-word only) is treated
-    as fully covered so the floor never blanks out such a query.
-    """
-    from octop_memory.pipeline.recall.parser import tokenize_text
-
-    if not query_tokens:
-        return 1.0
-    tokens = set(tokenize_text(text))
-    if not tokens:
-        return 0.0
-    return len(query_tokens & tokens) / len(query_tokens)
 
 
 def _role_for_layer(layer: str, *, importance: str) -> str:

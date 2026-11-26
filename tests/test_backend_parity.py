@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from octop_memory.core import Memory
 from octop_memory.domain.alias import normalize_alias
 from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
 from octop_memory.types import (
@@ -2192,17 +2193,98 @@ class TestEntityIdentityAndRecall:
         assert memory.find_entity_by_alias("信使") is None
 
 
+@pytest.fixture
+def deterministic_recall(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These are storage/lexical assertions. Exercise the real database reads
+    # even if a scheduled worker or database takes longer than an interactive turn.
+    from octop_memory.pipeline.recall import multi_source
+    from octop_memory.pipeline.recall.timeout import Stopwatch
+
+    monkeypatch.setattr(Stopwatch, "elapsed_ms", property(lambda _: 0))
+    monkeypatch.setattr(multi_source, "with_deadline", lambda search, **_: search())
+
+
+@pytest.mark.usefixtures("deterministic_recall")
+class TestRecallAdmission:
+    @pytest.fixture
+    def memory(self, backend: Any) -> Memory:
+        return Memory(namespace="admission", backend=backend)
+
+    def test_rejected_atoms_do_not_take_entity_slots(self, memory: Memory) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        good, owner, _ = memory.create_atom("Amber zinnia signoff.", entity_name="Atlas", importance="low")
+        for text in ("Amber paperwork.", "Amber weekly check.", "Amber status."):
+            memory.create_atom(text, entity_id=owner.id, importance="high")
+        result = recall_for_prompt(memory, "amber zinnia", min_token_coverage=1, weights=(0, 1, 0, 0, 0))
+        assert [s.source_id for s in result.snippets] == [good.id]
+
+    def test_rejected_near_duplicate_does_not_suppress_eligible_atom(self, memory: Memory) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        text = "Amber launch requires signoff by every owner before official release"
+        _, owner, _ = memory.create_atom(text, entity_name="Atlas", importance="high")
+        good, _, _ = memory.create_atom(text + " zinnia", entity_id=owner.id, importance="low")
+        result = recall_for_prompt(memory, "amber zinnia", min_token_coverage=1, weights=(0, 1, 0, 0, 0))
+        assert [s.source_id for s in result.snippets] == [good.id]
+
+    @pytest.mark.parametrize("quoted", [False, True])
+    def test_only_eligible_atoms_block_raw_fallback(self, memory: Memory, quoted: bool) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+
+        raw = memory.add_raw("Amber zinnia signoff is Friday.", session_id="history", event_type="user_message")
+        if quoted:
+            memory.add_entity(_make_entity())
+            atom = _make_atom(
+                assertion="Amber ledger.", raw_event_ids=[raw.id], quote_event_id=raw.id, verbatim_quote=raw.content
+            )
+            memory.add_atom(atom)
+        else:
+            atom, _, _ = memory.create_atom("Amber ledger.", entity_name="Ledger")
+        args = {"min_token_coverage": 1.0, "atom_only": False}
+        assert [s.source_id for s in recall_for_prompt(memory, "amber zinnia", **args).snippets] == [raw.id]
+        assert not recall_for_prompt(memory, "amber zinnia", session_id="history", **args).snippets
+        assert not recall_for_prompt(memory, "amber zinnia", min_token_coverage=1).snippets
+        assert [s.source_id for s in recall_for_prompt(memory, "amber", **args).snippets] == [atom.id]
+
+    def test_resolved_project_name_and_alias_supply_scope(self, memory: Memory) -> None:
+        from octop_memory import MemoryService
+
+        atom, owner, _ = memory.create_atom("Invoices require approval.", entity_name="Fjord", entity_type="Project")
+        memory.add_alias(Alias("fjord-team", owner.id, "Project", "user", owner.created_at))
+        memory.create_atom("Invoices require a receipt.", entity_name="Beacon", entity_type="Project")
+        service = MemoryService(memory)
+        for query in ("Fjord", "fjord-team", "Fjord invoices"):
+            assert [s.source_id for s in service.recall(query, min_token_coverage=1).snippets] == [atom.id]
+        assert not service.recall("Fjord invoices cobalt", min_token_coverage=1).snippets
+
+    @pytest.mark.parametrize("query", ["port 8088", "端口8088", "8088"])
+    def test_exact_coverage_counts_numeric_ports(self, memory: Memory, query: str) -> None:
+        from octop_memory import MemoryService
+
+        good, _, _ = memory.create_atom("Service port 8088 / 端口8088.", entity_name="Web")
+        memory.create_atom("Service port 5432 / 端口5432.", entity_name="Storage")
+        hits = MemoryService(memory).recall(query, min_token_coverage=1).snippets
+        assert [s.source_id for s in hits] == [good.id]
+
+    @pytest.mark.parametrize(("first", "second"), [(1, 5), (5, 1)])
+    def test_cached_limit_agrees_with_fresh_recall(self, memory: Memory, first: int, second: int) -> None:
+        from octop_memory.pipeline.recall import recall_for_prompt
+        from octop_memory.pipeline.recall.cache import RecallCache
+
+        memory.create_atom("Amber invoice approval.", entity_name="Finance")
+        memory.create_atom("Amber deploy freeze.", entity_name="Engineering")
+        cache = RecallCache()
+        initial = recall_for_prompt(memory, "amber", thread_id="t", limit=first, cache=cache)
+        reused = recall_for_prompt(memory, "amber", thread_id="t", limit=second, cache=cache)
+        fresh = recall_for_prompt(memory, "amber", thread_id="t", limit=second, cache=RecallCache())
+        assert len(initial.snippets) == min(first, 2)
+        assert len(fresh.snippets) == min(second, 2)
+        assert reused == fresh
+
+
+@pytest.mark.usefixtures("deterministic_recall")
 class TestLexicalFieldRecall:
-    @pytest.fixture(autouse=True)
-    def deterministic_recall(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # These are storage/lexical assertions. Exercise the real database reads
-        # even if a scheduled worker or database takes longer than an interactive turn.
-        from octop_memory.pipeline.recall import multi_source
-        from octop_memory.pipeline.recall.timeout import Stopwatch
-
-        monkeypatch.setattr(Stopwatch, "elapsed_ms", property(lambda _: 0))
-        monkeypatch.setattr(multi_source, "with_deadline", lambda search, **_: search())
-
     def test_only_returns_numbers_for_the_queried_project_and_role(self, backend: Any) -> None:
         from dataclasses import replace
 

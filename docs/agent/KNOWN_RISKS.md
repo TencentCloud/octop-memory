@@ -93,8 +93,9 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
 - Background entity review compares up to 32 same-type names sharing the initial normalized character for each owner reviewed. It can miss other spellings or owners with no live atoms. Findings cite evidence and require human resolution. An old assertion with internally consistent but incorrect source labels can escape detection.
 - PostgreSQL also matches Chinese substrings in legacy unsegmented atom text. The synthetic replay exercises this path but does not measure large-namespace latency under concurrent load.
 
-- Atom-only injection removes raw/page fallback, not low-value or off-topic atoms already promoted. Relevance admission,
-  independent durable-value checks, and negative-query evaluation remain follow-up work. No additional model call is introduced.
+- Atom-only injection can return off-topic atoms. The optional [coverage floor](PROJECT_MAP.md#recall-threshold-and-result-limits)
+  uses lexical overlap. A low floor can admit a wrong port on a shared word, and a high floor can miss a
+  paraphrase. Independent durable-value checks and workload-specific negative-query evaluation remain follow-up work.
 - Hermes captures raw without automatic extraction; its prefetch stays empty until canonical atoms exist through save or promotion.
 - Machine load affects recall wall-clock budgets. Distinguish scheduling jitter from actual retrieval regressions when investigating timeouts.
 - Chroma/Qdrant adapters currently have fake/mock coverage, not real vector-backend acceptance.

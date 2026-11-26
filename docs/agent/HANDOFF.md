@@ -161,10 +161,11 @@ and 17 skips. Its PG approval tests exercise both scheduled deferral and explici
 
 [PR #56](https://github.com/TencentCloud/octop-memory/pull/56) adds an opt-in lexical admission threshold. A matching word or phrase can admit a candidate whose remaining content is irrelevant. Increasing the threshold can also drop a useful paraphrase.
 
-- **⚠️ Recall/write path change** — Prompt recall and standalone MCP atom search use the threshold before charging the snippet budget. The default is zero. Thread caches distinguish the effective threshold so both tightening and relaxing it take effect on a repeated query.
+- **⚠️ Recall/write path change** — The follow-up checks coverage in `pipeline/recall/multi_source.py` before evidence deduplication, raw fallback, entity caps, and near-duplicate suppression. A single resolved owner satisfies the project name, and literal numbers count toward coverage. The default is zero. Thread cache keys include the requested result limit and the effective threshold.
 - **Verification** — The server test sends authenticated atom searches with the threshold disabled and enabled. Cached calls are compared with fresh calls in both directions and between positive thresholds. The lexical parity suite exercises actual SQLite and PostgreSQL reads independently of scheduling latency. Production per-source deadlines have separate tests.
 - **Local acceptance** — The library and harness suites passed on SQLite and dedicated PostgreSQL 16. The paired host replay used the same questions, corpus and result limit at multiple thresholds and restored its original configuration. Select a threshold using judged useful and irrelevant hits on the intended workload.
 - The [memory configuration reference](PROJECT_MAP.md#memory-configuration) identifies which callers read the threshold and which supply their own limits. The documentation checks, architecture checks, threshold regression suite, and standalone MCP threshold test passed.
+- **Follow-up verification** — Shared SQLite/PostgreSQL cases cover both cache request orders, scoped queries, numeric terms, and eligible raw fallback. Read-only searches through the local gateway reached isolated spaces on both backends at floors `0`, `0.05`, and `1`. Ordinary requests continued to use the original service. Dedicated tests exercise the thread cache because standalone MCP searches do not take a thread ID.
 
 ### Pre-1.0 PostgreSQL schema recovery
 

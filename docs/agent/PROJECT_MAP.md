@@ -86,16 +86,22 @@ Tool search retains its multi-source policies and file sources.
 
 ### Recall threshold and result limits
 
-`recall.min_token_coverage` is the minimum fraction of distinct query tokens that must occur in a candidate
-snippet. The default `0.0` leaves automatic recall running and skips this extra filter. At `0.05`, a snippet
-matching one of 20 distinct query tokens qualifies. Below the threshold, the pipeline skips the snippet
-before it consumes the result budget. A search can return fewer hits than requested, including zero.
-Higher values can drop useful paraphrases. Filtering affects the current result set and leaves stored memories intact.
+`recall.min_token_coverage` sets the minimum fraction of distinct query terms a candidate must cover.
+The default `0.0` skips this filter and leaves automatic recall running. At `0.05`, matching one of 20 terms
+qualifies. Numbers count as terms, including a port written beside Han text. At `1.0`, a query for
+`port 8088` requires both terms. When a query resolves to one entity, its own facts and page already
+satisfy the name or alias. Coverage for those candidates uses the remaining query terms. Searching only
+the project name can therefore return its facts even when their text omits the name.
+
+Coverage is checked during gathering. Only eligible hits can use an entity slot, suppress a similar
+candidate, or block explicit raw fallback. A rejected atom leaves its cited raw evidence eligible for
+explicit search under the usual session and manual-document exclusions. Results can be empty, and a
+higher threshold can discard useful paraphrases.
 
 | Entry point | Where the threshold or limit comes from | When it takes effect |
 |---|---|---|
 | Standalone MCP `memory_search` | Set `recall.min_token_coverage` in the server JSON. The registry shares it across served spaces. Accepted range is `0.0`–`1.0` inclusive. Missing, invalid, or out-of-range runtime values use `0.0`. | Restart the memory service. The default `atom` search uses the floor. Explicit `raw` searches use a separate raw-event lookup. |
-| Python `MemoryService.search()` / bridge `memory_search` | Set `recall.min_token_coverage` in the configuration passed to the service or runtime. | Applies to that instance's recall pipeline. The thread cache distinguishes different effective thresholds. |
+| Python `MemoryService.search()` / bridge `memory_search` | Set `recall.min_token_coverage` in the configuration passed to the service or runtime. | Applies to that instance's recall pipeline. The thread cache distinguishes the effective threshold and result limit. |
 | Python `MemoryService.recall()` | Pass `min_token_coverage=0.05` on the call. Omitting it uses `0.0` even when a service search threshold is configured. | That call only. |
 | Result count | Standalone MCP defaults to `max_results=8`. The Codex prompt hook requests `corpus="atom"` and reads `OCTOP_RECALL_MAX_RESULTS` from its environment, default `5`. Both counts are positive integers. | Per request. A higher cap allows more hits that qualify. |
 
@@ -327,13 +333,13 @@ Ordinary page apply retains legacy backend signatures; explicit version conditio
 
 `pipeline/lifecycle/dreaming.py` audits a cursor-bounded page of active atoms. The idle worker, background `review_new_memory`, and CLI `entity dream` reuse it. Journal entries under `entity_review` identify the source atom, quote, owner and suggested matches. Inspect them with `journal list --action entity_review`. Name-only evidence cannot change ownership. Candidate approval accepts an explicit entity ID for reviewed ambiguities.
 
-Main pipeline: cache → parse → route → atom-only source restriction → gather → raw policy → rerank → diversify → suppress → budget → render.
+Main pipeline: cache → parse → route → atom-only source restriction → gather with coverage check → raw policy → rerank → diversify → suppress → budget → render.
 `recall_for_prompt(atom_only=True)` is the automatic-injection default, gathering atom and optional vector atom hits only.
 No atom match returns empty; raw, page_headline, and episode cannot fill the prompt. Service, Hermes prefetch, and CLI use this default.
 Runtime `memory_search` explicitly passes `atom_only=False` for ordinary tools and preserves configurable raw fallback and host Markdown.
 OpenClaw hybrid prefetch sends `atomOnly: true`; Runtime then skips non-atom sources and host files. The plugin also filters
 host-prefetched/returned results and prompt rendering to canonical atom paths. Explicit tools keep existing sources.
-Cache scope includes atom-only mode, raw policy, current session, and manual-document snapshots to prevent cross-mode reuse.
+Cache scope includes the result limit, coverage floor, atom-only mode, raw policy, current session, and manual-document snapshots.
 With multi-source retrieval, raw fallback excludes raw when durable results exist rather than topping up the count;
 current session/thread scope excludes that conversation's raw.
 Both recall pipelines use the raw text projection for candidates and snippets. SQLite FTS5 and PostgreSQL GIN index

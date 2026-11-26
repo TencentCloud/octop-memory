@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from octop_memory.domain.retention import is_runtime_error
 from octop_memory.pipeline.recall.fields import FieldLookup, field_lookup
-from octop_memory.pipeline.recall.parser import ParsedQuery, topic_terms
+from octop_memory.pipeline.recall.parser import ParsedQuery, tokenize_text, topic_terms
 from octop_memory.pipeline.recall.rerank import (
     RerankCandidate,
     from_atom,
@@ -55,6 +55,7 @@ def gather_candidates(
     sw: Stopwatch | None = None,
     entity_anchor_ids: Sequence[str] = (),
     manual_context: dict[str, str] | None = None,
+    min_token_coverage: float = 0.0,
 ) -> list[RerankCandidate]:
     """Run each enabled source, collect ``RerankCandidate``s.
 
@@ -80,6 +81,37 @@ def gather_candidates(
     manual_policy = manual_recall_policy(memory)
     raw_seen_ids: set[str] = set(manual_policy.get("demoted_raw_ids", []))
     seen_atom_ids: set[str] = set()
+    query_terms = frozenset(tokenize_text(parsed.text)) if min_token_coverage > 0 else frozenset()
+    # For one resolved owner, the router already matched its name or alias.
+    # Its facts still need to match the rest of the question. Raw and
+    # cross-owner candidates must match against the full query.
+    owner = entity_anchor_ids[0] if len(entity_anchor_ids) == 1 else None
+    owner_terms = (
+        frozenset(tokenize_text(parsed.topic))
+        if query_terms and owner is not None and parsed.topic is not None
+        else query_terms
+    )
+
+    def admit(candidate: RerankCandidate) -> bool:
+        if min_token_coverage > 0:
+            terms = owner_terms if owner is not None and candidate.entity_id == owner else query_terms
+            if not candidate.text.strip():
+                return False
+            if terms and len(terms.intersection(tokenize_text(candidate.text))) / len(terms) < min_token_coverage:
+                return False
+        out.append(candidate)
+        return True
+
+    def add_atoms(atoms: Sequence[AtomCard], rank_offset: int) -> None:
+        for idx, atom in enumerate(atoms, start=rank_offset):
+            if atom.id in seen_atom_ids:
+                continue
+            seen_atom_ids.add(atom.id)
+            # Hidden manual duplicates also hide their evidence. An atom
+            # rejected only by coverage leaves its original evidence eligible.
+            if duplicates_manual_context(atom, manual_policy, manual_context) or admit(from_atom(atom, rank_index=idx)):
+                raw_seen_ids.add(atom.quote_event_id)
+                raw_seen_ids.update(atom.raw_event_ids)
 
     for source in sources:
         if stopwatch.expired:
@@ -99,17 +131,7 @@ def gather_candidates(
             except DRIVER_ERRORS:
                 _log.warning("recall atom gather failed", exc_info=True)
                 continue
-            for idx, atom in enumerate(atoms):
-                if duplicates_manual_context(atom, manual_policy, manual_context):
-                    raw_seen_ids.update(atom.raw_event_ids)
-                    raw_seen_ids.add(atom.quote_event_id)
-                    continue
-                if atom.id in seen_atom_ids:
-                    continue
-                seen_atom_ids.add(atom.id)
-                out.append(from_atom(atom, rank_index=idx))
-                raw_seen_ids.add(atom.quote_event_id)
-                raw_seen_ids.update(atom.raw_event_ids)
+            add_atoms(atoms, rank_offset=0)
             stopwatch.split("atom")
             continue
 
@@ -136,10 +158,8 @@ def gather_candidates(
                 if event.id in raw_seen_ids:
                     continue  # already covered by an accepted atom
                 candidate = from_raw(event, rank_index=kept)
-                if not candidate.text:
-                    continue
-                out.append(candidate)
-                kept += 1
+                if candidate.text and admit(candidate):
+                    kept += 1
             stopwatch.split("raw")
             continue
 
@@ -165,7 +185,7 @@ def gather_candidates(
                     continue
                 if page.entity_id in {c.entity_id for c in out}:
                     continue  # entity already represented by an atom hit
-                out.append(from_page_headline(page, rank_index=idx))
+                admit(from_page_headline(page, rank_index=idx))
             stopwatch.split("page_headline")
             continue
 
@@ -186,20 +206,7 @@ def gather_candidates(
             except DRIVER_ERRORS:
                 _log.warning("recall vector gather failed", exc_info=True)
                 continue
-            for idx, atom in enumerate(vector_atoms):
-                if duplicates_manual_context(atom, manual_policy, manual_context):
-                    raw_seen_ids.update(atom.raw_event_ids)
-                    raw_seen_ids.add(atom.quote_event_id)
-                    continue
-                if atom.id in seen_atom_ids:
-                    continue  # already matched by FTS, skip duplicate
-                seen_atom_ids.add(atom.id)
-                # Vector hits get rank_index starting at per_source_limit,
-                # to avoid colliding with FTS atoms' rank_index (FTS has
-                # higher priority).
-                out.append(from_atom(atom, rank_index=per_source_limit + idx))
-                raw_seen_ids.add(atom.quote_event_id)
-                raw_seen_ids.update(atom.raw_event_ids)
+            add_atoms(vector_atoms, rank_offset=per_source_limit)
             stopwatch.split("vector")
             continue
 
@@ -223,7 +230,8 @@ def gather_candidates(
                 if ep.id in seen_ep_ids:
                     continue
                 seen_ep_ids.add(ep.id)
-                out.append(from_episode(ep, rank_index=idx))
+                if not admit(from_episode(ep, rank_index=idx)):
+                    continue
                 # Mark covered raw events so the raw source doesn't
                 # double-up on the same quote.
                 raw_seen_ids.add(ep.quote_event_id)
