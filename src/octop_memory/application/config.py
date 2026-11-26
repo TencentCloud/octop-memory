@@ -21,6 +21,12 @@ class MemoryRuntimeConfig:
 
 DEFAULT_RECALL_CFG = {
     "default_max_results": 5,
+    # Relevance floor for prompt recall / memory_search: drop a hit whose
+    # share of matched query tokens falls below this ratio. "0.0" keeps
+    # the historical "fill to limit" behaviour; hosts that observe noisy
+    # recall can raise it (0.05-0.15 in practice) to return fewer, more
+    # relevant snippets instead of padding the list.
+    "min_token_coverage": 0.0,
     "default_corpus": "all",
     "raw_policy": "fallback",
     "host_files_policy": "include",

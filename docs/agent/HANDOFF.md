@@ -157,6 +157,15 @@ and 17 skips. Its PG approval tests exercise both scheduled deferral and explici
 - **Consumer verification:** Load current memory source (base d9170b5 plus this change) with actual Harness source 2fef395. Dedicated `AtomOnlyRecall or HarnessManualReview` cases: 20 pass, no skips, covering both backends; host Service/tools/recall-replay suites: 66 pass, no skips. The ordinary full gate's missing-Harness cases are thus covered separately. Four real-Hermes E2E cases remain unexecuted without a Hermes installation; real OpenClaw host hooks are not exercised by plugin tests.
 - **Continuation:** PR #41 awaits a future release/adoption; relevance admission, independent durable-value screening, and negative-query evaluation remain deferred development plans. Keep the GitHub Wiki development-status pages aligned with changes to these issues and plans.
 
+### Recall token-coverage admission floor
+
+[PR #56](https://github.com/TencentCloud/octop-memory/pull/56) adds an opt-in lexical admission threshold. A matching word or phrase can admit a candidate whose remaining content is irrelevant. Increasing the threshold can also drop a useful paraphrase.
+
+- **⚠️ Recall/write path change** — Prompt recall and standalone MCP atom search use the threshold before charging the snippet budget. The default is zero. Thread caches distinguish the effective threshold so both tightening and relaxing it take effect on a repeated query.
+- **Verification** — The server test sends authenticated atom searches with the threshold disabled and enabled. Cached calls are compared with fresh calls in both directions and between positive thresholds. The lexical parity suite exercises actual SQLite and PostgreSQL reads independently of scheduling latency. Production per-source deadlines have separate tests.
+- **Local acceptance** — The library and harness suites passed on SQLite and dedicated PostgreSQL 16. The paired host replay used the same questions, corpus and result limit at multiple thresholds and restored its original configuration. Select a threshold using judged useful and irrelevant hits on the intended workload.
+- The [memory configuration reference](PROJECT_MAP.md#memory-configuration) identifies which callers read the threshold and which supply their own limits. The documentation checks, architecture checks, threshold regression suite, and standalone MCP threshold test passed.
+
 ### Pre-1.0 PostgreSQL schema recovery
 
 - **Status:** [PR #48](https://github.com/TencentCloud/octop-memory/pull/48) merged into develop as `50127ac`.

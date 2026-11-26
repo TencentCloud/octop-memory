@@ -217,6 +217,16 @@ def _word_tokens(query: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def tokenize_text(text: str) -> tuple[str, ...]:
+    """Tokenize arbitrary text with the same rules used for queries.
+
+    Public wrapper over :func:`_word_tokens` so relevance heuristics
+    (for example the recall token-coverage floor) do not import a
+    private helper across modules.
+    """
+    return _word_tokens(text or "")
+
+
 def _entity_hints(query: str) -> tuple[str, ...]:
     """Extract candidate entity-name fragments from ``query``.
 

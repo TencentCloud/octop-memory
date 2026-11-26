@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 召回可加相关性下限：配置 `recall.min_token_coverage`（默认 `0.0`，即关闭、行为不变）后，命中与当前问题的重合词占比低于阈值的条目不返回。一轮召回因此可以少于上限甚至为空，不再为了凑满固定条数而带入无关记忆；`memory_search` 与 `MemoryService.recall()` 都可生效。
+
 ## [1.0.6] - 2026-11-25
 
 ### 新增

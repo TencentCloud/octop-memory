@@ -95,6 +95,7 @@ class MemoryService:
         session_id: str | None = None,
         limit: int = DEFAULT_RECALL_LIMIT,
         manual_context: dict[str, str] | None = None,
+        min_token_coverage: float = 0.0,
     ) -> RecallResult:
         """Recall canonical atoms as prompt-injectable text.
 
@@ -116,6 +117,7 @@ class MemoryService:
             session_id=session_id,
             limit=limit,
             manual_context=manual_context,
+            min_token_coverage=min_token_coverage,
         )
 
     def set_manual_review_scheduler(self, scheduler: Callable[[], None] | None) -> None:

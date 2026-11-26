@@ -2193,6 +2193,16 @@ class TestEntityIdentityAndRecall:
 
 
 class TestLexicalFieldRecall:
+    @pytest.fixture(autouse=True)
+    def deterministic_recall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # These are storage/lexical assertions. Exercise the real database reads
+        # even if a scheduled worker or database takes longer than an interactive turn.
+        from octop_memory.pipeline.recall import multi_source
+        from octop_memory.pipeline.recall.timeout import Stopwatch
+
+        monkeypatch.setattr(Stopwatch, "elapsed_ms", property(lambda _: 0))
+        monkeypatch.setattr(multi_source, "with_deadline", lambda search, **_: search())
+
     def test_only_returns_numbers_for_the_queried_project_and_role(self, backend: Any) -> None:
         from dataclasses import replace
 

@@ -82,6 +82,65 @@ Service configuration feeds Runtime tool search, capture, privacy, and extractio
 Automatic injection is atom-only; Runtime raw/host-file configuration does not widen it.
 Tool search retains its multi-source policies and file sources.
 
+## Memory configuration
+
+### Recall threshold and result limits
+
+`recall.min_token_coverage` is the minimum fraction of distinct query tokens that must occur in a candidate
+snippet. The default `0.0` leaves automatic recall running and skips this extra filter. At `0.05`, a snippet
+matching one of 20 distinct query tokens qualifies. Below the threshold, the pipeline skips the snippet
+before it consumes the result budget. A search can return fewer hits than requested, including zero.
+Higher values can drop useful paraphrases. Filtering affects the current result set and leaves stored memories intact.
+
+| Entry point | Where the threshold or limit comes from | When it takes effect |
+|---|---|---|
+| Standalone MCP `memory_search` | Set `recall.min_token_coverage` in the server JSON. The registry shares it across served spaces. Accepted range is `0.0`–`1.0` inclusive. Missing, invalid, or out-of-range runtime values use `0.0`. | Restart the memory service. The default `atom` search uses the floor. Explicit `raw` searches use a separate raw-event lookup. |
+| Python `MemoryService.search()` / bridge `memory_search` | Set `recall.min_token_coverage` in the configuration passed to the service or runtime. | Applies to that instance's recall pipeline. The thread cache distinguishes different effective thresholds. |
+| Python `MemoryService.recall()` | Pass `min_token_coverage=0.05` on the call. Omitting it uses `0.0` even when a service search threshold is configured. | That call only. |
+| Result count | Standalone MCP defaults to `max_results=8`. The Codex prompt hook requests `corpus="atom"` and reads `OCTOP_RECALL_MAX_RESULTS` from its environment, default `5`. Both counts are positive integers. | Per request. A higher cap allows more hits that qualify. |
+
+For standalone MCP, merge this field into the existing server configuration (by default
+`~/.octop-memory/config.json`, or the file selected by `--config`), then restart the service.
+
+```json
+{"recall": {"min_token_coverage": 0.05}}
+```
+
+To verify a change, run read-only `memory_search` calls before and after the restart with the same space,
+queries, `corpus="atom"`, and result cap. Compare the hit paths and count useful hits lost as well as
+irrelevant hits removed. The [threshold tests](../../tests/test_recall_token_coverage_floor.py) and
+[standalone MCP test](../../tests/test_server.py) cover the boundary and its wiring.
+
+### Embedded runtime settings
+
+Pass these groups when constructing `MemoryService(memory, config=...)` or starting the bridge with `--config-json`.
+Recreate the instance to load edited settings. The standalone JSON registry forwards the recall threshold and
+LLM settings. The other rows below describe the embedded runtime. Consult the
+[runtime defaults](../../src/octop_memory/application/config.py) and [runtime consumers](../../src/octop_memory/application/runtime.py).
+
+| Setting | Default | Effect and overrides |
+|---|---|---|
+| `recall.default_max_results`, `recall.default_corpus` | `5`, `"all"` | Bridge search defaults when a request omits the count or corpus. Python `MemoryService.search()` supplies its own arguments, which default to `5` and `"all"`. |
+| `recall.raw_policy`, `recall.host_files_policy` | `"fallback"`, `"include"` | Multi-source search can use raw events (`never`, `fallback`, `always`) and host files (`off`, `include`, `only`). Automatic prompt recall stays atom-only. |
+| `recall.layer_order` | `["atom", "host_file", "page", "raw"]` | Order result layers before applying the final tool search limit. Hits within a layer keep their relative order. |
+| `capture.include_roles`, `capture.min_message_chars`, `capture.skip_memory_echo` | `["user", "assistant"]`, `12`, `true` | Select eligible roles, set a minimum visible length (CJK-weighted), and skip messages containing recall-injection markers. |
+| `capture.include_tool_calls`, `capture.include_tool_results`, `privacy.store_tool_payloads` | All `false` | Keep tool-call fields, admit tool results, and retain tool payloads respectively. Capturing tool results also requires `tool` in `include_roles`. |
+| `privacy.redact_secrets`, `privacy.redact_patterns`, `privacy.store_raw_content` | `true`, `[]`, `true` | Apply built-in secret redaction, add regex patterns, and choose whether captured events retain raw text. These affect subsequent captures. |
+| `extraction.max_candidates`, `extraction.max_tokens` | `20`, `null` | Candidate budget and completion-token cap for the runtime extractor. A positive token cap overrides its built-in budget of 2,048 tokens. |
+| `extraction.keep_rules`, `extraction.skip_rules` | Both `null` | Optional text for the extractor describing what to retain or skip. Each rule is trimmed to 2,000 characters. |
+| `extraction.promote`, `extraction.regen_pages`, `extraction.page_regen_limit` | `true`, `true`, `5` | Run candidate promotion and regenerate up to five dirty pages by default. Explicit extract arguments override the two switches. Python `MemoryService.extract()` supplies both switches. |
+
+### Codex extraction settings
+
+| Installer variable | Fresh-install default | Scope |
+|---|---|---|
+| `OCTOP_CODEX_EXTRACTION` | `server` | With a writable token, `server` uses server extraction, `codex` uses the current chat model for review, and `octop` delegates review to the Octop-selected model. A setup prompt can select a mode explicitly. A same-URL upgrade defaults to the installed mode. |
+| `OCTOP_CODEX_PANEL_SYNC` | `0` | Install with `1` and a writable token to follow the mode published for that terminal credential. A subsequent Stop hook checks the published selection. A same-credential upgrade preserves enabled sync unless overridden. |
+| `OCTOP_CODEX_REVIEW_URL` | Unset | Required for writable delegated review or panel sync. Use the Octop `/api/memory-mcp/codex-review` endpoint over HTTPS or loopback HTTP. |
+
+The panel's **Apply to terminal** action publishes the extraction selection. The recall threshold is loaded by
+the memory service. See the [Codex integration guide](../integrations.md) and [installer](../../plugins/harness/octopmemory_harness/installer.py).
+
 ## Repository integration map
 
 The repositories are [octop-memory](https://github.com/TencentCloud/octop-memory),

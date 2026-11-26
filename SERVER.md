@@ -97,6 +97,10 @@ for `memory_get`, which returns text in `content` and `excerpt`. Use `start`
 (or `from_line`) and `lines` to read a specific range, with line numbers starting
 at 1.
 
+For the standalone server, set `recall.min_token_coverage` in its JSON configuration and restart the
+service to apply it. The default is `0.0`. For atom searches, values between zero and one require
+the corresponding fraction of distinct query tokens to occur in the snippet. Results may be empty.
+
 ## Admin API (used by CLI and management UIs)
 
 ```

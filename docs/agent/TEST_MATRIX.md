@@ -62,8 +62,8 @@ On both supported databases, `test_codex_reconciles_only_durable_evidence` check
 
 Codex delegated review is covered by `test_delegated_codex_review_only_reads_the_credential_and_turns_evidence` on SQLite and PostgreSQL and by `plugins/harness/tests/test_codex_install.py` for model mode switching.
 
-The manual-document session-context duplicate test runs real SQLite retrieval and the recall policy with a fixed elapsed
-clock and synchronous source calls. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
+The manual-document session-context duplicate test and `TestLexicalFieldRecall` run real backend reads with
+a fixed elapsed clock and synchronous source calls to verify lexical semantics independently of machine load. The timeout cases in `tests/test_recall_router_cache_timeout.py` exercise real deadlines.
 
 ## PostgreSQL and real host environments
 

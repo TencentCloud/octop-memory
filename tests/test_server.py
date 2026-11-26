@@ -375,6 +375,22 @@ def test_registered_spaces_keep_separate_memory(backend, control, tmp_path, requ
         assert _mcp_call(client, other_reader, "memory_search", query="cobalt")["total"] == 0
 
 
+def test_standalone_mcp_applies_configured_token_coverage(control, tmp_path):
+    control.create_space("coverage", "Coverage", "sqlite", {"db_path": str(tmp_path / "coverage.db")})
+    _, token = control.create_token("coverage", "test", ["read", "write"])
+    config = {"control": {"sqlite": {"db_path": str(control.path)}}}
+    with TestClient(build_app(config)) as client:
+        for text in ("OpenClaw checklist owner is Bob", "Hermes checklist owner is Alice"):
+            _mcp_call(client, token, "memory_save", source="test", content=text)
+        query = {"query": "OpenClaw checklist", "corpus": "atom", "max_results": 5}
+        baseline = _mcp_call(client, token, "memory_search", **query)
+        assert len(baseline["hits"]) == 2
+
+    with TestClient(build_app({**config, "recall": {"min_token_coverage": 0.75}})) as client:
+        strict = _mcp_call(client, token, "memory_search", **query)
+        assert [hit["snippet"] for hit in strict["hits"]] == ["OpenClaw checklist owner is Bob"]
+
+
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 def test_mcp_search_corpora_and_paginated_get(backend, control, tmp_path, request):
     space_id = f"mcp-search-{uuid4().hex[:10]}"

@@ -25,6 +25,9 @@ class SpaceRegistry:
         self._runtime_config: dict[str, Any] = {}
         if isinstance(self._config.get("llm"), dict):
             self._runtime_config["llm"] = self._config["llm"]
+        recall = self._config.get("recall")
+        if isinstance(recall, dict) and "min_token_coverage" in recall:
+            self._runtime_config["recall"] = {"min_token_coverage": recall["min_token_coverage"]}
         self._memories: dict[str, Memory] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
