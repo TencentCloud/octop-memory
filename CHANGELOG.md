@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-11-26
+
 ### 新增
 
-- 召回可加相关性下限：配置 `recall.min_token_coverage`（默认 `0.0`，即关闭、行为不变）后，命中与当前问题的重合词占比低于阈值的条目不返回。一轮召回因此可以少于上限甚至为空，不再为了凑满固定条数而带入无关记忆；`memory_search` 与 `MemoryService.recall()` 都可生效。
+- 安装 `octop-memory[server]` 可运行独立的 HTTP MCP 服务，按记忆空间隔离数据，并为每个终端单独签发、轮换和撤销凭据。
+- Codex 终端 hook 支持由当前对话模型或配套 Octop 服务复核记忆。启用面板同步后，终端可拉取并确认已发布的提取配置。复核按一条事实附一份原话证据提交，重复事实合并证据，明确变更可更新原记忆。
+- 宿主可用 `extraction.keep_rules` 和 `extraction.skip_rules` 指定提取时应保留或跳过的内容。
+- `memory_search` 和 `MemoryService.recall()` 支持设置词项覆盖率下限 `recall.min_token_coverage`。默认值 `0.0` 表示关闭。启用后，相关结果不足时可少于条数上限，也可以为空。
 
 ### 修复
 
