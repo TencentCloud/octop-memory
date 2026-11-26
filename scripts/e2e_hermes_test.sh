@@ -8,9 +8,9 @@
 #   1. install + doctor succeed against a real Hermes home/source layout.
 #   2. OctopMemoryProvider actually subclasses the REAL
 #      agent.memory_provider.MemoryProvider (contract fidelity).
-#   3. The runtime flow works: initialize -> sync_turn -> prefetch ->
-#      memory_search -> memory_get, plus the host_files watcher indexes
-#      $HERMES_HOME/memories topical markdown.
+#   3. Explicit tools can search and read captured turns. Automatic prefetch
+#      stays empty until a stored atom matches. The host_files watcher indexes
+#      topical markdown under $HERMES_HOME/memories.
 #
 # This is optional / CI-gated: with no Hermes source available it prints a
 # skip notice and exits 0 (mirrors scripts/e2e_openclaw_test.sh behaviour).
@@ -39,7 +39,9 @@ HERMES_REPO="${HERMES_REPO:-https://github.com/NousResearch/hermes-agent}"
 HERMES_REF="${HERMES_REF:-main}"
 PY="${PYTHON:-python3}"
 CLONED_TMP=""
-INSTALLER="$REPO_ROOT/plugins/hermes/octopmemory/installer.py"
+run_installer() {
+  PYTHONPATH="$REPO_ROOT/plugins/hermes${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m octopmemory.installer "$@"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,7 +109,7 @@ trap cleanup EXIT
 section "步骤 1：安装 provider 到 Hermes 源码"
 
 INSTALL_LOG="$(mktemp)"
-if "$PY" "$INSTALLER" install \
+if run_installer install \
   --hermes-home "$HERMES_HOME" --hermes-source "$HERMES_SOURCE" \
   --no-write-pth --force >"$INSTALL_LOG" 2>&1; then
   pass "octop-memory-hermes install 成功"
@@ -118,7 +120,7 @@ fi
 # ── Step 2: doctor ──────────────────────────────────────────────────────────
 section "步骤 2：doctor 健康检查"
 
-if "$PY" "$INSTALLER" doctor \
+if run_installer doctor \
   --hermes-home "$HERMES_HOME" --hermes-source "$HERMES_SOURCE" 2>&1 | tee /dev/stderr | grep -q "checks passed"; then
   pass "doctor 全部通过"
 else
@@ -174,12 +176,18 @@ assert search.get("hits"), f"memory_search returned no hits: {search}"
 print(f"  ✅ memory_search 命中 {len(search['hits'])} 条")
 
 path = search["hits"][0]["path"]
+assert path.startswith("raw/"), path
 got = json.loads(p.handle_tool_call("memory_get", {"path": path, "from": 1, "lines": 20}))
 assert "release window" in got.get("excerpt", "").lower(), f"memory_get excerpt missing content: {got}"
 print("  ✅ memory_get 返回正文")
 
-block = p.prefetch("What is the release window?", session_id="e2e_sess")
-assert "OctopMemory Recall" in block, f"prefetch produced no recall block: {block!r}"
+query = "What is the release window?"
+assert p.prefetch(query, session_id="e2e_sess") == "", "raw-only turns should leave prefetch empty"
+atom, _, _ = p._memory.create_atom("The release window is Tuesday at 14:00.", entity_name="Rollout")
+block = p.prefetch(query, session_id="e2e_sess")
+assert "## OctopMemory Recall" in block, block
+assert f"atom/{atom.id}.md" in block and atom.assertion in block, block
+assert "raw/" not in block, block
 print("  ✅ prefetch 返回召回上下文")
 
 p.shutdown()
