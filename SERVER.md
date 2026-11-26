@@ -98,8 +98,12 @@ for `memory_get`, which returns text in `content` and `excerpt`. Use `start`
 at 1.
 
 For the standalone server, set `recall.min_token_coverage` in its JSON configuration and restart the
-service to apply it. The default is `0.0`. For atom searches, values between zero and one require
-the corresponding fraction of distinct query tokens to occur in the snippet. Results may be empty.
+service to apply it. The default `0.0` skips coverage filtering. A positive threshold up to `1.0`
+requires that fraction of distinct query terms to match. Numbers count, so at `1.0` a search for
+`port 8088` drops snippets that only mention port 5432. A resolved project name or alias supplies
+the scope for its own facts, and any remaining terms are checked against their text.
+For `corpus="all"`, a durable candidate that fails coverage leaves matching raw evidence eligible
+for fallback. For `corpus="atom"`, the result may be empty.
 
 ## Admin API (used by CLI and management UIs)
 
