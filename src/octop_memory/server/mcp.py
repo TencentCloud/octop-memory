@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from contextlib import suppress
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -15,8 +17,10 @@ from pydantic import Field
 from octop_memory.application.path_projection import raw_to_path
 from octop_memory.application.runtime import MemoryRuntime
 from octop_memory.core import Memory
+from octop_memory.domain.codex_review import POLICY as CODEX_REVIEW_POLICY
 from octop_memory.domain.raw_search import raw_search_text
 from octop_memory.server.registry import SpaceRegistry
+from octop_memory.types import CodexFact
 
 _current_space: ContextVar[str] = ContextVar("octop_memory_space", default="")
 _current_scopes: ContextVar[tuple[str, ...]] = ContextVar("octop_memory_scopes", default=())
@@ -157,26 +161,77 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
 
     @mcp.tool()
     async def memory_propose(
-        event_id: str,
-        quote: Annotated[str, Field(min_length=1, max_length=200)],
-        kind: Literal["Preference", "Decision", "Fact"],
+        event_id: str | None = None,
+        quote: Annotated[str | None, Field(min_length=1, max_length=200)] = None,
+        kind: Literal["Preference", "Decision", "Fact"] | None = None,
         review_model: Annotated[str | None, Field(max_length=512)] = None,
+        facts: Annotated[list[CodexFact] | None, Field(min_length=1, max_length=3)] = None,
     ) -> dict[str, Any]:
-        """Propose an exact quote from your own captured user message for human review."""
+        """Submit up to three facts from one Codex turn together. Each assertion states one fact in the
+        user's language and neutral third person, preserving scope and qualifiers. Write the assertion independently.
+        Each quote is a short exact user excerpt
+        (up to 200 characters) supporting that assertion. Omit the call when there are no durable facts.
+        Single event_id/quote/kind arguments remain available to older clients."""
         _require("write")
         caller = _current_token.get()
 
         def _run(memory: Memory) -> dict[str, Any]:
+            if facts is not None:
+                if event_id is not None or quote is not None or kind is not None:
+                    raise ValueError("cannot mix facts with legacy proposal arguments")
+                if any(fact.target_id or fact.scope or fact.relation != "new" for fact in facts):
+                    _require("read")
+                candidates = memory.propose_codex_facts(facts, caller=caller, review_model=review_model)
+                states = {c.status for c in candidates}
+                status = next(iter(states)) if len(states) == 1 else "processed" if states else "skipped"
+                return {"candidate_ids": [c.id for c in candidates], "status": status}
+            if event_id is None or quote is None or kind is None:
+                raise ValueError("provide facts or all legacy proposal arguments")
             candidate = memory.propose_quote(event_id, quote, caller=caller, kind=kind, review_model=review_model)
             return {"candidate_id": candidate.id, "status": candidate.status}
 
         return await asyncio.to_thread(registry.call, _current_space.get(), _run)
 
     @mcp.tool()
+    async def memory_codex_terminal_identity() -> dict[str, str]:
+        """Identify the calling read/write credential for Codex configuration sync."""
+        _require("read")
+        _require("write")
+        return {"space_id": _current_space.get(), "token_id": _current_token.get()}
+
+    @mcp.tool()
+    async def memory_codex_related(
+        event_ids: Annotated[list[str], Field(min_length=1, max_length=4)],
+    ) -> dict[str, Any]:
+        """Read classification rules and possible matching facts for your current captured Codex user evidence."""
+        _require("read")
+        _require("write")
+        caller = _current_token.get()
+
+        def read(memory: Memory) -> dict[str, Any]:
+            texts = []
+            for event_id in event_ids:
+                event = memory.get_raw(event_id)
+                if (
+                    not event
+                    or event.user != caller
+                    or event.host != "codex"
+                    or event.event_type != "user_message"
+                    or event.payload.get("content_redacted")
+                    or not event.payload.get("codex_review")
+                ):
+                    raise ValueError("Codex review evidence is unavailable")
+                texts.append(event.content[:8000])
+            return {"policy": CODEX_REVIEW_POLICY, "related": memory.related_codex_facts(caller, texts)}
+
+        return await asyncio.to_thread(registry.call, _current_space.get(), read)
+
+    @mcp.tool()
     async def memory_codex_review_evidence(
         session_id: str,
         turn_id: str,
         event_ids: Annotated[list[str], Field(min_length=1, max_length=4)],
+        include_related: bool = False,
     ) -> dict[str, Any]:
         """Read this credential's eligible Codex messages for a delegated Octop review."""
         _require("read")
@@ -199,6 +254,14 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                 ):
                     raise ValueError("Codex review evidence is unavailable")
                 messages.append({"id": event.id, "text": event.content[:8000]})
+            if include_related:
+                return {
+                    "token_id": caller,
+                    "space_id": space,
+                    "messages": messages,
+                    "policy": CODEX_REVIEW_POLICY,
+                    "related": memory.related_codex_facts(caller, [item["text"] for item in messages]),
+                }
             return {"token_id": caller, "space_id": space, "messages": messages}
 
         return await asyncio.to_thread(registry.call, space, read)
@@ -340,8 +403,30 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
             )
             if extract:
                 with suppress(Exception):
-                    runtime.extract({"session_id": effective_session, "promote": False})
+                    run = runtime.extract({"session_id": effective_session, "promote": False})
+                    if source == "codex" and run.get("llm_calls") and not run.get("failure_reason"):
+                        memory.set_meta(
+                            f"codex_terminal_run.{token_id}",
+                            json.dumps(
+                                {
+                                    "mode": "server",
+                                    "model": (registry.runtime_config.get("llm") or {}).get("model"),
+                                    "timestamp": datetime.now(UTC).isoformat(),
+                                }
+                            ),
+                        )
             accepted = int(result.get("accepted") or 0)
+            if accepted and source == "codex" and (extract or evidence_for_turn):
+                mode = "server" if extract else ("octop" if octop_model_review else "codex")
+                memory.set_meta(
+                    f"codex_terminal_mode.{token_id}",
+                    json.dumps(
+                        {
+                            "mode": mode,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                    ),
+                )
             if evidence_for_turn:
                 evidence["user_event_ids"].extend(result.get("user_event_ids", []))
             return {

@@ -74,6 +74,8 @@ export function loadConfig() {
     tokenHeader: connection.tokenHeader || "Authorization",
     readOnly: connection.readOnly === true,
     codexExtraction: connection.codexExtraction,
+    codexPanelSync: connection.codexPanelSync === true,
+    codexReviewUrl: connection.codexReviewUrl,
     mcpServer: connection.mcpServer,
   };
 }
@@ -326,6 +328,7 @@ export async function capture(ctx) {
     sessionPrefix || "",
   ];
   if (config.codexExtraction === "octop") args.push("--state-dir", paths.scratchDir);
+  if (source === "codex" && config.codexPanelSync) args.push("--codex-mode", config.codexExtraction);
   if (ctx.turnId) args.push("--turn-id", ctx.turnId);
   if (ctx.model) args.push("--model", ctx.model);
   try {

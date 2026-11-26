@@ -63,7 +63,9 @@ DSH 原生插件在独立仓库发布：<https://github.com/ArvinQi/dsh-octop-me
 
 安装器注册 Streamable HTTP MCP。`http_headers_helper` 从权限为 `0600` 的本机 hook 配置读取凭据，TOML 只保存端点和辅助命令。Agent 可用 `memory_get` 展开召回结果附带的 `path`，也可用 `memory_save` 保存用户明确要求记住的信息。
 
-使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。模型可以用 `memory_propose` 引用一句用户原话，提交到待审核列表。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
+使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。每轮可以跳过或一次通过 `memory_propose(facts=[...])` 提交 1–3 条有原话依据的事实。每条正文只写一个可独立更新的事实、偏好或决定，另附对应用户消息的 ID 和原文短引。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
+
+Codex 自提取会先调用 `memory_codex_related`；Octop 代提取从同一服务读取规则和相关记录。模型逐句判断意图与适用期限，只提交长期事实、偏好或要求。临时指令和纯提问跳过。重复陈述会给同一条记忆追加原话证据。明确改口会替换已确认的旧版，并保留历史；不确定的变更进入待审核。
 
 使用只读凭据时设置 `OCTOP_CODEX_READ_ONLY=1`，仅开放 `memory_get` 并停用会话上报。安装后在「设置 → MCP Servers」重启连接，并用 `/mcp` 检查工具列表。在「设置 → Hooks」或 CLI 的 `/hooks` 审核并信任新钩子。
 

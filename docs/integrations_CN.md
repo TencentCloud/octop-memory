@@ -116,9 +116,11 @@ Stop hook 把新增的 transcript 字节交给本地解析器，再调用 `memor
 
 Codex 安装器还会通过 Streamable HTTP MCP 开放 `memory_get` 和 `memory_save`。自动召回的结果含有可交给 `memory_get` 的 `path`。HTTP 请求头由本机辅助命令从 hook 配置读取 token。使用只读凭据时设置 `OCTOP_CODEX_READ_ONLY=1`，仅开放 `memory_get` 并停用会话上报。安装后在设置中重启 MCP 连接，用 `/mcp` 确认工具，并在设置或 CLI 的 `/hooks` 中审核钩子。
 
-使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。模型可以用 `memory_propose` 引用一句用户原话，提交到待审核列表。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
+使用读写 Token 时，安装前可设置 `OCTOP_CODEX_EXTRACTION=codex`。Stop 上报本轮原文后，如果有可引用的用户消息，就让当前 Codex 对话模型续跑一轮，消耗 Codex 模型额度。每轮可以跳过或一次通过 `memory_propose(facts=[...])` 提交 1–3 条有原话依据的事实。每条正文只写一个可独立更新的事实、偏好或决定，另附对应用户消息的 ID 和原文短引。用户明确要求长期保存时仍可用 `memory_save`。设置 `OCTOP_CODEX_EXTRACTION=server` 并重新安装可恢复服务端提取。安装器和服务端都需要支持候选提议。
 
-要让外部 Codex 使用 Octop 模型，在「共享记忆」为该读写 Token 选择模型，并执行生成的接入提示词。安装时设置 `OCTOP_CODEX_EXTRACTION=octop` 和 `OCTOP_CODEX_REVIEW_URL`（HTTPS 或本机回环地址）。Stop 在后台提交证据 ID，Octop 用所选模型复核该 Token 对应的用户原文，引用进入待审核列表。模型服务商密钥保存在 Octop。
+Codex 自提取会先调用 `memory_codex_related`；Octop 代提取从同一服务读取规则和相关记录。模型逐句判断意图与适用期限，只提交长期事实、偏好或要求。临时指令和纯提问跳过。重复陈述会给同一条记忆追加原话证据。明确改口会替换已确认的旧版，并保留历史；不确定的变更进入待审核。
+
+要让外部 Codex 使用 Octop 模型，在「共享记忆」为该读写 Token 选择模型，并执行生成的接入提示词。安装时设置 `OCTOP_CODEX_EXTRACTION=octop` 和 `OCTOP_CODEX_REVIEW_URL`（HTTPS 或本机回环地址）。Stop 在后台提交证据 ID，Octop 用所选模型复核该 Token 对应的用户原文，按事实拆成最多三条并按上述规则处理，每条分别保存正文和原文证据。模型服务商密钥保存在 Octop。
 
 记忆概览显示最近一轮 Codex 复核的进度，包括原文已上报、复核续轮结束时未收到候选，以及实际提交的候选数量。旧版 hook 上报的原文和候选也能显示。确认一轮结束且没有候选，需要新版 hook 的完成回执。服务端提取保留独立的时间和结果。
 

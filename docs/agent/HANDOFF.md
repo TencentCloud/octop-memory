@@ -28,11 +28,26 @@ baselines for new work; consult their original PR/Git records.
 
 ⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.
 
+Both review paths were exercised on the paired local deployment with an isolated space. A real Codex CLI review
+and a delegated model each produced two pending candidates from one user turn with separate assertions and
+quotes. A transient delegated request produced none. SQLite and PostgreSQL cover legacy single quotes, atomic
+batch rejection, redelivery and proposal counts. Existing Codex chats with a cached tool schema need an MCP reload.
+
+The Octop model panel reads the observed mode and last completed review for the selected space and terminal token.
+Memory records accepted captures and completed reviews. For older hooks it can use matching turn evidence and the
+saved Stop receipt. The status response contains timestamps, mode and model. The panel can show a saved Octop model
+as pending while the terminal continues reviewing locally. The server tests cover SQLite and PostgreSQL.
+
+Opt-in Codex hooks also pull the explicitly published mode from the configured Octop origin at Stop.
+The Memory API verifies the live read/write token and returns its identity to Octop. The hook acknowledges the
+published revision after storing it. See [terminal setup](../../plugins/harness/AI-SETUP.md).
+
 - **⚠️ Recall/write path change** — The terminal installer registers native Codex `memory_get` and
   `memory_save`; recall now includes readable paths. The read-only mode exposes `memory_get` and skips
   transcript capture. Authentication uses the existing local credential file.
 - **⚠️ Recall/write path change** — Opt-in Codex Stop continuation uses the current turn model for quote-backed,
-  review-only proposals. The token dialog lets the installer select Codex or standalone server extraction.
+  per-fact proposals. Both review modes skip temporary directives and questions, attach repeated evidence to the
+  same fact, and supersede a confirmed value only on explicit changes. Uncertain conflicts require review. The token dialog lets the installer select Codex or standalone server extraction.
 - The companion Octop dashboard worktree adds a Codex setup prompt to the token dialog. Its official
   installer URL requires the matching installer code before it can be used for a fresh installation.
 - **Validation** — The Memory full gate passed on SQLite and dedicated PostgreSQL (1,714 passed, three

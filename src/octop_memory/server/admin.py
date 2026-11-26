@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from octop_memory.server.control import ALL_SPACES, ControlStore, Session, SpaceConflictError, Token
+from octop_memory.server.registry import SpaceRegistry
 
 API_PREFIX = "/api/admin"
 
@@ -129,6 +130,17 @@ def build_admin_app(control: ControlStore, lifespan: Any = None) -> FastAPI:
             "token": plaintext,
             "token_hint": token.token_hint,
         }
+
+    @app.get(f"{API_PREFIX}/spaces/{{space_id}}/tokens/{{token_id}}/codex-status")
+    def codex_status(
+        space_id: str, token_id: str, request: Request, session: Session = Depends(require_session)
+    ) -> dict[str, Any]:
+        require_space(session, space_id)
+        if managed_token(token_id, session).space_id != space_id:
+            raise HTTPException(status_code=404, detail="token not found in space")
+
+        registry: SpaceRegistry = request.app.state.registry
+        return registry.call(space_id, lambda memory: memory.get_codex_terminal_status(token_id))
 
     @app.patch(f"{API_PREFIX}/tokens/{{token_id}}")
     def patch_token(token_id: str, body: TokenUpdate, session: Session = Depends(require_session)) -> dict[str, Any]:

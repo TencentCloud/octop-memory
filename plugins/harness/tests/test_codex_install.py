@@ -243,3 +243,50 @@ def test_delegate_review_uses_explicit_octop_endpoint_and_resets_on_switch(codex
     exec(installer._MERGE_PY, {})
     data = json.loads(config.read_text())
     assert data["codexExtraction"] == "codex" and "codexReviewUrl" not in data
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("node"), reason="uses a POSIX test uploader")
+def test_installed_stop_applies_published_mode_and_acknowledges_revision(codex_install, tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTOP_CODEX_PANEL_SYNC", "1")
+    monkeypatch.setenv("OCTOP_CODEX_REVIEW_URL", "https://octop.example/api/memory-mcp/codex-review")
+    monkeypatch.setenv("OCTOP_CODEX_EXTRACTION", "codex")
+    exec(installer._MERGE_PY, {})
+    hook = codex_install / "hooks/codex/stop-capture.mjs"
+    config = json.loads((codex_install / "hooks/config.json").read_text())
+    assert config["codexPanelSync"] and config["mcpServer"]
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("{}\n")
+    trace = tmp_path / "requests"
+    mock = tmp_path / "fetch.cjs"
+    mock.write_text("""
+const fs = require('node:fs');
+global.fetch = async (url, options) => {
+  if (String(url) !== 'https://octop.example/api/memory-mcp/codex-config' || options.redirect !== 'error') throw Error('unexpected URL');
+  fs.appendFileSync(process.env.TRACE, options.body + '\\n');
+  if (process.env.OFFLINE) throw Error('offline');
+  return new Response(process.env.PUBLISHED);
+};""")
+    uploader = tmp_path / "uploader"
+    uploader.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$UPLOAD_ARGS\"\nprintf '%s\\n' '{\"ok\":true,\"offset\":0,\"user_event_ids\":[\"evt_abcdef123456\"]}'")
+    uploader.chmod(0o700)
+    args = tmp_path / "args"
+    rev = "2026-11-25T09:00:00.000001+00:00"
+
+    def turn(published, offline=""):
+        env = {**os.environ, "OCTOP_PYTHON": str(uploader), "OCTOP_CAPTURE_SYNC": "1", "TRACE": str(trace),
+               "UPLOAD_ARGS": str(args), "PUBLISHED": json.dumps(published), "OFFLINE": offline,
+               "NODE_OPTIONS": f'--require "{mock}"'}
+        payload = {"session_id": "local", "turn_id": "user-turn", "hook_event_name": "Stop",
+                   "stop_hook_active": False, "transcript_path": str(transcript)}
+        output = subprocess.check_output(["node", str(hook)], input=json.dumps(payload), text=True, env=env)
+        upload = args.read_text().splitlines()
+        return upload[upload.index("--codex-mode") + 1], output
+
+    mode, prompt = turn({"revision": None})
+    assert mode == "codex"
+    instruction = json.loads(prompt)["reason"]
+    assert "zero to three" in instruction and "facts=[{event_id, kind, assertion, quote," in instruction
+    assert turn({"mode": "octop", "revision": rev}) == ("octop", "")
+    assert [json.loads(row)["applied_revision"] for row in trace.read_text().splitlines()] == [None, None, rev]
+    assert turn({}, "1") == ("octop", "")
+    assert turn({"revision": None})[0] == "codex"

@@ -133,6 +133,21 @@ RecommendedAction = Literal[
 DecidedBy = Literal["auto", "user", "rule", "portable"]
 
 
+@dataclass(frozen=True)
+class CodexFact:
+    """One independently updateable statement and the user's exact supporting words."""
+
+    event_id: str
+    kind: Literal["Preference", "Decision", "Fact"]
+    assertion: str
+    quote: str
+    scope: str = ""
+    aspect: str = ""
+    value: str = ""
+    relation: Literal["new", "repeat", "change", "conflict"] = "new"
+    target_id: str | None = None
+
+
 @dataclass
 class Candidate:
     """L1 Candidate — an LLM-extracted fact awaiting promotion to atom.

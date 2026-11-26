@@ -670,7 +670,7 @@ def _codex_update_mcp(text, scripts_dir, client_extraction):
     helper = hook_command(scripts_dir / "codex" / "mcp-headers.mjs")
     tools = ["memory_get"] if _codex_read_only() else ["memory_get", "memory_save"]
     if client_extraction:
-        tools.append("memory_propose")
+        tools.extend(["memory_propose", "memory_codex_related"])
     fields = {
         "url": _toml_string(ENTRY_URL),
         "http_headers_helper": _toml_string(helper),
@@ -740,7 +740,10 @@ def do_codex():
     if mode not in ("server", "codex", "octop"):
         raise ValueError("OCTOP_CODEX_EXTRACTION must be server, codex or octop")
     review_settings = {}
-    if mode == "octop" and not _codex_read_only():
+    same_credential = existing.get("url") == HOOK_URL and existing.get("token") == TOKEN
+    sync_default = "1" if same_credential and existing.get("codexPanelSync") else "0"
+    panel_sync = os.environ.get("OCTOP_CODEX_PANEL_SYNC", sync_default) == "1" and not _codex_read_only()
+    if (mode == "octop" or panel_sync) and not _codex_read_only():
         from urllib.parse import urlsplit
         url = os.environ.get("OCTOP_CODEX_REVIEW_URL") or (
             existing.get("codexReviewUrl") if existing.get("url") == HOOK_URL and existing.get("token") == TOKEN else ""
@@ -749,11 +752,15 @@ def do_codex():
         secure = parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"))
         if not secure or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or parsed.path != "/api/memory-mcp/codex-review":
             raise ValueError("OCTOP_CODEX_REVIEW_URL requires the Octop HTTPS (or loopback) codex-review endpoint")
-        review_settings = {"codexExtraction": "octop", "codexReviewUrl": url}
+        review_settings = {"codexExtraction": mode, "codexReviewUrl": url}
+    if panel_sync:
+        review_settings["codexPanelSync"] = True
     client_extraction = mode == "codex" and not _codex_read_only()
-    registered, server_name = _codex_update_mcp(updated, scripts_dir, client_extraction)
+    registered, server_name = _codex_update_mcp(updated, scripts_dir, client_extraction or panel_sync)
     _validate_codex_toml(registered)
-    _install_hooks(scripts_dir, "codex", {"codexExtraction": "codex", "mcpServer": server_name} if client_extraction else review_settings)
+    if client_extraction or panel_sync:
+        review_settings.update({"codexExtraction": mode, "mcpServer": server_name})
+    _install_hooks(scripts_dir, "codex", review_settings)
     if registered != text:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(registered, encoding="utf-8")

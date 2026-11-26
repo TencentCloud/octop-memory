@@ -1365,6 +1365,57 @@ class PostgresMemoryBackend:
                 return True
         return False
 
+    def codex_fact_targets(self, caller: str) -> list[dict[str, Any]]:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT c.id AS candidate_id, coalesce(a.id,c.id) AS target_id,
+                   c.assertion AS candidate_assertion, coalesce(a.assertion,c.assertion) AS assertion,
+               c.payload->>'scope' AS scope,
+                   c.payload->>'aspect' AS aspect, c.payload->>'value' AS value, c.status, a.id AS atom_id
+            FROM candidates c JOIN raw_events r ON r.id=c.quote_event_id AND r.namespace=c.namespace
+            LEFT JOIN atoms a ON a.candidate_id=c.id AND a.namespace=c.namespace
+            WHERE c.namespace = %s AND ((r."user"=%s AND r.host='codex') OR (r.host='manual'
+                 AND r."user" IS NULL AND r.event_type='manual' AND r.payload->'metadata'->>'caller'=%s))
+              AND ((a.id IS NULL AND c.status IN ('pending','needs_review'))
+                OR (a.id IS NOT NULL AND a.deprecated_at IS NULL))
+            ORDER BY c.created_at DESC""",
+                (self._ns, caller, caller),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def append_codex_evidence(self, candidate: Candidate, atom: AtomCard | None, event_id: str, quote: str) -> None:
+        with self._cursor() as cur:
+            if event_id in candidate.raw_event_ids:
+                return
+            refs = [*candidate.raw_event_ids, event_id]
+            quotes = dict(candidate.payload.get("evidence_quotes") or {})
+            quotes.setdefault(candidate.quote_event_id, candidate.verbatim_quote)
+            quotes[event_id] = quote
+            payload = {**candidate.payload, "evidence_quotes": quotes}
+            cur.execute(
+                "UPDATE candidates SET raw_event_ids=%s, payload=%s WHERE namespace = %s AND id=%s AND status=%s",
+                (Jsonb(refs), Jsonb(payload), self._ns, candidate.id, candidate.status),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("candidate was reviewed concurrently")
+            if atom is not None:
+                atom_refs = list(dict.fromkeys([*atom.raw_event_ids, event_id]))
+                cur.execute(
+                    "UPDATE atoms SET raw_event_ids=%s WHERE namespace = %s AND id=%s AND deprecated_at IS NULL",
+                    (Jsonb(atom_refs), self._ns, atom.id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("memory was updated concurrently")
+
+    def retire_codex_draft(self, candidate_id: str, successor: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE candidates SET status='rejected', promotion_reason=%s, decided_by='rule', decided_at=%s"
+                " WHERE namespace = %s AND id=%s AND status IN ('needs_review','pending','conflict')",
+                (f"superseded by {successor}", datetime.now(UTC), self._ns, candidate_id),
+            )
+            return bool(cur.rowcount == 1)
+
     def save_candidate(self, candidate: Candidate) -> None:
         """Insert a new candidate. Strict insert; duplicate id → UniqueViolation."""
         with self._cursor() as cur:
@@ -2071,7 +2122,7 @@ class PostgresMemoryBackend:
             row = cur.fetchone()
         return self._row_to_entity_page(row) if row else None
 
-    def latest_codex_review_evidence(self) -> CodexReviewEvidence | None:
+    def latest_codex_review_evidence(self, caller: str | None = None) -> CodexReviewEvidence | None:
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -2080,6 +2131,7 @@ class PostgresMemoryBackend:
                            payload->>'turn_id' AS turn_id, payload->>'source_model' AS model
                     FROM raw_events
                     WHERE namespace = %s AND host = 'codex' AND event_type = 'user_message'
+                      AND (%s::text IS NULL OR "user" = %s)
                       AND session_id IS NOT NULL AND "user" IS NOT NULL AND payload->>'turn_id' != ''
                       AND (payload->>'codex_review' = 'true' OR payload->>'source_model' != '')
                       AND payload->>'content_redacted' IS DISTINCT FROM 'true'
@@ -2088,12 +2140,12 @@ class PostgresMemoryBackend:
                 SELECT event_id, timestamp, session_id, caller, turn_id, model, (
                     SELECT count(*) FROM candidates c JOIN raw_events r
                       ON r.namespace = c.namespace AND r.id = c.quote_event_id
-                    WHERE c.namespace = latest.namespace AND c.extractor_version = 'host-quote/v1'
+                    WHERE c.namespace = latest.namespace AND c.extractor_version IN ('host-quote/v1', 'host-facts/v2')
                       AND c.session_id = latest.session_id AND r.session_id = latest.session_id
                       AND r."user" = latest.caller AND r.host = 'codex' AND r.payload->>'turn_id' = latest.turn_id
                 ) AS proposals FROM latest
             """,
-                (self._ns,),
+                (self._ns, caller, caller),
             )
             row = cur.fetchone()
         if row is None:

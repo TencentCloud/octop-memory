@@ -618,7 +618,7 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
     _, writer = control.create_token(space, "codex", ["read", "write"])
     _, other = control.create_token(space, "other", ["write"])
     _, reader = control.create_token(space, "reader", ["read"])
-    phrase = "For this project I prefer plain text."
+    phrase = "For this project I prefer plain text. Weekly reports use metric units."
     events = [
         {"event_type": role, "content": phrase, "payload": {"turn_id": turn, "src_key": str(i)}}
         for i, (role, turn) in enumerate(
@@ -635,6 +635,11 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
         assert review() is None
         registry.call(space, lambda memory: memory.record_extract_run({"failure_reason": "no LLM backend configured"}))
         first = _mcp_call(client, writer, "memory_capture", **capture)
+        assert _mcp_call(client, writer, "memory_codex_terminal_identity") == {
+            "space_id": space,
+            "token_id": control.authenticate(writer).token_id,
+        }
+        assert _mcp_result(client, reader, "memory_codex_terminal_identity")["isError"]
         [event] = first["user_event_ids"]
         assert review()["status"] == "captured"
         receipt = dict(session_id="codex:test", source="codex", extract=False, completed_review_turn="now")
@@ -652,6 +657,18 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
             result = _mcp_call(client, writer, "memory_capture", **receipt)
             assert result["accepted"] == 0 and not result["recorded"]
             assert review()["status"] == "finished_without_proposal"
+        admin = _admin_headers(client, control, space)
+
+        def status_for(secret):
+            token_id = control.authenticate(secret).token_id
+            response = client.get(f"/api/admin/spaces/{space}/tokens/{token_id}/codex-status", headers=admin)
+            assert response.status_code == 200
+            return response.json()
+
+        assert status_for(writer)["observed"]["mode"] == "codex"
+        assert status_for(writer)["last_run"]["mode"] == "codex"
+        assert status_for(other) == {"observed": None, "last_run": None}
+        completed = status_for(writer)["last_run"]
         assert registry.call(space, lambda memory: memory.backend.count_stats()["raw_events"]) == 3
         retry = _mcp_call(client, writer, "memory_capture", **capture)
         assert retry["accepted"] == 0 and retry["user_event_ids"] == [event]
@@ -663,6 +680,39 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
         assert result["status"] == "needs_review"
         assert _mcp_call(client, writer, "memory_propose", **proposal) == result
         assert review()["status"] == "proposed" and review()["proposals"] == 1
+        facts = [
+            {
+                "event_id": event,
+                "kind": "Preference",
+                "quote": "I prefer plain text",
+                "assertion": "The project prefers plain text.",
+            },
+            {
+                "event_id": event,
+                "kind": "Decision",
+                "quote": "Weekly reports use metric units",
+                "assertion": "Metric units are used in weekly reports.",
+            },
+        ]
+        for bad_facts in (
+            [facts[0], {**facts[1], "quote": "invented"}],
+            [facts[0], {**facts[1], "quote": " "}],
+            [facts[0], {**facts[1], "assertion": "   "}],
+            [facts[0], {**facts[1], "assertion": facts[1]["quote"] + "."}],
+            facts * 2,
+        ):
+            assert _mcp_result(client, writer, "memory_propose", facts=bad_facts)["isError"]
+        for denied in (other, reader):
+            assert _mcp_result(client, denied, "memory_propose", facts=facts)["isError"]
+        assert review()["proposals"] == 1
+        batch = _mcp_call(client, writer, "memory_propose", facts=facts)
+        assert len(set(batch["candidate_ids"])) == 2
+        candidates = registry.call(space, lambda memory: [memory.get_candidate(cid) for cid in batch["candidate_ids"]])
+        for candidate, fact in zip(candidates, facts, strict=True):
+            assert candidate.assertion == fact["assertion"] and candidate.verbatim_quote == fact["quote"]
+            assert candidate.status == "needs_review" and candidate.quote_event_id == event
+        assert _mcp_call(client, writer, "memory_propose", facts=facts[::-1]) == batch
+        assert review()["proposals"] == 3
         _mcp_call(
             client,
             writer,
@@ -682,11 +732,17 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
         )
         _mcp_call(client, writer, "memory_capture", **receipt)
         assert review()["status"] == "captured" and review()["model"] == "example" and not review()["proposals"]
+        # A pre-upgrade completion receipt still identifies its caller's last finished
+        # turn while the next turn awaits completion.
+        writer_id = control.authenticate(writer).token_id
+        registry.call(space, lambda memory: memory.set_meta(f"codex_terminal_run.{writer_id}", "null"))
+        assert status_for(writer)["last_run"] == completed
+        assert status_for(other)["last_run"] is None
         assert (
             registry.call(space, lambda memory: memory.get_last_extract_run())["failure_reason"]
             == "no LLM backend configured"
         )
-        assert _mcp_call(client, reader, "memory_candidates", status="needs_review")["count"] == 1
+        assert _mcp_call(client, reader, "memory_candidates", status="needs_review")["count"] == 3
         assert _mcp_call(client, reader, "memory_search", query="plain text")["hits"] == []
 
 

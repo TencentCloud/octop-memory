@@ -202,9 +202,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--turn-id", default="")
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--model", default="")
+    parser.add_argument("--codex-mode", choices=("codex", "octop", "server"))
     args = parser.parse_args(argv)
 
     config = _config(args.config)
+    if args.source == "codex" and config.get("codexPanelSync") and args.codex_mode:
+        config["codexExtraction"] = args.codex_mode
     client_extraction = args.source == "codex" and config.get("codexExtraction") == "codex"
     delegated = args.source == "codex" and config.get("codexExtraction") == "octop"
     queue = _review_jobs(args.state_dir or Path(args.config).parent, config) if delegated else None

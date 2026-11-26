@@ -54,7 +54,7 @@ local credential file as the hooks. Recall includes virtual paths for `memory_ge
 only `memory_get` and skips transcript capture. With `OCTOP_CODEX_EXTRACTION=codex`, writable Codex captures
 pass `extract=false` and request evidenced user event IDs for the active turn. Stop can continue that turn once.
 The authenticated `memory_propose` tool checks the caller and matches the quote against the stored user event
-before adding an idempotent `needs_review` candidate. The captured model slug is client-reported provenance.
+before storing one atomic batch of up to three separate assertions with their evidence. Redelivery returns the original candidate IDs for that turn. Legacy single-quote clients remain supported. The captured model slug is client-reported provenance.
 The review prompt asks the model to end with an empty final response for both submissions and skips.
 The continued Stop sends a completion receipt through `memory_capture`. Overview reads
 `last_codex_review` from eligible user events, the matching receipt and submitted quote candidates.
@@ -63,7 +63,7 @@ The continued Stop sends a completion receipt through `memory_capture`. Overview
 example of temporary-database writes, trees, and prompt recall. `scripts/` contains builds, deployments,
 real-host E2E, and maintenance launchers; deployments are not substitutes for unit tests.
 
-Codex delegated review (`OCTOP_CODEX_EXTRACTION=octop`) captures user evidence through the existing MCP and queues event IDs for the configured Octop review endpoint. The host uses `memory_codex_review_evidence` to verify the credential, space, turn and eligible source before calling its selected model. `memory_propose` persists the exact quote for human review.
+Codex delegated review (`OCTOP_CODEX_EXTRACTION=octop`) captures user evidence through the existing MCP and queues event IDs for the configured Octop review endpoint. The host uses `memory_codex_review_evidence` to verify the credential, space, turn and eligible source before calling its selected model. `memory_propose` validates each assertion's exact quote and uses the same transactional reconciliation as native review. Native review obtains policy and matching target IDs with `memory_codex_related`. Targets come from the same credential in the same space. Matching uses scoped attributes, values and target versions. Repetition appends evidence to the existing candidate and active atom. Explicit changes supersede a confirmed atom or retire an older draft. A conflicting suggestion leaves the old value active until a reviewer decides. Each turn receipt records the resulting IDs, including merges.
 
 ### Public API responsibilities
 
