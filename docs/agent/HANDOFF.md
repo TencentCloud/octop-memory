@@ -164,6 +164,7 @@ and 17 skips. Its PG approval tests exercise both scheduled deferral and explici
 - **⚠️ Recall/write path change** — Prompt recall and standalone MCP atom search use the threshold before charging the snippet budget. The default is zero. Thread caches distinguish the effective threshold so both tightening and relaxing it take effect on a repeated query.
 - **Verification** — The server test sends authenticated atom searches with the threshold disabled and enabled. Cached calls are compared with fresh calls in both directions and between positive thresholds. The lexical parity suite exercises actual SQLite and PostgreSQL reads independently of scheduling latency. Production per-source deadlines have separate tests.
 - **Local acceptance** — The library and harness suites passed on SQLite and dedicated PostgreSQL 16. The paired host replay used the same questions, corpus and result limit at multiple thresholds and restored its original configuration. Select a threshold using judged useful and irrelevant hits on the intended workload.
+- The [memory configuration reference](PROJECT_MAP.md#memory-configuration) identifies which callers read the threshold and which supply their own limits. The documentation checks, architecture checks, threshold regression suite, and standalone MCP threshold test passed.
 
 ### Pre-1.0 PostgreSQL schema recovery
 
