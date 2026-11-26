@@ -2294,3 +2294,95 @@ class TestLexicalFieldRecall:
         assert corrected is not None and corrected.search_terms == ["榆树"]
         assert service.recall("故障分诊").snippets == []
         assert len(model.calls) == 1
+
+
+def test_codex_reconciles_only_durable_evidence(backend: Any) -> None:
+    from dataclasses import replace
+
+    from octop_memory import Memory
+    from octop_memory.pipeline.promotion import PromotionWorker
+    from octop_memory.types import CodexFact
+
+    memory = Memory(namespace="review", backend=backend)
+
+    def fact(text: str, assertion: str, *, quote: str | None = None, **kwargs: Any) -> CodexFact:
+        event = memory.add_raw(
+            text,
+            event_type="user_message",
+            host="codex",
+            user="writer",
+            session_id="codex:one",
+            payload={"turn_id": text, "codex_review": True},
+        )
+        return CodexFact(
+            event.id, "Preference", assertion, quote or text, scope="user", aspect="report language", **kwargs
+        )
+
+    def submit(item: CodexFact) -> list[Any]:
+        return memory.propose_codex_facts([item], caller="writer")
+
+    a = fact("我平时看中文周报。", "用户习惯阅读中文版周报。", value="中文")
+    [draft] = submit(a)
+    b = fact("周报我一直看中文的。", "用户习惯于阅读中文周报。", value="中文", relation="repeat", target_id=draft.id)
+    assert submit(b)[0].id == submit(b)[0].id == draft.id
+    assert memory.get_candidate(draft.id).raw_event_ids == [a.event_id, b.event_id]
+    assert memory.related_codex_facts("someone_else", [a.quote]) == []
+    decided = PromotionWorker(memory).approve(memory.get_candidate(draft.id))
+    atom = decided.atom
+    assert atom is not None and len(atom.raw_event_ids) == 2
+    c = fact("我仍然要中文周报。", "用户持续选择中文版周报。", value="中文", relation="repeat", target_id=atom.id)
+    assert submit(c)[0].id == draft.id
+    assert memory.get_atom(atom.id).raw_event_ids == [a.event_id, b.event_id, c.event_id]
+    for temporary in ("这次周报改用英文，下次照旧。", "以后周报能不能用英文？"):
+        assert submit(fact(temporary, "用户要求英文周报。", quote="英文", relation="change", target_id=atom.id)) == []
+    assert (
+        submit(
+            fact(
+                "这次用日语，以后我的周报默认用中文。",
+                "用户长期选择中文周报。",
+                quote="以后我的周报默认用中文",
+                value="中文",
+                relation="repeat",
+                target_id=atom.id,
+            )
+        )[0].id
+        == draft.id
+    )
+    delayed = fact(
+        "以后我的周报改用法语。", "用户之后选择法语周报。", value="法语", relation="change", target_id=atom.id
+    )
+    uncertain = fact(
+        "我可能更喜欢英文周报。", "用户可能偏好阅读英文周报。", value="英文", relation="change", target_id=atom.id
+    )
+    assert submit(uncertain)[0].status == "conflict" and memory.get_atom(atom.id).deprecated_at is None
+    change = fact(
+        "以后我的周报改用英文。", "用户今后的周报采用英语。", value="英文", relation="change", target_id=atom.id
+    )
+    [changed] = submit(change)
+    assert changed.status == "promoted"
+    [live] = memory.list_atoms()
+    assert live.assertion == changed.assertion and live.quote_event_id == change.event_id
+    assert memory.get_atom(atom.id).superseded_by == live.id
+    assert submit(change)[0].id == changed.id
+    assert submit(b)[0].id == draft.id  # replay cannot resurrect a superseded value
+    wrong_scope = replace(
+        fact("以后甲组周报改用法语。", "甲组将改发法语周报。", value="法语", relation="change", target_id=live.id),
+        scope="甲组",
+    )
+    assert submit(wrong_scope)[0].status == "conflict"
+    assert [x.id for x in memory.list_atoms()] == [live.id]
+    stale = memory.get_candidate(submit(uncertain)[0].id)
+    with pytest.raises(ValueError, match="since changed"):
+        PromotionWorker(memory).approve(stale)
+    assert "codex_target" not in submit(wrong_scope)[0].payload
+    assert submit(delayed)[0].status == "conflict" and memory.get_atom(live.id).deprecated_at is None
+    manual = memory.store("用户偏好纯文字的周报版式。", metadata={"caller": "writer"})
+    owned = memory.related_codex_facts("writer", ["周报版式"])
+    assert manual.atom_id in {row["target_id"] for row in owned}
+    assert not memory.related_codex_facts("someone_else", ["周报版式"])
+    edited = memory.replace_atom(live.id, assertion="用户的周报改用双语。")
+    assert edited is not None
+    [matching] = [r for r in memory.related_codex_facts("writer", ["双语周报"]) if r["target_id"] == edited.id]
+    assert matching["value"] is None and matching["assertion"] == edited.assertion
+    independent = PromotionWorker(memory).approve(submit(wrong_scope)[0]).atom
+    assert independent is not None and memory.get_atom(edited.id).deprecated_at is None

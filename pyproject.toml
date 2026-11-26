@@ -45,6 +45,14 @@ langgraph-postgres = [
 
 cli = ["click>=8.0"]
 
+# Standalone HTTP MCP service
+server = [
+    "click>=8.0",
+    "mcp>=1.2,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
 # Local visualization dashboard
 dashboard = [
     "click>=8.0",
@@ -60,6 +68,10 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "click>=8.0",
+    # The standalone server tests import FastMCP/FastAPI modules.
+    "mcp>=1.2,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
     "langgraph>=0.2",
     "langgraph-checkpoint>=2.0",
     "langgraph-checkpoint-sqlite>=2.0",
@@ -149,6 +161,8 @@ ignore = ["PLC0415"]
 "src/octop_memory/pipeline/extractor/prompts.py" = ["E501"]
 # Raising the runtime minimum does not require rewriting the existing TypeVar API.
 "src/octop_memory/pipeline/recall/timeout.py" = ["UP047"]
+# FastAPI dependency defaults are the documented pattern.
+"src/octop_memory/server/admin.py" = ["B008"]
 
 [tool.mypy]
 strict = true
@@ -160,9 +174,23 @@ files = ["src/octop_memory"]
 # the missing import keeps `mypy --strict` honest either way, which a blanket
 # `type: ignore[import-not-found]` at each site cannot do (it flips to
 # "unused ignore" as soon as the package is installed).
-module = ["fastapi.*", "uvicorn", "psycopg", "psycopg.*", "psycopg_pool"]
+module = [
+    "fastapi.*",
+    "uvicorn",
+    "psycopg",
+    "psycopg.*",
+    "psycopg_pool",
+    "mcp",
+    "mcp.*",
+    "starlette",
+    "starlette.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "octop_memory.adapters.dashboard.server"
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = "octop_memory.server.*"
 disallow_untyped_decorators = false

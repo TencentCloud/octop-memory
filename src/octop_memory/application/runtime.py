@@ -505,6 +505,19 @@ class MemoryRuntime:
 
         return {
             "accepted": accepted,
+            **(
+                {
+                    "user_event_ids": [
+                        event.id
+                        for event in events_to_write
+                        if event.event_type == "user_message"
+                        and not event.payload.get("content_redacted")
+                        and event.payload.get("turn_id") == params["evidence_for_turn"]
+                    ]
+                }
+                if params.get("evidence_for_turn")
+                else {}
+            ),
             "skipped_recall_marker": skipped_marker,
             "skipped_too_short": skipped_short,
             "skipped_role": skipped_role,

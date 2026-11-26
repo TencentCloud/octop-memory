@@ -28,6 +28,13 @@ from octop_memory.adapters.cli.page_cmd import page_group
 from octop_memory.adapters.cli.portable_cmd import portable_group
 from octop_memory.adapters.cli.raw_cmd import raw_group
 from octop_memory.adapters.cli.recall_cmd import recall_cmd
+from octop_memory.adapters.cli.server_cmd import (
+    auth_group,
+    control_group,
+    serve,
+    space_group,
+    token_group,
+)
 from octop_memory.adapters.cli.thread_cmd import thread_group
 
 # dashboard is only available when the [dashboard] extra is installed
@@ -105,6 +112,11 @@ def main(
 
 
 main.add_command(config_group)
+main.add_command(serve)
+main.add_command(space_group)
+main.add_command(token_group)
+main.add_command(auth_group)
+main.add_command(control_group)
 main.add_command(memory_group)
 main.add_command(raw_group)
 main.add_command(candidate_group)

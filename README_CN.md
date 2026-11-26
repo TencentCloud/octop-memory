@@ -41,6 +41,11 @@
 
 > **值得记住的事，留得住，也带得走。** 保存、召回，让记忆在已适配的 Agent 之间延续。
 
+## 独立记忆服务
+
+运行 `octop-memory serve` 可通过 HTTP MCP 提供记忆工具。同一空间可为每个接入端分别签发和撤销 token。
+配置与管理 API 见[独立服务指南](SERVER.md)。
+
 <a id="highlights"></a>
 
 ## ✨ 亮点

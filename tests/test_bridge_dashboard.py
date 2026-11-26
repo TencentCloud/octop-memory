@@ -561,6 +561,7 @@ class TestStats:
         assert result["entities_delta_7d"] == 2
         assert result["episodes_delta_7d"] == 1
         assert result["last_extract_run"] is None
+        assert result["last_codex_review"] is None
 
     def test_growth_shape(self, memory: Memory, bridge: Bridge) -> None:
         _seed(memory)
