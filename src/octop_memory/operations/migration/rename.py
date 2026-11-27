@@ -271,6 +271,8 @@ def apply_rename(plan: RenamePlan, *, allow_overwrite: bool = False) -> int:
                 if step.is_fts_shadow:  # actually "is FTS virtual" — see plan_rename
                     continue
                 conn.execute(f'CREATE TABLE "{step.dst_table}" AS SELECT * FROM "{step.src_table}"')
+                if step.dst_table == f"{plan.dst_namespace}_raw_capture_keys":
+                    conn.execute(f'CREATE UNIQUE INDEX "{step.dst_table}_key" ON "{step.dst_table}" (capture_key)')
             # The copied {dst}_meta carries the source's index versions,
             # but its historical rows have not been indexed.
             meta_table = f"{plan.dst_namespace}_meta"

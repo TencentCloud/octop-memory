@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Codex 工具结果按结构化事件类型过滤，兼容仍发送 `role=user` 的旧客户端。默认只含工具结果的批次跳过提取。
+- MCP 在 SQLite 和 PostgreSQL 中按来源键持久去重。长会话重投可返回原证据 ID，旧 raw 及其引用保留。
+
 ## [1.0.7] - 2026-11-26
 
 ### 新增

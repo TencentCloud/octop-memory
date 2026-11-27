@@ -810,6 +810,115 @@ def test_capture_retry_is_idempotent(tmp_path):
         store.close()
 
 
+@pytest.fixture(params=["sqlite", "postgres"])
+def capture_space(request, control, tmp_path):
+    space = f"capture_{uuid4().hex[:10]}"
+    storage = (
+        {"dsn": request.getfixturevalue("postgres_dsn")}
+        if request.param == "postgres"
+        else {"db_path": str(tmp_path / "raw.sqlite")}
+    )
+    control.create_space(space, space, request.param, storage)
+    _, token = control.create_token(space, "terminal", ["read", "write"])
+    return space, token, {"control": {"sqlite": {"db_path": str(control.path)}}}
+
+
+def test_capture_filters_legacy_codex_tool_role(capture_space, monkeypatch):
+    _, token, config = capture_space
+    tool_text = "Diagnostic output with a distinctive toolonlymarker."
+    copied_text = "I pasted this terminal output from the very same command."
+    tool = {"event_type": "tool_result", "content": tool_text, "payload": {"role": "user", "src_key": "out"}}
+    pasted = {"event_type": "user_message", "content": copied_text, "payload": {"role": "user", "src_key": "msg"}}
+    with TestClient(build_app(config)) as client:
+        extract_calls = []
+
+        def record_extract(self, params):
+            extract_calls.append(params)
+            return {}
+
+        monkeypatch.setattr(mcp_module.MemoryRuntime, "extract", record_extract)
+        args = {"session_id": "rollout", "source": "codex"}
+        filtered = _mcp_call(client, token, "memory_capture", **args, events=[tool], extract=True)
+        assert filtered["accepted"] == 0
+        assert extract_calls == []
+        assert filtered["skipped"]["tool_result"] == 1
+        assert filtered["skipped"]["tool_result_bytes"] == len(tool_text.encode())
+        result = _mcp_call(client, token, "memory_capture", **args, events=[tool, pasted], extract=False)
+        assert result["accepted"] == 1 and result["skipped"]["tool_result"] == 1
+        rows = _mcp_call(client, token, "memory_raws", session_id="rollout")["events"]
+        assert [row["content"] for row in rows] == [copied_text]
+        assert _mcp_call(client, token, "memory_raws", query="toolonlymarker")["count"] == 0
+
+
+def test_capture_opted_in_tool_result_obeys_privacy(capture_space):
+    space, token, config = capture_space
+    config.update(
+        capture={"include_roles": ["tool"], "include_tool_results": True},
+        privacy={"store_tool_payloads": False, "redact_patterns": ["private-marker"]},
+    )
+    event = {
+        "event_type": "tool_result",
+        "content": "Tool returned private-marker for this run.",
+        "payload": {"src_key": "call-18", "role": "user", "output": "private-marker"},
+    }
+    with TestClient(build_app(config)) as client:
+        args = dict(source="codex", session_id="opted-in", events=[event], extract=False)
+        assert _mcp_call(client, token, "memory_capture", **args)["accepted"] == 1
+        assert _mcp_call(client, token, "memory_capture", **args)["skipped_duplicates"] == 1
+        [row] = client.app.state.registry.call(space, lambda m: m.list_raw(session_id="opted-in"))
+        assert "private-marker" not in row.content
+        assert row.payload == {"role": "tool"}
+
+
+def test_capture_receipts_reject_changed_revision_atomically(capture_space):
+    space, token, config = capture_space
+    original = {"content": "Preserve the original evidence.", "payload": {"src_key": "message-1"}}
+    changed = {**original, "content": "This body belongs to another revision."}
+    second = {**original, "payload": {"src_key": "message-2"}}
+    args = dict(source="codex", session_id="revision", extract=False)
+    with TestClient(build_app(config)) as client:
+
+        def conflicting(events):
+            result = _mcp_result(client, token, "memory_capture", **args, events=events)
+            assert result["isError"] and "different evidence" in result["content"][0]["text"]
+
+        conflicting([original, changed])
+        assert _mcp_call(client, token, "memory_capture", **args, events=[original])["accepted"] == 1
+        conflicting([second, changed])
+        [row] = client.app.state.registry.call(space, lambda memory: memory.list_raw(session_id="revision"))
+        assert row.content == original["content"]
+        assert _mcp_call(client, token, "memory_capture", **args, events=[second])["accepted"] == 1
+
+
+def test_capture_retry_after_5000_and_restart(capture_space, control):
+    space, token, config = capture_space
+    first = {
+        "event_type": "user_message",
+        "content": "A retained source for a durable decision.",
+        "payload": {"src_key": "first", "turn_id": "initial"},
+    }
+    args = {"session_id": "long", "source": "codex", "extract": False}
+    with TestClient(build_app(config)) as client:
+        result = _mcp_call(client, token, "memory_capture", **args, events=[first], evidence_for_turn="initial")
+        [raw_id] = result["user_event_ids"]
+        for start in range(0, 5001, 200):
+            batch = [{**first, "payload": {"src_key": f"later-{i}"}} for i in range(start, min(start + 200, 5001))]
+            assert _mcp_call(client, token, "memory_capture", **args, events=batch)["accepted"] == len(batch)
+    with TestClient(build_app(config)) as client:
+        retry = _mcp_call(client, token, "memory_capture", **args, events=[first], evidence_for_turn="initial")
+        assert (retry["accepted"], retry["skipped_duplicates"], retry["user_event_ids"]) == (0, 1, [raw_id])
+        registry = client.app.state.registry
+        rows = registry.call(space, lambda mem: mem.list_raw(session_id="long", limit=5010))
+        assert len(rows) == 5002
+        assert [r.id for r in rows if r.payload.get("src_key") == "first"] == [raw_id]
+        _, other = control.create_token(space, "other", ["write"])
+        assert _mcp_call(client, other, "memory_capture", **args, events=[first])["accepted"] == 1
+        assert (
+            _mcp_call(client, token, "memory_capture", **{**args, "session_id": "other"}, events=[first])["accepted"]
+            == 1
+        )
+
+
 def test_review_tools_require_review_scope(tmp_path):
     store = ControlStore(tmp_path / "control.db")
     store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})

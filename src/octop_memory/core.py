@@ -14,7 +14,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from octop_memory.domain import codex_review
-from octop_memory.storage.backends import _UNSET, CodexReviewBackend, MemoryBackend, SearchIndexMaintenance, _Unset
+from octop_memory.domain.capture import receipt_key, stored_event_key, verify_capture_revision
+from octop_memory.storage.backends import (
+    _UNSET,
+    CodexReviewBackend,
+    MemoryBackend,
+    RawCaptureBackend,
+    SearchIndexMaintenance,
+    _Unset,
+)
 from octop_memory.storage.driver_errors import DRIVER_ERRORS, VECTOR_ERRORS
 from octop_memory.types import (
     ActiveEntity,
@@ -346,6 +354,48 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
         constructing fully-populated ``RawEvent`` objects.
         """
         self._backend.save_raw_batch(events)
+
+    def capture_raw_batch(
+        self, caller: str, session: str, events: list[RawEvent], source_keys: list[str], *, policy: str = ""
+    ) -> tuple[int, list[RawEvent]]:
+        """Persist one MCP batch and return evidence in delivery order, including retries."""
+        backend = self._backend
+        if not isinstance(backend, RawCaptureBackend):
+            raise NotImplementedError("Backend does not support durable capture receipts")
+        if len(events) > 200 or any(e.user != caller or e.session_id != session for e in events):
+            raise ValueError("Capture batch must be scoped to one caller/session and at most 200 events")
+        keyed: dict[str, RawEvent] = {}
+        for key, event in zip(source_keys, events, strict=True):
+            previous = keyed.setdefault(receipt_key(caller, session, key), event)
+            verify_capture_revision(previous, event)
+        marker = receipt_key(caller, session)
+        with backend.transaction():
+            # The marker and backfill commit together. The first operation takes
+            # the writer lock on SQLite before any reads; PostgreSQL contenders
+            # wait on the unique key if another process is still bootstrapping.
+            if not backend.claim_capture_keys({marker: ""}):
+                for page in backend.capture_history_pages(caller, session):
+                    legacy: dict[str, str] = {}
+                    for row in page:
+                        legacy.setdefault(receipt_key(caller, session, stored_event_key(row)), row.id)
+                    backend.claim_capture_keys(legacy)
+
+            existing = backend.claim_capture_keys({key: e.id for key, e in keyed.items()}, policy)
+            fresh = [e for key, e in keyed.items() if key not in existing]
+            # A receipt outlives a pruned raw. A late retry cannot resurrect
+            # deleted content or return an evidence ID that no longer resolves.
+            saved = {e.id: e for e in backend.get_raw_events_by_ids([raw_id for raw_id, _ in existing.values()])}
+            evidence = []
+            for key, event in keyed.items():
+                if key not in existing:
+                    evidence.append(event)
+                    continue
+                raw_id, prior_policy = existing[key]
+                if prior := saved.get(raw_id):
+                    verify_capture_revision(prior, event, compare_content=prior_policy == policy)
+                    evidence.append(prior)
+            backend.save_raw_batch(fresh)
+            return len(fresh), evidence
 
     def get_raw(self, event_id: str) -> RawEvent | None:
         """Fetch a raw event by id, or ``None`` if not found."""
