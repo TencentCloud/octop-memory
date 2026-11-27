@@ -609,6 +609,47 @@ class MemoryBackend(Protocol):
         """
         ...
 
+    def delete_rejected_candidates(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete up to ``limit`` rejected candidates with ``decided_at < before``.
+
+        ``dry_run`` counts without deleting. Returns the row count.
+        """
+        ...
+
+    def delete_deprecated_atoms(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete up to ``limit`` deprecated atoms with ``deprecated_at < before``.
+
+        ``dry_run`` counts without deleting. Returns the row count.
+        """
+        ...
+
+    def delete_orphan_raw_events(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete up to ``limit`` unreferenced raw events with ``timestamp < before``.
+
+        Excludes raw events referenced by any atom or candidate in the same
+        namespace. Must not hydrate ``content`` / ``payload`` blobs.
+        ``dry_run`` counts without deleting. Returns the row count.
+        """
+        ...
+
     def get_meta(self, key: str) -> str | None:
         """Return a namespace-scoped meta value, or ``None`` if missing."""
         ...

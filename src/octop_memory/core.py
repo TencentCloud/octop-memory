@@ -1303,6 +1303,48 @@ class Memory(_CheckpointerBase):  # type: ignore[misc]
             dry_run=dry_run,
         )
 
+    def delete_rejected_candidates(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete expired rejected candidates."""
+        return self._backend.delete_rejected_candidates(
+            before=before,
+            limit=limit,
+            dry_run=dry_run,
+        )
+
+    def delete_deprecated_atoms(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete expired deprecated atoms."""
+        return self._backend.delete_deprecated_atoms(
+            before=before,
+            limit=limit,
+            dry_run=dry_run,
+        )
+
+    def delete_orphan_raw_events(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete expired unreferenced raw events without hydrating payloads."""
+        return self._backend.delete_orphan_raw_events(
+            before=before,
+            limit=limit,
+            dry_run=dry_run,
+        )
+
     def get_meta(self, key: str) -> str | None:
         return self._backend.get_meta(key)
 

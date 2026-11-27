@@ -2445,7 +2445,7 @@ class PostgresMemoryBackend:
     ) -> int:
         if not actions or limit < 1:
             return 0
-        params = (self._ns, before, list(actions), limit)
+        params = (self._ns, as_utc(before), list(actions), limit)
         subquery = """
             SELECT namespace, id FROM journal
             WHERE namespace = %s AND timestamp < %s AND action = ANY(%s)
@@ -2459,6 +2459,130 @@ class PostgresMemoryBackend:
                 return int(row["n"]) if row else 0
             cur.execute(
                 f"DELETE FROM journal WHERE (namespace, id) IN ({subquery})",
+                params,
+            )
+            deleted = int(cur.rowcount)
+        return deleted
+
+    def delete_rejected_candidates(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        params = (self._ns, as_utc(before), limit)
+        subquery = """
+            SELECT namespace, id FROM candidates
+            WHERE namespace = %s
+              AND status = 'rejected'
+              AND decided_at IS NOT NULL
+              AND decided_at < %s
+            ORDER BY decided_at ASC, id ASC
+            LIMIT %s
+        """
+        with self._cursor() as cur:
+            if dry_run:
+                cur.execute(f"SELECT COUNT(*) AS n FROM ({subquery}) sub", params)
+                row = cur.fetchone()
+                return int(row["n"]) if row else 0
+            cur.execute(
+                f"DELETE FROM candidates WHERE (namespace, id) IN ({subquery})",
+                params,
+            )
+            deleted = int(cur.rowcount)
+        return deleted
+
+    def delete_deprecated_atoms(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        params = (self._ns, as_utc(before), limit)
+        subquery = """
+            SELECT namespace, id FROM atoms
+            WHERE namespace = %s
+              AND deprecated_at IS NOT NULL
+              AND deprecated_at < %s
+            ORDER BY deprecated_at ASC, id ASC
+            LIMIT %s
+        """
+        with self._cursor() as cur:
+            if dry_run:
+                cur.execute(f"SELECT COUNT(*) AS n FROM ({subquery}) sub", params)
+                row = cur.fetchone()
+                return int(row["n"]) if row else 0
+            cur.execute(
+                f"DELETE FROM atoms WHERE (namespace, id) IN ({subquery})",
+                params,
+            )
+            deleted = int(cur.rowcount)
+        return deleted
+
+    def delete_orphan_raw_events(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        cutoff = as_utc(before)
+        params = (self._ns, self._ns, self._ns, self._ns, self._ns, cutoff, limit)
+        cte = """
+            WITH referenced AS (
+                SELECT quote_event_id AS raw_id
+                FROM atoms
+                WHERE namespace = %s AND quote_event_id IS NOT NULL AND quote_event_id <> ''
+                UNION
+                SELECT elem AS raw_id
+                FROM atoms,
+                     LATERAL jsonb_array_elements_text(
+                         CASE WHEN jsonb_typeof(raw_event_ids) = 'array' THEN raw_event_ids ELSE '[]'::jsonb END
+                     ) AS elem
+                WHERE namespace = %s AND elem <> ''
+                UNION
+                SELECT quote_event_id AS raw_id
+                FROM candidates
+                WHERE namespace = %s AND quote_event_id IS NOT NULL AND quote_event_id <> ''
+                UNION
+                SELECT elem AS raw_id
+                FROM candidates,
+                     LATERAL jsonb_array_elements_text(
+                         CASE WHEN jsonb_typeof(raw_event_ids) = 'array' THEN raw_event_ids ELSE '[]'::jsonb END
+                     ) AS elem
+                WHERE namespace = %s AND elem <> ''
+            ),
+            victims AS (
+                SELECT r.namespace, r.id
+                FROM raw_events r
+                WHERE r.namespace = %s
+                  AND r.timestamp < %s
+                  AND NOT EXISTS (SELECT 1 FROM referenced ref WHERE ref.raw_id = r.id)
+                ORDER BY r.timestamp ASC, r.id ASC
+                LIMIT %s
+            )
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM raw_events WHERE namespace = %s AND timestamp < %s LIMIT 1",
+                (self._ns, cutoff),
+            )
+            if cur.fetchone() is None:
+                return 0
+            if dry_run:
+                cur.execute(f"{cte} SELECT COUNT(*) AS n FROM victims", params)
+                row = cur.fetchone()
+                return int(row["n"]) if row else 0
+            cur.execute(
+                f"{cte} DELETE FROM raw_events WHERE (namespace, id) IN (SELECT namespace, id FROM victims)",
                 params,
             )
             deleted = int(cur.rowcount)

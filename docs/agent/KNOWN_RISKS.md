@@ -43,7 +43,7 @@ Remove obsolete descriptions after a fix, or retain a short Resolved note with i
   other processes, configurations, and host control-plane connections. Long transactions occupy the business pool;
   saturation waits for a bounded time, then errors rather than growing indefinitely. CI/release uses dedicated PG;
   a local environment skipping unavailable services is not PG acceptance.
-- `run_gc()` retention currently supports SQLite only; PG returns empty statistics. This is an existing capability gap.
+- `run_gc()` retention supports both SQLite and PostgreSQL through `MemoryBackend` retention methods.
   Row deletion, checkpoint retention, and physical reclamation are different operations; none proves a host schedules them automatically.
 - PostgreSQL checkpoint retention requires a caller-verified thread ID. To apply, callers must pause execution,
   resumes and forks for that thread across all hosts. A transaction-level writer reservation cannot see a graph

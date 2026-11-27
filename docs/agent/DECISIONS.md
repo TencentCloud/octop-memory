@@ -127,8 +127,7 @@ The library does not promise every host schedules them automatically; validate h
 ## ADR-028: Separate runtime summaries from decision journals (Accepted; supersedes ADR-023)
 
 `extract_run` overwrites a meta summary; journal retention depends on action, and GC returns counts rather than per-row entries.
-This prevents idle activity from inflating the audit table. Cost: summaries cannot replay every empty pass;
-see the risk list for the PG retention gap.
+This prevents idle activity from inflating the audit table. Cost: summaries cannot replay every empty pass.
 
 ## ADR-029: Seal parent graphs before pruning (Accepted)
 
@@ -152,7 +151,7 @@ Cost: this explicitly overrides automatic judgment and must not be treated as an
 
 Reset/reconnect and restore search_path only outside transactions; a failed explicit transaction stays failed.
 Avoid silently committing partial work. Cost: callers retry the whole transaction.
-The existing SQLite-only GC gap does not authorize silent backend capability divergence.
+Both SQLite and PostgreSQL must implement `MemoryBackend` retention methods rather than diverging silently.
 
 ## ADR-033: Namespace-first GIN (Accepted)
 

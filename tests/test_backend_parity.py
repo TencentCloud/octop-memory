@@ -2478,3 +2478,427 @@ def test_codex_reconciles_only_durable_evidence(backend: Any) -> None:
     assert matching["value"] is None and matching["assertion"] == edited.assertion
     independent = PromotionWorker(memory).approve(submit(wrong_scope)[0]).atom
     assert independent is not None and memory.get_atom(edited.id).deprecated_at is None
+
+
+class TestLifecycleGcParity:
+    """Lifecycle GC runs identically on SQLite and PostgreSQL."""
+
+    def test_gc_deletes_expired_and_keeps_recent_and_referenced(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old_cand = now - timedelta(days=60)
+        old_atom = now - timedelta(days=120)
+        old_raw = now - timedelta(days=200)
+        old_journal = now - timedelta(days=30)
+        recent = now - timedelta(days=1)
+
+        memory.add_raw_batch(
+            [
+                _make_raw(id="r-orphan-old", timestamp=old_raw, content="orphan-gc-marker-xyz"),
+                _make_raw(id="r-orphan-recent", timestamp=recent, content="recent-raw-keep"),
+                _make_raw(id="r-atom-quote", timestamp=old_raw, content="atom-quote-keep"),
+                _make_raw(id="r-atom-extra", timestamp=old_raw, content="atom-extra-keep"),
+                _make_raw(id="r-cand-quote", timestamp=old_raw, content="cand-quote-keep"),
+                _make_raw(id="r-cand-extra", timestamp=old_raw, content="cand-extra-keep"),
+            ]
+        )
+        memory.add_candidate(
+            _make_candidate(
+                id="c-rejected-old",
+                status="rejected",
+                raw_event_ids=["r-orphan-old"],
+                quote_event_id="r-orphan-old",
+                assertion="expired-rejected-marker-xyz",
+                created_at=old_cand,
+                decided_at=old_cand,
+            )
+        )
+        memory.add_candidate(
+            _make_candidate(
+                id="c-rejected-recent",
+                status="rejected",
+                raw_event_ids=["r-cand-extra"],
+                quote_event_id="r-cand-quote",
+                assertion="recent-rejected-keep",
+                created_at=recent,
+                decided_at=recent,
+            )
+        )
+        memory.add_candidate(
+            _make_candidate(
+                id="c-pending-old",
+                status="pending",
+                raw_event_ids=[],
+                quote_event_id="r-cand-quote",
+                assertion="old-pending-keep",
+                created_at=old_cand,
+                decided_at=None,
+            )
+        )
+        memory.add_atom(
+            _make_atom(
+                id="a-deprecated-old",
+                raw_event_ids=["r-orphan-old"],
+                quote_event_id="r-orphan-old",
+                assertion="expired-atom-marker-xyz",
+                occurred_at=old_atom,
+                created_at=old_atom,
+                superseded_by="a-active-old",
+                deprecated_at=old_atom,
+            )
+        )
+        memory.add_atom(
+            _make_atom(
+                id="a-deprecated-recent",
+                raw_event_ids=["r-atom-extra"],
+                quote_event_id="r-atom-quote",
+                assertion="recent-deprecated-keep",
+                occurred_at=recent,
+                created_at=recent,
+                superseded_by="a-active-old",
+                deprecated_at=recent,
+            )
+        )
+        memory.add_atom(
+            _make_atom(
+                id="a-active-old",
+                raw_event_ids=["r-atom-extra"],
+                quote_event_id="r-atom-quote",
+                assertion="active-atom-keep",
+                occurred_at=old_atom,
+                created_at=old_atom,
+                deprecated_at=None,
+            )
+        )
+        memory.append_journal(
+            JournalEntry(id="j-pipe-old-1", timestamp=old_journal, action="extract_run", actor="auto", note="old-1")
+        )
+        memory.append_journal(
+            JournalEntry(id="j-pipe-old-2", timestamp=old_journal, action="page_regen", actor="auto", note="old-2")
+        )
+        memory.append_journal(
+            JournalEntry(id="j-pipe-recent", timestamp=recent, action="extract_run", actor="auto", note="fresh")
+        )
+        memory.append_journal(
+            JournalEntry(id="j-decision-old", timestamp=old_journal, action="promote", actor="user", note="keep")
+        )
+
+        # Dry run counts what would be deleted without modifying any table.
+        # Note: r-orphan-old is still cited by c-rejected-old and a-deprecated-old during dry_run,
+        # so dry_run reports 0 orphan raws until those referencing rows are actually removed.
+        preview = run_gc(memory, dry_run=True, now=now)
+        assert preview.dry_run is True
+        assert preview.rejected_candidates_deleted == 1
+        assert preview.deprecated_atoms_deleted == 1
+        assert preview.orphan_raw_events_deleted == 0
+        assert preview.journal_rows_deleted == 2
+        assert memory.get_candidate("c-rejected-old") is not None
+        assert memory.get_atom("a-deprecated-old") is not None
+        assert memory.get_raw("r-orphan-old") is not None
+        assert len(memory.list_journal(limit=20)) == 4
+
+        # Actual run deletes expired candidate & atom first, making r-orphan-old unreferenced
+        # for sub-pass 3 in the same GC pass.
+        stats = run_gc(memory, dry_run=False, now=now)
+        assert stats.dry_run is False
+        assert stats.rejected_candidates_deleted == 1
+        assert stats.deprecated_atoms_deleted == 1
+        assert stats.orphan_raw_events_deleted == 1
+        assert stats.journal_rows_deleted == 2
+
+        # Verify deleted rows and FTS cleanup.
+        assert memory.get_candidate("c-rejected-old") is None
+        assert memory.get_atom("a-deprecated-old") is None
+        assert memory.get_raw("r-orphan-old") is None
+        assert memory.search_candidates("expired-rejected-marker-xyz") == []
+        assert memory.search_atoms("expired-atom-marker-xyz") == []
+        assert memory.search_raw("orphan-gc-marker-xyz") == []
+
+        # Verify surviving rows.
+        assert memory.get_candidate("c-rejected-recent") is not None
+        assert memory.get_candidate("c-pending-old") is not None
+        assert memory.get_atom("a-deprecated-recent") is not None
+        assert memory.get_atom("a-active-old") is not None
+        for keep_raw in ("r-orphan-recent", "r-atom-quote", "r-atom-extra", "r-cand-quote", "r-cand-extra"):
+            assert memory.get_raw(keep_raw) is not None, f"expected {keep_raw} to survive GC"
+        assert {j.id for j in memory.list_journal(limit=20)} == {"j-pipe-recent", "j-decision-old"}
+
+        # Idempotent second pass deletes nothing.
+        second = run_gc(memory, dry_run=False, now=now)
+        assert second.total_deleted == 0
+
+    def test_gc_does_not_starve_old_rows_behind_newer_entries(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old_cand = now - timedelta(days=60)
+        old_atom = now - timedelta(days=120)
+        recent = now - timedelta(days=1)
+
+        # Insert old expired rows first, then more newer/active rows than max_rows_per_pass.
+        for i in range(2):
+            memory.add_candidate(
+                _make_candidate(
+                    id=f"c-old-{i}",
+                    status="rejected",
+                    created_at=old_cand + timedelta(seconds=i),
+                    decided_at=old_cand + timedelta(seconds=i),
+                )
+            )
+            memory.add_atom(
+                _make_atom(
+                    id=f"a-old-{i}",
+                    occurred_at=old_atom + timedelta(seconds=i),
+                    created_at=old_atom + timedelta(seconds=i),
+                    deprecated_at=old_atom + timedelta(seconds=i),
+                )
+            )
+        for i in range(6):
+            memory.add_candidate(
+                _make_candidate(
+                    id=f"c-new-{i}",
+                    status="rejected",
+                    created_at=recent + timedelta(seconds=i),
+                    decided_at=recent + timedelta(seconds=i),
+                )
+            )
+            memory.add_atom(
+                _make_atom(
+                    id=f"a-live-{i}",
+                    occurred_at=recent + timedelta(seconds=i),
+                    created_at=recent + timedelta(seconds=i),
+                    deprecated_at=None,
+                )
+            )
+
+        stats = run_gc(memory, max_rows_per_pass=3, now=now)
+        assert stats.rejected_candidates_deleted == 2
+        assert stats.deprecated_atoms_deleted == 2
+        for i in range(2):
+            assert memory.get_candidate(f"c-old-{i}") is None
+            assert memory.get_atom(f"a-old-{i}") is None
+        for i in range(6):
+            assert memory.get_candidate(f"c-new-{i}") is not None
+            assert memory.get_atom(f"a-live-{i}") is not None
+
+    def test_gc_respects_max_rows_cap_and_include_orphan_raw_flag(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old = now - timedelta(days=200)
+
+        for i in range(5):
+            ts = old + timedelta(seconds=i)
+            memory.add_raw_batch([_make_raw(id=f"r-{i}", timestamp=ts, content=f"raw-{i}")])
+            memory.add_candidate(
+                _make_candidate(
+                    id=f"c-{i}",
+                    status="rejected",
+                    raw_event_ids=[],
+                    quote_event_id="",
+                    created_at=ts,
+                    decided_at=ts,
+                )
+            )
+            memory.add_atom(
+                _make_atom(
+                    id=f"a-{i}",
+                    raw_event_ids=[],
+                    quote_event_id="",
+                    occurred_at=ts,
+                    created_at=ts,
+                    deprecated_at=ts,
+                )
+            )
+            memory.append_journal(
+                JournalEntry(id=f"j-{i}", timestamp=ts, action="extract_run", actor="auto", note=f"n-{i}")
+            )
+
+        first = run_gc(memory, max_rows_per_pass=2, include_orphan_raw=False, now=now)
+        assert first.rejected_candidates_deleted == 2
+        assert first.deprecated_atoms_deleted == 2
+        assert first.orphan_raw_events_deleted == 0
+        assert first.journal_rows_deleted == 2
+
+        second = run_gc(memory, max_rows_per_pass=2, include_orphan_raw=True, now=now)
+        assert second.rejected_candidates_deleted == 2
+        assert second.deprecated_atoms_deleted == 2
+        assert second.orphan_raw_events_deleted == 2
+        assert second.journal_rows_deleted == 2
+
+    def test_gc_orphan_raw_short_circuits_when_no_expired_rows(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        recent = now - timedelta(days=1)
+        memory.add_raw_batch([_make_raw(id="r-recent-only", timestamp=recent, content="fresh")])
+        memory.add_atom(
+            _make_atom(
+                id="a-recent-only",
+                raw_event_ids=["r-recent-only"],
+                quote_event_id="r-recent-only",
+                occurred_at=recent,
+                created_at=recent,
+            )
+        )
+
+        assert run_gc(memory, orphan_raw_days=180, dry_run=True, now=now).orphan_raw_events_deleted == 0
+        assert run_gc(memory, orphan_raw_days=180, dry_run=False, now=now).orphan_raw_events_deleted == 0
+        assert memory.get_raw("r-recent-only") is not None
+
+    def test_gc_orphan_raw_does_not_hydrate_rows(self, backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old = now - timedelta(days=200)
+        memory.add_raw_batch([_make_raw(id="r-blob", timestamp=old, content="x" * 2000, payload={"blob": "y" * 2000})])
+
+        def boom(*_args: object, **_kwargs: object) -> list[object]:
+            raise AssertionError("orphan GC must not hydrate full raw rows")
+
+        monkeypatch.setattr(memory, "list_raw", boom)
+        stats = run_gc(memory, orphan_raw_days=180, now=now)
+        assert stats.orphan_raw_events_deleted == 1
+        assert memory.get_raw("r-blob") is None
+
+    def test_gc_rolls_back_inside_explicit_transaction(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle import run_gc
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old = now - timedelta(days=200)
+        memory.add_raw_batch([_make_raw(id="r-tx", timestamp=old, content="tx-raw")])
+        memory.add_candidate(
+            _make_candidate(
+                id="c-tx",
+                status="rejected",
+                raw_event_ids=[],
+                quote_event_id="",
+                created_at=old,
+                decided_at=old,
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="abort-gc-tx"), backend.transaction():
+            stats = run_gc(memory, now=now)
+            assert stats.rejected_candidates_deleted == 1
+            assert stats.orphan_raw_events_deleted == 1
+            raise RuntimeError("abort-gc-tx")
+
+        # Rollback restores deleted rows and leaves connection healthy for further writes.
+        assert memory.get_raw("r-tx") is not None
+        assert memory.get_candidate("c-tx") is not None
+        follow_up = memory.add_raw("after rollback write", event_type="manual")
+        assert memory.get_raw(follow_up.id) is not None
+
+    def test_idle_maintenance_runs_gc_on_backend(self, backend: Any) -> None:
+        from octop_memory.pipeline.lifecycle.maintenance import run_idle_maintenance
+
+        memory = Memory(namespace=backend._ns, backend=backend)
+        old = datetime(2020, 1, 1, tzinfo=UTC)
+        memory.add_candidate(
+            _make_candidate(
+                id="c-idle-old",
+                status="rejected",
+                raw_event_ids=[],
+                quote_event_id="",
+                created_at=old,
+                decided_at=old,
+            )
+        )
+        memory.append_journal(
+            JournalEntry(id="j-idle-old", timestamp=old, action="extract_run", actor="auto", note="stale")
+        )
+
+        stats = run_idle_maintenance(memory)
+        assert stats.gc_error is None
+        assert stats.gc is not None
+        assert stats.gc.rejected_candidates_deleted == 1
+        assert stats.gc.journal_rows_deleted == 1
+        assert memory.get_candidate("c-idle-old") is None
+
+
+def test_postgres_gc_isolates_namespaces(postgres_dsn: str) -> None:
+    """GC in one PostgreSQL namespace never deletes or reads references from another."""
+    from octop_memory.pipeline.lifecycle import run_gc
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+    ns_a = f"gc_iso_a_{uuid.uuid4().hex[:10]}"
+    ns_b = f"gc_iso_b_{uuid.uuid4().hex[:10]}"
+    be_a = PostgresMemoryBackend(namespace=ns_a, dsn=postgres_dsn)
+    be_b = PostgresMemoryBackend(namespace=ns_b, dsn=postgres_dsn)
+    try:
+        mem_a = Memory(namespace=ns_a, backend=be_a)
+        mem_b = Memory(namespace=ns_b, backend=be_b)
+        now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        old = now - timedelta(days=200)
+
+        # Identical IDs in both namespaces; only ns_b references the shared raw ID.
+        for mem in (mem_a, mem_b):
+            mem.add_raw_batch([_make_raw(id="shared-raw", timestamp=old, content="same-id-raw")])
+            mem.add_candidate(
+                _make_candidate(
+                    id="shared-cand",
+                    status="rejected",
+                    raw_event_ids=[],
+                    quote_event_id="",
+                    created_at=old,
+                    decided_at=old,
+                )
+            )
+            mem.add_atom(
+                _make_atom(
+                    id="shared-dep-atom",
+                    raw_event_ids=[],
+                    quote_event_id="",
+                    occurred_at=old,
+                    created_at=old,
+                    deprecated_at=old,
+                )
+            )
+            mem.append_journal(
+                JournalEntry(id="shared-journal", timestamp=old, action="extract_run", actor="auto", note="old")
+            )
+
+        mem_b.add_atom(
+            _make_atom(
+                id="b-live-atom",
+                raw_event_ids=["shared-raw"],
+                quote_event_id="shared-raw",
+                occurred_at=old,
+                created_at=old,
+                deprecated_at=None,
+            )
+        )
+
+        stats_a = run_gc(mem_a, now=now)
+        assert stats_a.rejected_candidates_deleted == 1
+        assert stats_a.deprecated_atoms_deleted == 1
+        assert stats_a.orphan_raw_events_deleted == 1
+        assert stats_a.journal_rows_deleted == 1
+
+        # ns_b must remain completely untouched.
+        assert mem_b.get_raw("shared-raw") is not None
+        assert mem_b.get_candidate("shared-cand") is not None
+        assert mem_b.get_atom("shared-dep-atom") is not None
+        assert mem_b.get_atom("b-live-atom") is not None
+        assert len(mem_b.list_journal(limit=10)) == 1
+
+        # Running GC in ns_b keeps shared-raw because b-live-atom references it.
+        stats_b = run_gc(mem_b, now=now)
+        assert stats_b.rejected_candidates_deleted == 1
+        assert stats_b.deprecated_atoms_deleted == 1
+        assert stats_b.orphan_raw_events_deleted == 0
+        assert stats_b.journal_rows_deleted == 1
+        assert mem_b.get_raw("shared-raw") is not None
+    finally:
+        be_a.purge_namespace()
+        be_b.purge_namespace()
+        be_a.close()
+        be_b.close()

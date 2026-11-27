@@ -83,6 +83,18 @@ def locked_sqlite_operation[**P, R](
     return guarded
 
 
+def _json_id_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, str) and item]
+
+
 class SqliteMemoryBackend:
     """Memory backend using SQLite + FTS5.
 
@@ -2266,7 +2278,7 @@ class SqliteMemoryBackend:
             return 0
         ns = self._ns
         placeholders = ",".join("?" * len(actions))
-        params: list[Any] = [before.isoformat(), *actions, limit]
+        params: list[Any] = [as_utc(before).isoformat(), *actions, limit]
         subquery = f"""
             SELECT id FROM {ns}_journal
             WHERE timestamp < ? AND action IN ({placeholders})
@@ -2279,6 +2291,122 @@ class SqliteMemoryBackend:
         cur = self._conn.execute(f"DELETE FROM {ns}_journal WHERE id IN ({subquery})", params)
         self._commit()
         return int(cur.rowcount)
+
+    @locked_sqlite_operation
+    def delete_rejected_candidates(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        ns = self._ns
+        params: list[Any] = [as_utc(before).isoformat(), limit]
+        subquery = f"""
+            SELECT id FROM {ns}_candidates
+            WHERE status = 'rejected'
+              AND decided_at IS NOT NULL
+              AND decided_at <> ''
+              AND decided_at < ?
+            ORDER BY decided_at ASC, id ASC
+            LIMIT ?
+        """
+        if dry_run:
+            row = self._conn.execute(f"SELECT COUNT(*) FROM ({subquery})", params).fetchone()
+            return int(row[0]) if row else 0
+        cur = self._conn.execute(f"DELETE FROM {ns}_candidates WHERE id IN ({subquery})", params)
+        self._commit()
+        return int(cur.rowcount)
+
+    @locked_sqlite_operation
+    def delete_deprecated_atoms(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        ns = self._ns
+        params: list[Any] = [as_utc(before).isoformat(), limit]
+        subquery = f"""
+            SELECT id FROM {ns}_atoms
+            WHERE deprecated_at IS NOT NULL
+              AND deprecated_at <> ''
+              AND deprecated_at < ?
+            ORDER BY deprecated_at ASC, id ASC
+            LIMIT ?
+        """
+        if dry_run:
+            row = self._conn.execute(f"SELECT COUNT(*) FROM ({subquery})", params).fetchone()
+            return int(row[0]) if row else 0
+        cur = self._conn.execute(f"DELETE FROM {ns}_atoms WHERE id IN ({subquery})", params)
+        self._commit()
+        return int(cur.rowcount)
+
+    @locked_sqlite_operation
+    def delete_orphan_raw_events(
+        self,
+        *,
+        before: datetime,
+        limit: int,
+        dry_run: bool = False,
+    ) -> int:
+        if limit < 1:
+            return 0
+        ns = self._ns
+        cutoff_iso = as_utc(before).isoformat()
+        if (
+            self._conn.execute(
+                f"SELECT 1 FROM {ns}_raw_events WHERE timestamp < ? LIMIT 1",
+                (cutoff_iso,),
+            ).fetchone()
+            is None
+        ):
+            return 0
+
+        referenced: set[str] = set()
+        for row in self._conn.execute(f"SELECT quote_event_id, raw_event_ids FROM {ns}_atoms"):
+            quote_id = row["quote_event_id"]
+            if quote_id:
+                referenced.add(str(quote_id))
+            referenced.update(_json_id_list(row["raw_event_ids"]))
+        for row in self._conn.execute(f"SELECT quote_event_id, raw_event_ids FROM {ns}_candidates"):
+            quote_id = row["quote_event_id"]
+            if quote_id:
+                referenced.add(str(quote_id))
+            referenced.update(_json_id_list(row["raw_event_ids"]))
+
+        victims: list[str] = []
+        for row in self._conn.execute(
+            f"SELECT id FROM {ns}_raw_events WHERE timestamp < ? ORDER BY timestamp ASC, id ASC",
+            (cutoff_iso,),
+        ):
+            raw_id = str(row["id"])
+            if raw_id in referenced:
+                continue
+            victims.append(raw_id)
+            if len(victims) >= limit:
+                break
+
+        if dry_run or not victims:
+            return len(victims)
+
+        deleted = 0
+        chunk_size = 500
+        for start in range(0, len(victims), chunk_size):
+            batch = victims[start : start + chunk_size]
+            placeholders = ",".join("?" * len(batch))
+            cur = self._conn.execute(
+                f"DELETE FROM {ns}_raw_events WHERE id IN ({placeholders})",
+                batch,
+            )
+            deleted += int(cur.rowcount)
+        self._commit()
+        return deleted
 
     @locked_sqlite_operation
     def get_meta(self, key: str) -> str | None:
