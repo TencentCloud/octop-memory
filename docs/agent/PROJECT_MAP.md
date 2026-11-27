@@ -49,6 +49,12 @@ Paths in this table are relative to `src/octop_memory/`.
 
 Root `plugins/<host>/` contains external adapters: OpenClaw, Hermes, and the terminal client installer in `plugins/harness`. See the [integration guide](../integrations.md).
 
+MCP capture normalizes each source key in `domain/capture.py`. After admission and redaction,
+`Memory.capture_raw_batch` commits new raws and unique per-caller/session receipts together.
+On first delivery, an atomic marker guards a streamed backfill of legacy rows. Existing duplicate
+evidence IDs remain readable. Receipts survive raw pruning and database restarts. Low-level
+append and unkeyed native turn capture retain their existing semantics.
+
 The Codex installer registers a Streamable HTTP MCP server in `config.toml`. Its header helper reads the same
 local credential file as the hooks. Recall includes virtual paths for `memory_get`. Read-only setup exposes
 only `memory_get` and skips transcript capture. With `OCTOP_CODEX_EXTRACTION=codex`, writable Codex captures
@@ -130,7 +136,7 @@ LLM settings. The other rows below describe the embedded runtime. Consult the
 | `recall.raw_policy`, `recall.host_files_policy` | `"fallback"`, `"include"` | Multi-source search can use raw events (`never`, `fallback`, `always`) and host files (`off`, `include`, `only`). Automatic prompt recall stays atom-only. |
 | `recall.layer_order` | `["atom", "host_file", "page", "raw"]` | Order result layers before applying the final tool search limit. Hits within a layer keep their relative order. |
 | `capture.include_roles`, `capture.min_message_chars`, `capture.skip_memory_echo` | `["user", "assistant"]`, `12`, `true` | Select eligible roles, set a minimum visible length (CJK-weighted), and skip messages containing recall-injection markers. |
-| `capture.include_tool_calls`, `capture.include_tool_results`, `privacy.store_tool_payloads` | All `false` | Keep tool-call fields, admit tool results, and retain tool payloads respectively. Capturing tool results also requires `tool` in `include_roles`. |
+| `capture.include_tool_calls`, `capture.include_tool_results`, `privacy.store_tool_payloads` | All `false` | Keep tool-call fields, admit tool results, and retain tool payloads respectively. The standalone MCP loads the server capture/privacy sections at startup. Structured `tool_result` takes precedence over legacy payload roles. Capturing tool results also requires `tool` in `include_roles`. |
 | `privacy.redact_secrets`, `privacy.redact_patterns`, `privacy.store_raw_content` | `true`, `[]`, `true` | Apply built-in secret redaction, add regex patterns, and choose whether captured events retain raw text. These affect subsequent captures. |
 | `extraction.max_candidates`, `extraction.max_tokens` | `20`, `null` | Candidate budget and completion-token cap for the runtime extractor. A positive token cap overrides its built-in budget of 2,048 tokens. |
 | `extraction.keep_rules`, `extraction.skip_rules` | Both `null` | Optional text for the extractor describing what to retain or skip. Each rule is trimmed to 2,000 characters. |

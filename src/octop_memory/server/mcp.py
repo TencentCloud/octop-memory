@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from contextlib import suppress
 from contextvars import ContextVar
@@ -17,6 +16,7 @@ from pydantic import Field
 from octop_memory.application.path_projection import raw_to_path
 from octop_memory.application.runtime import MemoryRuntime
 from octop_memory.core import Memory
+from octop_memory.domain.capture import capture_event_key
 from octop_memory.domain.codex_review import POLICY as CODEX_REVIEW_POLICY
 from octop_memory.domain.raw_search import raw_search_text
 from octop_memory.server.registry import SpaceRegistry
@@ -26,35 +26,6 @@ _current_space: ContextVar[str] = ContextVar("octop_memory_space", default="")
 _current_scopes: ContextVar[tuple[str, ...]] = ContextVar("octop_memory_scopes", default=())
 _current_token: ContextVar[str] = ContextVar("octop_memory_token_id", default="")
 _current_client_name: ContextVar[str] = ContextVar("octop_memory_client", default="")
-
-
-def _event_key(payload: dict[str, Any], event: dict[str, Any]) -> str:
-    """Stable per-event id inside a space/session scope (client ``src_key`` first)."""
-    src_key = str((payload or {}).get("src_key") or "").strip()
-    if src_key:
-        return f"src:{src_key}"
-    digest = hashlib.sha256()
-    digest.update(str(event.get("event_type") or "").encode("utf-8", "replace"))
-    digest.update(b"\x00")
-    digest.update(str(event.get("content") or "").encode("utf-8", "replace"))
-    digest.update(b"\x00")
-    digest.update(str(event.get("timestamp_iso") or "").encode("utf-8", "replace"))
-    return f"hash:{digest.hexdigest()}"
-
-
-def _raw_key(raw: Any) -> str:
-    payload = raw.payload if isinstance(getattr(raw, "payload", None), dict) else {}
-    stored = str(payload.get("octop_event_key") or "").strip()
-    if stored:
-        return stored
-    return _event_key(
-        payload,
-        {
-            "event_type": raw.event_type,
-            "content": raw.content,
-            "timestamp_iso": raw.timestamp.isoformat() if raw.timestamp else "",
-        },
-    )
 
 
 def _require(scope: str) -> None:
@@ -332,7 +303,6 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         def _run(memory: Any) -> dict[str, Any]:
             runtime = _runtime(memory)
             normalized: list[dict[str, Any]] = []
-            seen: set[str] = set()
             for item in payload:
                 body = item.get("content")
                 if not isinstance(body, str) or not body.strip():
@@ -358,50 +328,24 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                 timestamp_iso = item.get("timestamp_iso")
                 if isinstance(timestamp_iso, str) and timestamp_iso:
                     event["timestamp_iso"] = timestamp_iso
-                key = _event_key(event["payload"], event)
-                if key in seen:
-                    continue
-                seen.add(key)
-                event["payload"]["octop_event_key"] = key
+                event["payload"]["octop_event_key"] = capture_event_key(event["payload"], event)
                 normalized.append(event)
             if not normalized:
                 raise ValueError("events is empty after dropping blank entries")
-            previous = memory.list_raw(session_id=effective_session, user=token_id, limit=5000)
-            known = {_raw_key(raw) for raw in previous}
-            evidence = {}
-            if evidence_for_turn:
-                evidence["user_event_ids"] = [
-                    raw.id
-                    for raw in reversed(previous)
-                    if raw.event_type == "user_message"
-                    and not raw.payload.get("content_redacted")
-                    and raw.payload.get("turn_id") == evidence_for_turn
-                    and (not octop_model_review or raw.payload.get("octop_model_review"))
-                    and _raw_key(raw) in seen
-                ]
-            fresh = [event for event in normalized if event["payload"]["octop_event_key"] not in known]
-            duplicates = len(normalized) - len(fresh)
-            if not fresh:
-                return {
-                    "marker": "[octop memory capture]",
-                    "recorded": False,
-                    "session_id": effective_session,
-                    "accepted": 0,
-                    **evidence,
-                    "skipped_duplicates": duplicates,
-                    "note": "all events already recorded for this session; retry is idempotent",
-                }
             result = runtime.capture(
                 {
                     "session_id": effective_session,
                     "thread_id": thread_id,
                     "user": token_id,
                     "host": source or "mcp",
-                    "events": fresh,
+                    "events": normalized,
                     "evidence_for_turn": evidence_for_turn,
-                }
+                    "octop_model_review": octop_model_review,
+                },
+                idempotent=True,
             )
-            if extract:
+            accepted = int(result["accepted"])
+            if extract and accepted:
                 with suppress(Exception):
                     run = runtime.extract({"session_id": effective_session, "promote": False})
                     if source == "codex" and run.get("llm_calls") and not run.get("failure_reason"):
@@ -415,7 +359,6 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                                 }
                             ),
                         )
-            accepted = int(result.get("accepted") or 0)
             if accepted and source == "codex" and (extract or evidence_for_turn):
                 mode = "server" if extract else ("octop" if octop_model_review else "codex")
                 memory.set_meta(
@@ -427,19 +370,22 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
                         }
                     ),
                 )
-            if evidence_for_turn:
-                evidence["user_event_ids"].extend(result.get("user_event_ids", []))
             return {
                 "marker": "[octop memory capture]",
                 "recorded": accepted > 0,
                 "session_id": effective_session,
                 "accepted": accepted,
-                **evidence,
-                "skipped_duplicates": duplicates,
+                **({"user_event_ids": result["user_event_ids"]} if evidence_for_turn else {}),
+                "skipped_duplicates": result["skipped_duplicates"],
+                **(
+                    {"note": "all events already recorded for this session; retry is idempotent"}
+                    if result["skipped_duplicates"] == len(normalized)
+                    else {}
+                ),
                 "skipped": {
                     key.removeprefix("skipped_"): value
                     for key, value in result.items()
-                    if key.startswith("skipped_") and value
+                    if key.startswith("skipped_") and key != "skipped_duplicates" and value
                 },
             }
 

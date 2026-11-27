@@ -101,6 +101,17 @@ def test_events_are_batched_with_stable_session_and_eof(monkeypatch, tmp_path, c
     assert len(keys) == len(set(keys)) == 401
 
 
+def test_codex_parser_classifies_native_tool_outputs():
+    kinds = ("function_call_output", "local_shell_call_output", "custom_tool_call_output")
+    transcript = "\n".join(
+        json.dumps({"type": "response_item", "payload": {"type": kind, "output": "sample output"}})
+        for kind in kinds
+    )
+    events = octop_ingest._PARSERS["codex"](transcript).events
+    assert [(e.event_type, e.payload["role"]) for e in events] == [("tool_result", "tool")] * len(kinds)
+    assert (LIB / "transcript.py").read_bytes() == (PLUGIN_ROOT / "octopmemory_harness" / "transcript.py").read_bytes()
+
+
 def test_codex_only_requests_evidence_for_the_hook_turn(monkeypatch, tmp_path, capsys):
     cfg = _config(tmp_path)
     cfg.write_text(json.dumps({"url": "http://stub", "token": "test", "codexExtraction": "codex"}))

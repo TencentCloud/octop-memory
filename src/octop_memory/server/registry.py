@@ -23,8 +23,9 @@ class SpaceRegistry:
         self._control = control
         self._config = config or control.config
         self._runtime_config: dict[str, Any] = {}
-        if isinstance(self._config.get("llm"), dict):
-            self._runtime_config["llm"] = self._config["llm"]
+        for section in ("llm", "capture", "privacy"):
+            if isinstance(self._config.get(section), dict):
+                self._runtime_config[section] = self._config[section]
         recall = self._config.get("recall")
         if isinstance(recall, dict) and "min_token_coverage" in recall:
             self._runtime_config["recall"] = {"min_token_coverage": recall["min_token_coverage"]}

@@ -848,6 +848,78 @@ def backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
         be.close()
 
 
+def test_capture_receipts_bootstrap_legacy_and_roll_back(backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    memory = Memory(namespace=backend._ns, backend=backend)
+    legacy = memory.add_raw(
+        "An existing source message.",
+        event_type="user_message",
+        host="codex",
+        session_id="s",
+        user="client",
+        payload={"octop_event_key": "src:first"},
+    )
+    # More than one bootstrap page, including an already-duplicated legacy key.
+    backend.save_raw_batch([replace(legacy, id=f"legacy-{i}", payload={"src_key": str(i)}) for i in range(205)])
+    backend.save_raw(replace(legacy, id="legacy-copy"))
+    new = replace(legacy, id="new", content="A new source message.")
+    original = backend.save_raw_batch
+
+    def interrupt(events: list[RawEvent]) -> None:
+        original(events)
+        raise RuntimeError("simulated failed commit")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(backend, "save_raw_batch", interrupt)
+        with pytest.raises(RuntimeError, match="failed commit"):
+            memory.capture_raw_batch("client", "s", [new], ["src:new"])
+    assert backend.get_raw("new") is None
+    accepted, rows = memory.capture_raw_batch("client", "s", [legacy, new], ["src:first", "src:new"])
+    assert accepted == 1
+    assert rows[0].id in {legacy.id, "legacy-copy"} and rows[1].id == "new"
+    accepted, rows = memory.capture_raw_batch("client", "s", [replace(new, id="retry")], ["src:204"])
+    assert accepted == 0 and rows[0].id == "legacy-204"
+    assert backend.get_raw(legacy.id) and backend.get_raw("legacy-copy")
+    backend.delete_raw_before(datetime.now(UTC) + timedelta(days=1))
+    assert memory.capture_raw_batch("client", "s", [new], ["src:new"]) == (0, [])
+
+
+def test_capture_receipts_race_across_connections(backend: Any) -> None:
+    from octop_memory.application.runtime import MemoryRuntime
+    from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+    peer = (
+        SqliteMemoryBackend(backend._ns, backend._db_path)
+        if isinstance(backend, SqliteMemoryBackend)
+        else PostgresMemoryBackend(backend._ns, PG_DSN)
+    )
+    barrier = threading.Barrier(2)
+
+    def capture(memory: Memory) -> dict[str, Any]:
+        runtime = MemoryRuntime(memory)
+        event = {
+            "event_type": "user_message",
+            "content": "Same delivery on independent connections.",
+            "payload": {"turn_id": "t", "octop_event_key": "src:message"},
+        }
+        barrier.wait(timeout=10)
+        return runtime.capture(
+            {"host": "codex", "user": "caller", "session_id": "session", "events": [event], "evidence_for_turn": "t"},
+            idempotent=True,
+        )
+
+    try:
+        memories = [Memory(namespace=backend._ns, backend=be) for be in (backend, peer)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(capture, memories))
+        assert sorted(r["accepted"] for r in results) == [0, 1]
+        assert results[0]["user_event_ids"] == results[1]["user_event_ids"]
+        assert len(backend.list_raw(session_id="session")) == 1
+    finally:
+        peer.close()
+
+
 def _expect_duplicate(backend: Any) -> type[BaseException]:
     """The error a strict re-insert raises on this backend."""
     if isinstance(backend, SqliteMemoryBackend):

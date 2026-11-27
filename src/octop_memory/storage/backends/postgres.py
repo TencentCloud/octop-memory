@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -52,7 +52,7 @@ _RAW_SEARCH_INDEX = "raw_events_text_v1_fts"
 
 # Version of the shared-table layout, stamped into ``meta``. Bump when the
 # DDL below changes shape and add a corresponding migration.
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 # Arbitrary constant identifying "octop-memory DDL" for pg_advisory_xact_lock,
 # so concurrent Memory instances (multiple agents / processes booting at once)
@@ -287,6 +287,15 @@ class PostgresMemoryBackend:
                     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                     content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
                     PRIMARY KEY (namespace, id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS raw_capture_keys (
+                    namespace TEXT NOT NULL,
+                    capture_key TEXT NOT NULL,
+                    raw_id TEXT NOT NULL,
+                    policy TEXT,
+                    PRIMARY KEY (namespace, capture_key)
                 )
             """)
             _ensure_index(
@@ -978,7 +987,7 @@ class PostgresMemoryBackend:
             postgres_legacy.mark_purged(cur, self._ns)
             # Children before parents: memory_nodes self-FK is the only one.
             cur.execute("SET CONSTRAINTS ALL DEFERRED")
-            for table in _TABLES:
+            for table in ("raw_capture_keys", *_TABLES):
                 cur.execute(f"DELETE FROM {table} WHERE namespace = %s", (self._ns,))
                 total += _rowcount(cur.rowcount)
         return total
@@ -1235,6 +1244,37 @@ class PostgresMemoryBackend:
                 """,
                 rows,
             )
+
+    def claim_capture_keys(
+        self, entries: dict[str, str], policy: str | None = None
+    ) -> dict[str, tuple[str, str | None]]:
+        if not entries:
+            return {}
+        with self._cursor() as cur:
+            cur.execute(
+                """INSERT INTO raw_capture_keys (namespace, capture_key, raw_id, policy)
+                   SELECT %s, k, v, %s FROM unnest(%s::text[], %s::text[]) AS t(k,v) ORDER BY k
+                   ON CONFLICT (namespace, capture_key) DO NOTHING RETURNING capture_key""",
+                (self._ns, policy, list(entries), list(entries.values())),
+            )
+            conflicts = entries.keys() - {row["capture_key"] for row in cur.fetchall()}
+            if not conflicts:
+                return {}
+            cur.execute(
+                "SELECT capture_key, raw_id, policy FROM raw_capture_keys "
+                "WHERE namespace = %s AND capture_key = ANY(%s)",
+                (self._ns, list(conflicts)),
+            )
+            return {row["capture_key"]: (row["raw_id"], row["policy"]) for row in cur.fetchall()}
+
+    def capture_history_pages(self, user: str, session: str) -> Iterator[list[RawEvent]]:
+        with self.transaction(), self._connection() as conn, conn.cursor(name="raw_capture_backfill") as cur:
+            cur.execute(
+                'SELECT * FROM raw_events WHERE namespace = %s AND "user" = %s AND session_id = %s ORDER BY id',
+                (self._ns, user, session),
+            )
+            while rows := cur.fetchmany(200):
+                yield [self._row_to_raw(row) for row in rows]
 
     def get_raw(self, event_id: str) -> RawEvent | None:
         with self._cursor() as cur:

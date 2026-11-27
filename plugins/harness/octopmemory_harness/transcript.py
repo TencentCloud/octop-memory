@@ -712,9 +712,7 @@ def parse_codex_text(text: str) -> ParsedSession:
                 payload={
                     "source": DEFAULT_HOST,
                     "src_key": key,
-                    "role": "user"
-                    if event_type in ("user_message", "tool_result")
-                    else "assistant",
+                    "role": {"user_message": "user", "tool_result": "tool"}.get(event_type, "assistant"),
                     "sidechain": False,
                     **{name: value for name, value in extra.items() if value is not None},
                 },

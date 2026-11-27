@@ -89,6 +89,23 @@ Tool contract stays compatible with the Octop-hosted server: `memory_search`,
 idempotent per `(space, session, caller, src_key)`), `memory_raws`,
 `memory_candidates`, `memory_extract`, `memory_promote`, `memory_reject`.
 
+A capture receipt is written in the same transaction as its raw. The first accepted
+batch for an existing caller/session indexes its historical rows once. Roll the
+MCP writers serving a space forward together so all subsequent deliveries use
+receipts. For full restore, include the receipt table with the raw store. Pruning
+a raw retains its receipt, so a retry cannot recreate the deleted evidence.
+Clients should send a stable `src_key` per event. The compatibility fallback hashes
+event type, body and supplied timestamp. Two identical unkeyed messages without
+timestamps are indistinguishable. Reusing a source key for different admitted text under the same
+privacy policy rejects the batch. Send a new key for an edited revision.
+
+Structured `tool_result` events are excluded by default, even from hooks that label
+them as user messages. To retain them, enable `capture.include_tool_results` in
+the server configuration, add `tool` to `capture.include_roles`, and restart the
+server. The server applies its `privacy` settings before storage. The capture
+response reports filtered counts and UTF-8 content bytes under `skipped`.
+
+
 `memory_search` defaults to `corpus="atom"`, which searches only durable memory.
 Select `corpus="raw"` to search original events, or `corpus="all"` for the broader
 recall policy with raw fallback. The runtime also accepts `memory`, `wiki`, and

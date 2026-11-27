@@ -24,6 +24,16 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Durable MCP raw capture
+
+⚠️ Recall/write path change. Structured Codex tool results previously entered L0 with a user role,
+and replay outside the latest 5,000 caller/session raws could create new evidence. The MCP now
+applies the tool-result policy before storage and commits capture receipts with L0 on both SQL backends.
+Both reported cases failed against 1.0.7 on SQLite. All 14 focused cases passed on the working revision,
+including SQLite and dedicated PostgreSQL coverage of a service restart after 5,001 subsequent
+deliveries, source-key conflicts, and a race between separate backend handles. See the [test matrix](TEST_MATRIX.md).
+The changes are local pending review and release. Roll all writers for a space forward together.
+
 ### Codex memory setup prompt
 
 ⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.

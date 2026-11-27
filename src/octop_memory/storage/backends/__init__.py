@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
@@ -93,6 +93,19 @@ class _Unset:
 
 
 _UNSET = _Unset()
+
+
+@runtime_checkable
+class RawCaptureBackend(Protocol):
+    def claim_capture_keys(
+        self, entries: dict[str, str], policy: str | None = None
+    ) -> dict[str, tuple[str, str | None]]:
+        """Reserve new keys and return the stored raw ID and privacy policy for conflicts."""
+        ...
+
+    def capture_history_pages(self, user: str, session: str) -> Iterator[list[RawEvent]]:
+        """Stream old raws in stable order inside the receipt transaction."""
+        ...
 
 
 @runtime_checkable

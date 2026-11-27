@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import wraps
@@ -50,7 +50,7 @@ _FTS_VERSIONS = {"fts_text_version": FTS_TEXT_VERSION, "raw_fts_text_version": R
 # Stamped into {ns}_meta on every open. External tools (portable doctor,
 # portable list-sources) read it to distinguish a healthy octop-memory
 # store from a foreign/corrupt SQLite file. Bump when the DDL changes shape.
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 """Wait this long on a locked connection before raising ``database is locked``.
 
@@ -226,6 +226,11 @@ class SqliteMemoryBackend:
                 content TEXT NOT NULL,
                 payload TEXT NOT NULL DEFAULT '{{}}'
             );
+            CREATE TABLE IF NOT EXISTS {ns}_raw_capture_keys (
+                capture_key TEXT PRIMARY KEY,
+                raw_id TEXT NOT NULL,
+                policy TEXT
+            ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS {ns}_raw_events_time
                 ON {ns}_raw_events(timestamp);
             CREATE INDEX IF NOT EXISTS {ns}_raw_events_session
@@ -986,6 +991,41 @@ class SqliteMemoryBackend:
             rows,
         )
         self._commit()
+
+    @locked_sqlite_operation
+    def claim_capture_keys(
+        self, entries: dict[str, str], policy: str | None = None
+    ) -> dict[str, tuple[str, str | None]]:
+        if not entries:
+            return {}
+        table = f"{self._ns}_raw_capture_keys"
+        placeholders = ",".join("(?, ?, ?)" for _ in entries)
+        inserted = self._conn.execute(
+            f"INSERT INTO {table}(capture_key, raw_id, policy) VALUES {placeholders} "
+            "ON CONFLICT(capture_key) DO NOTHING RETURNING capture_key",
+            [value for key, raw_id in entries.items() for value in (key, raw_id, policy)],
+        ).fetchall()
+        conflicts = list(entries.keys() - {row[0] for row in inserted})
+        existing: dict[str, tuple[str, str | None]] = {}
+        if conflicts:
+            marks = ",".join("?" for _ in conflicts)
+            rows = self._conn.execute(
+                f"SELECT capture_key, raw_id, policy FROM {table} WHERE capture_key IN ({marks})", conflicts
+            )
+            existing = {row[0]: (row[1], row[2]) for row in rows}
+        self._commit()
+        return existing
+
+    def capture_history_pages(self, user: str, session: str) -> Iterator[list[RawEvent]]:
+        with self.transaction():
+            cur = self._conn.execute(
+                f"SELECT * FROM {self._ns}_raw_events WHERE user = ? AND session_id = ? ORDER BY id", (user, session)
+            )
+            try:
+                while rows := cur.fetchmany(200):
+                    yield [self._row_to_raw(row) for row in rows]
+            finally:
+                cur.close()
 
     @locked_sqlite_operation
     def get_raw(self, event_id: str) -> RawEvent | None:
