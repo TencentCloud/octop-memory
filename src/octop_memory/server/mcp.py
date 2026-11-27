@@ -497,7 +497,7 @@ def build_mcp(registry: SpaceRegistry) -> FastMCP:
         space = _current_space.get()
 
         def _run(memory: Any) -> dict[str, Any]:
-            rows = memory.list_candidates(status=status, limit=limit)
+            rows = memory.list_candidates(status=status, session_id=session_id, limit=limit)
             return {
                 "candidates": [
                     {

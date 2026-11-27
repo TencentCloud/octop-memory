@@ -762,6 +762,26 @@ def test_host_proposals_bind_to_filtered_caller_evidence_and_require_review(back
         assert _mcp_call(client, reader, "memory_search", query="plain text")["hits"] == []
 
 
+def test_memory_candidates_filters_by_session(control, tmp_path):
+    control.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
+    _, token = control.create_token("alpha", "client", ["read"])
+    app = build_app({"control": {"sqlite": {"db_path": str(control.path)}}})
+    with TestClient(app) as client:
+        for content, session_id in (("Fact from session A", "session-A"), ("Fact from session B", "session-B")):
+            client.app.state.registry.call(
+                "alpha",
+                lambda memory, content=content, session_id=session_id: memory.store(
+                    content, conversation_id=session_id
+                ),
+            )
+
+        result = _mcp_call(client, token, "memory_candidates", session_id="session-A")
+
+        assert result["count"] == 1
+        assert [candidate["session_id"] for candidate in result["candidates"]] == ["session-A"]
+        assert result["candidates"][0]["assertion"] == "Fact from session A"
+
+
 def test_tool_scope_is_enforced(tmp_path):
     store = ControlStore(tmp_path / "control.db")
     store.create_space("alpha", "Alpha", "sqlite", {"db_path": str(tmp_path / "a.db")})
