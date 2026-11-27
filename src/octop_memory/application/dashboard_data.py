@@ -757,12 +757,13 @@ def get_episode(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
 def stats_counts(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
     """Return scalar counts for the Overview dashboard.
 
-    ``backend.count_stats()`` only carries ``raw_events / atoms /
+    ``backend.count_stats()`` only carries ``raw_events / atoms / atoms_archived /
     entities / dirty_pages``; we top it up with episode count,
     pending-candidate count, 7-day deltas computed from
     ``created_at`` (atoms / entities / episodes), and
     ``last_extract_run`` (latest extract summary from meta, or
-    ``None`` if extract has never run). ``last_codex_review`` describes
+    ``None`` if extract has never run). Atom totals and 7-day deltas count
+    active atoms only; archived atoms are reported separately. ``last_codex_review`` describes
     the latest eligible Codex turn independently of server extraction.
     """
     _ = params
@@ -779,9 +780,7 @@ def stats_counts(memory: Memory, params: dict[str, Any]) -> dict[str, Any]:
 
     # 7-day deltas — list_atoms / list_entities don't accept date
     # filters yet, so we re-pull and count in Python.
-    base["atoms_delta_7d"] = sum(
-        1 for a in memory.list_atoms(include_deprecated=True, limit=10_000) if a.created_at >= cutoff
-    )
+    base["atoms_delta_7d"] = sum(1 for a in memory.list_atoms(limit=10_000) if a.created_at >= cutoff)
     base["entities_delta_7d"] = sum(1 for e in memory.list_entities(limit=10_000) if e.created_at >= cutoff)
     base["episodes_delta_7d"] = sum(1 for ep in episodes if ep.created_at >= cutoff)
     base["last_extract_run"] = memory.get_last_extract_run()

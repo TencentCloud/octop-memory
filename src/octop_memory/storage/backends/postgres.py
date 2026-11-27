@@ -2166,7 +2166,11 @@ class PostgresMemoryBackend:
         with self._cursor() as cur:
             for key, sql in (
                 ("raw_events", "SELECT COUNT(*) AS c FROM raw_events WHERE namespace = %s"),
-                ("atoms", "SELECT COUNT(*) AS c FROM atoms WHERE namespace = %s"),
+                ("atoms", "SELECT COUNT(*) AS c FROM atoms WHERE namespace = %s AND deprecated_at IS NULL"),
+                (
+                    "atoms_archived",
+                    "SELECT COUNT(*) AS c FROM atoms WHERE namespace = %s AND deprecated_at IS NOT NULL",
+                ),
                 ("entities", "SELECT COUNT(*) AS c FROM entities WHERE namespace = %s"),
                 (
                     "dirty_pages",

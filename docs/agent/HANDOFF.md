@@ -24,6 +24,29 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### Active and archived memory statistics
+
+- **Status:** Proposed fix based on develop `9c5a2aa`; not merged or released.
+- **Problem/reproduction:** One active and one deprecated atom produce `atoms=2`
+  and, when recently created, `atoms_delta_7d=2`. Clearing memory does not reduce
+  the dashboard total even though default atom reads exclude archived rows.
+- **Acceptance:** SQLite and PostgreSQL report active `atoms`, a separate
+  `atoms_archived`, and active-only 7-day deltas. Deprecating or superseding a row
+  changes the counts without deleting evidence, changing other response fields,
+  or leaking another namespace. Empty/all-archived stores report zero active atoms.
+- **Scope:** Both `storage/backends/` implementations and their protocol documentation,
+  `application/dashboard_data.py`, and `TestCountStatsParity` bridge/backend regressions.
+  This is a statistics read fix; recall/write behavior, schemas, and Octop UI are unchanged.
+- **Validation:** Regression tests failed on the original SQLite implementation.
+  Focused backend/dashboard checks pass all 16 cases on SQLite and dedicated
+  PostgreSQL 17 without skips. `make all` passes format, lint, strict mypy, and
+  1,758 tests (11 optional/platform skips); statistics/backend cases do not skip.
+- **Limits/next steps:** Dashboard deltas retain the existing 10,000-row scan limit.
+  Publish a reviewed memory release before consumers update their lockfiles;
+  Consumer applications can display the additional archive count after adoption.
+  Wiki synchronization is pending for `Development-Status` and
+  `Development-Status-zh`: contributor push access returned HTTP 403.
+
 ### Codex memory setup prompt
 
 ⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.

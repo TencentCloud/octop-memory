@@ -467,8 +467,10 @@ class MemoryBackend(Protocol):
     def count_stats(self) -> dict[str, int]:
         """Cheap row counts for status surfaces.
 
-        Returns ``{"raw_events", "atoms", "entities", "dirty_pages"}``
+        Returns ``{"raw_events", "atoms", "atoms_archived", "entities", "dirty_pages"}``
         computed via ``COUNT(*)`` — never by materializing rows.
+        ``atoms`` counts active rows (``deprecated_at IS NULL``);
+        ``atoms_archived`` counts soft-deleted and superseded rows.
         """
         ...
 
