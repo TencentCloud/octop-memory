@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- SQLite 和 PostgreSQL 的记忆统计不再把软停用或已被替代的 Atom 计入有效记忆及近 7 天新增，新增 `atoms_archived` 单独报告归档数量；历史记录仍可读取。
+
 ## [1.0.7] - 2026-11-26
 
 ### 新增

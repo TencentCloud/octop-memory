@@ -1989,6 +1989,15 @@ class TestProtocolConformance:
 
 
 class TestCountStatsParity:
+    def test_empty_counts(self, backend: Any) -> None:
+        assert backend.count_stats() == {
+            "raw_events": 0,
+            "atoms": 0,
+            "atoms_archived": 0,
+            "entities": 0,
+            "dirty_pages": 0,
+        }
+
     def test_counts_reflect_rows(self, backend: Any) -> None:
         assert backend.count_stats()["raw_events"] == 0
 
@@ -2000,8 +2009,95 @@ class TestCountStatsParity:
         stats = backend.count_stats()
         assert stats["raw_events"] == 1
         assert stats["atoms"] == 1
+        assert stats["atoms_archived"] == 0
         assert stats["entities"] == 1
         assert stats["dirty_pages"] == 1
+
+    @pytest.mark.parametrize("action", ["deprecate", "supersede"])
+    def test_dashboard_counts_follow_archive_actions(self, backend: Any, action: str) -> None:
+        from octop_memory.adapters.bridge.handlers import Bridge
+
+        memory = Memory(namespace="counts", backend=backend)
+        old = memory.store("Atlas uses SQLite", topic="Atlas")
+        new = memory.store("Atlas uses PostgreSQL", topic="Atlas")
+        bridge = Bridge(memory)
+
+        def counts() -> dict[str, Any]:
+            response = bridge.handle({"jsonrpc": "2.0", "id": 1, "method": "stats_counts", "params": {}})
+            assert "error" not in response
+            return response["result"]
+
+        before = counts()
+        assert before["atoms"] == before["atoms_delta_7d"] == 2
+        assert before["atoms_archived"] == 0
+        if action == "deprecate":
+            assert memory.deprecate_atom(old.atom_id)
+        else:
+            assert memory.supersede_atom(old.atom_id, new_atom_id=new.atom_id)
+        after = counts()
+        assert after["atoms"] == after["atoms_delta_7d"] == 1
+        assert after["atoms_archived"] == 1
+        assert [atom.id for atom in memory.list_atoms()] == [new.atom_id]
+        assert memory.get_atom(old.atom_id).deprecated_at is not None
+        assert after["raw_events"] == before["raw_events"] == 2
+        for key in ("entities", "episodes", "candidates_pending", "last_extract_run", "last_codex_review"):
+            assert after[key] == before[key]
+
+    def test_dashboard_delta_counts_only_recent_live_atoms(self, backend: Any) -> None:
+        from octop_memory.application.dashboard_data import stats_counts
+
+        now = _now()
+        for atom_id, age, archived in (
+            ("recent-live", 1, False),
+            ("old-live", 10, False),
+            ("recent-archived", 1, True),
+            ("old-archived", 10, True),
+        ):
+            backend.save_atom(
+                _make_atom(
+                    id=atom_id,
+                    created_at=now - timedelta(days=age),
+                    deprecated_at=now if archived else None,
+                )
+            )
+        memory = Memory(namespace="counts", backend=backend)
+        stats = stats_counts(memory, {})
+        assert stats["atoms"] == 2
+        assert stats["atoms_archived"] == 2
+        assert stats["atoms_delta_7d"] == 1
+
+        for atom in memory.list_atoms():
+            assert backend.deprecate_atom(atom.id, deprecated_at=now)
+        stats = stats_counts(memory, {})
+        assert stats["atoms"] == stats["atoms_delta_7d"] == 0
+        assert stats["atoms_archived"] == 4
+        assert len(memory.list_atoms(include_deprecated=True)) == 4
+
+    def test_counts_are_namespace_scoped(self, backend: Any) -> None:
+        namespace = f"{backend._ns}_other"
+        if isinstance(backend, SqliteMemoryBackend):
+            other = SqliteMemoryBackend(namespace=namespace, db_path=backend._db_path)
+        else:
+            from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+
+            other = PostgresMemoryBackend(namespace=namespace, dsn=PG_DSN)
+        try:
+            backend.save_atom(_make_atom(id="shared-id"))
+            other.save_atom(_make_atom(id="shared-id", deprecated_at=_now()))
+            other.save_atom(_make_atom(id="other-live"))
+            other.save_raw(_make_raw())
+            assert backend.count_stats() == {
+                "raw_events": 0,
+                "atoms": 1,
+                "atoms_archived": 0,
+                "entities": 0,
+                "dirty_pages": 0,
+            }
+            assert other.count_stats()["atoms"] == other.count_stats()["atoms_archived"] == 1
+        finally:
+            if not isinstance(other, SqliteMemoryBackend):
+                other.purge_namespace()
+            other.close()
 
 
 class TestTransactionParity:

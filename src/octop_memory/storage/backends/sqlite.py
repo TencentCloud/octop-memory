@@ -1973,7 +1973,8 @@ class SqliteMemoryBackend:
 
         return {
             "raw_events": _count(f"SELECT COUNT(*) FROM {ns}_raw_events"),
-            "atoms": _count(f"SELECT COUNT(*) FROM {ns}_atoms"),
+            "atoms": _count(f"SELECT COUNT(*) FROM {ns}_atoms WHERE deprecated_at IS NULL"),
+            "atoms_archived": _count(f"SELECT COUNT(*) FROM {ns}_atoms WHERE deprecated_at IS NOT NULL"),
             "entities": _count(f"SELECT COUNT(*) FROM {ns}_entities"),
             "dirty_pages": _count(f"SELECT COUNT(*) FROM {ns}_entity_pages WHERE dirty = 1"),
         }

@@ -177,6 +177,16 @@ binds tools/middleware, and manages resources. The classes are not interchangeab
 Octop management APIs can open memory or temporarily assemble Harness Runtime while the agent is stopped;
 validating only a live chatting agent misses that path.
 
+Memory statistics use the same active-atom boundary as `list_atoms()`:
+`backend.count_stats()` reports `atoms` where `deprecated_at IS NULL` and
+`atoms_archived` where it is set, including superseded atoms. Both SQL backends
+count in the selected namespace without loading atom rows. `stats_counts` forwards
+these fields and counts only active atoms in `atoms_delta_7d`; its existing
+10,000-row scan limit for dashboard deltas remains. Runtime/bridge status consumers
+also receive the additional archive count. This changes read-side statistics only;
+archive/supersede writes, stored evidence, recall selection, and schemas are unchanged.
+Octop owns displaying the archive field and adopting the released library version.
+
 ### Code ownership by responsibility
 
 Memory/Harness Python paths in this table are relative to `src/octop_memory/` and `src/octop_harness/`.
