@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- `run_gc()` 生命周期清理支持 PostgreSQL 后端：通过 `MemoryBackend` 统一提供被拒候选、已停用 Atom 与无引用原始事件的有界清理原语，SQLite 与 PostgreSQL 行为一致并严格按命名空间隔离。
+
+### 修复
+
+- `run_gc()` 的被拒候选与已停用 Atom 清理改为在数据库侧按时间条件过滤并升序限流，修复活跃或新记录数量超过 `max_rows_per_pass` 时旧记录无法被清理的问题。
+
 ## [1.0.7] - 2026-11-26
 
 ### 新增

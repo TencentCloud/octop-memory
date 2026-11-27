@@ -24,6 +24,15 @@ baselines for new work; consult their original PR/Git records.
 
 ## Continuing work
 
+### PostgreSQL lifecycle GC parity
+
+- **Status:** Validated on `feature/pg-lifecycle-gc`; pending PR review against `develop`. Unreleased.
+- **Problem and scenario:** `run_gc()` previously poked private SQLite attributes (`_conn`, `_ns`) and returned empty stats on PostgreSQL (D46-C / M6 gap). In addition, rejected-candidate and deprecated-atom passes fetched `ORDER BY created_at DESC LIMIT max_rows_per_pass` before filtering by decision/deprecation timestamps in Python, starving older expired rows whenever newer or active rows exceeded the per-pass cap.
+- **Scope and acceptance:** Add bounded retention methods (`delete_rejected_candidates`, `delete_deprecated_atoms`, `delete_orphan_raw_events`) to `MemoryBackend`, `SqliteMemoryBackend`, `PostgresMemoryBackend`, and `Memory`, matching `delete_journal`. Route `run_gc()` through those methods while preserving safe no-op behavior for partial/custom backends without them. Keep existing table schemas, `deprecate_atom()` tree behavior, and episode retention policy unchanged; evaluate those separately.
+- **Approach and key files:** `storage/backends/__init__.py`, `storage/backends/sqlite.py`, `storage/backends/postgres.py`, `core.py`, `pipeline/lifecycle/gc.py`. SQL filtering orders eligible rows ascending by timestamp with `LIMIT` to eliminate starvation and avoid hydrating full rows. `delete_orphan_raw_events` runs a `LIMIT 1` index probe on `raw_events` before scanning references, avoiding SQLite full-table reference scans and PostgreSQL CTE JIT compilation overhead (~284 ms down to ~0.04 ms on a 50k-atom/50k-raw empty-expiration benchmark with default `jit=on`). PostgreSQL reference exclusion and deletion are strictly scoped by `namespace`.
+- **Validation:** Verified against SQLite and dedicated PostgreSQL 16 via `TEST_POSTGRES_DSN=... make all RUN=".venv/bin/python -m"` (ruff, strict mypy, full pytest including `TestLifecycleGcParity` and `test_postgres_gc_isolates_namespaces`). Optional external-host suites (`octop_harness` middleware and `HERMES_SOURCE` E2E) skipped without those checkouts.
+- **Continuation:** Open PR against `develop` and raise separate follow-up issues if maintainers want to address pre-existing `deprecate_atom()` leaf-node cleanup or episode raw-reference retention policy.
+
 ### Codex memory setup prompt
 
 ⚠️ Recall/write path change. The external Codex hook can delegate review to a model authorized by Octop for its token. Verify both modes against the matching Octop build, including a read/write credential, same-turn evidence and pending candidate persistence.

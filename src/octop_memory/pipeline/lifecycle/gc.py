@@ -26,12 +26,11 @@ checkpoint prune does not journal; ADR-022). ``run_gc`` returns counts
 instead.
 
 Each pass is bounded by ``--max-rows`` so a never-run-before namespace
-doesn't lock SQLite for minutes when we finally launch the worker.
+doesn't lock the database for minutes when we finally launch the worker.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -66,6 +65,13 @@ PIPELINE_JOURNAL_ACTIONS: tuple[str, ...] = (
 DEFAULT_MAX_ROWS_PER_PASS = 500
 """Soft cap so a single GC tick can't lock the DB on a huge backlog.
 Caller can run multiple passes if needed."""
+
+_GC_BACKEND_METHODS: tuple[str, ...] = (
+    "delete_rejected_candidates",
+    "delete_deprecated_atoms",
+    "delete_orphan_raw_events",
+    "delete_journal",
+)
 
 
 @dataclass
@@ -114,7 +120,7 @@ def run_gc(
 
     1. Rejected candidates older than ``rejected_candidate_days``.
     2. Deprecated atoms older than ``deprecated_atom_days``.
-    3. Orphan raw events (no atom references them) older than
+    3. Orphan raw events (no atom or candidate references them) older than
        ``orphan_raw_days``. Skipped when ``include_orphan_raw`` is
        false (startup compact — that pass used to load every raw row).
     4. Pipeline journal rows older than ``journal_pipeline_days``.
@@ -123,23 +129,21 @@ def run_gc(
     Set ``dry_run=True`` to count without deleting; useful for the
     ``--dry-run`` CLI mode and for the eval harness.
 
-    Non-SQLite backends (Postgres today) are a no-op: lifecycle SQL is
-    still SQLite-only (D46-C / M6). Returning empty stats — instead of
-    raising — lets the agent maintenance timer keep ticking without a
-    traceback every hour.
+    Both SQLite and PostgreSQL backends implement the bounded retention
+    methods on :class:`~octop_memory.storage.backends.MemoryBackend`.
+    Custom or partial backends that do not expose those methods no-op
+    cleanly without touching underlying connections so periodic
+    maintenance ticks keep running.
     """
-    if _sqlite_backend(memory) is None:
-        backend = getattr(memory, "_backend", None)
-        # DEBUG, not INFO: the host maintenance timer calls this hourly for
-        # every agent, and the message is identical each time. The caller
-        # already logs the outcome (``memory.maintenance done gc_err=None``),
-        # so INFO here only costs ~96 lines/day on a four-agent Postgres host.
+    backend = getattr(memory, "_backend", None)
+    if not _supports_lifecycle_gc(backend):
         logger.debug(
-            "run_gc skipped: backend is not SQLite (got %s; PG GC deferred to M6)",
+            "run_gc skipped: backend %s does not implement lifecycle retention methods",
             type(backend).__name__,
         )
         now_ts = datetime.now(UTC)
         return GcStats(started_at=now_ts, finished_at=now_ts, dry_run=dry_run)
+
     stats = GcStats(started_at=datetime.now(UTC), dry_run=dry_run)
     cutoff_now = now or datetime.now(UTC)
 
@@ -185,6 +189,12 @@ def run_gc(
 # ---------------------------------------------------------------------------
 
 
+def _supports_lifecycle_gc(backend: Any) -> bool:
+    if backend is None:
+        return False
+    return all(callable(getattr(backend, name, None)) for name in _GC_BACKEND_METHODS)
+
+
 def _gc_rejected_candidates(
     memory: Memory,
     *,
@@ -193,15 +203,11 @@ def _gc_rejected_candidates(
     dry_run: bool,
 ) -> int:
     """Delete candidates with status='rejected' and decided_at < cutoff."""
-    deleted = 0
-    rejected = memory.list_candidates(status="rejected", limit=limit)
-    for cand in rejected:
-        if not cand.decided_at or cand.decided_at >= cutoff:
-            continue
-        if not dry_run:
-            _delete_candidate(memory, cand.id)
-        deleted += 1
-    return deleted
+    return memory.delete_rejected_candidates(
+        before=cutoff,
+        limit=limit,
+        dry_run=dry_run,
+    )
 
 
 def _gc_deprecated_atoms(
@@ -211,15 +217,12 @@ def _gc_deprecated_atoms(
     limit: int,
     dry_run: bool,
 ) -> int:
-    deleted = 0
-    atoms = memory.list_atoms(include_deprecated=True, limit=limit)
-    for atom in atoms:
-        if not atom.deprecated_at or atom.deprecated_at >= cutoff:
-            continue
-        if not dry_run:
-            _delete_atom(memory, atom.id)
-        deleted += 1
-    return deleted
+    """Delete atoms with deprecated_at < cutoff."""
+    return memory.delete_deprecated_atoms(
+        before=cutoff,
+        limit=limit,
+        dry_run=dry_run,
+    )
 
 
 def _gc_orphan_raw_events(
@@ -229,56 +232,12 @@ def _gc_orphan_raw_events(
     limit: int,
     dry_run: bool,
 ) -> int:
-    """Delete unreferenced raw rows older than ``cutoff``.
-
-    Id-only SQL — never hydrate ``content`` / ``payload``. The previous
-    ``list_raw(limit=10**9)`` path loaded every blob into Python and
-    OOM'd on multi-GB stores before VACUUM could run.
-    """
-    conn, ns = _sqlite_conn(memory)
-    referenced = _referenced_raw_ids(conn, ns)
-    cutoff_iso = cutoff.isoformat()
-    victims: list[str] = []
-    for row in conn.execute(
-        f"SELECT id, timestamp FROM {ns}_raw_events WHERE timestamp < ?",
-        (cutoff_iso,),
-    ):
-        raw_id = row["id"]
-        if raw_id in referenced:
-            continue
-        victims.append(raw_id)
-        if len(victims) >= limit:
-            break
-
-    if not dry_run:
-        for raw_id in victims:
-            _delete_raw_event(memory, raw_id)
-    return len(victims)
-
-
-def _referenced_raw_ids(conn: Any, ns: str) -> set[str]:
-    """Collect raw ids cited by atoms / candidates. Columns only, no blobs."""
-    referenced: set[str] = set()
-    for row in conn.execute(f"SELECT quote_event_id, raw_event_ids FROM {ns}_atoms"):
-        quote_id = row["quote_event_id"]
-        if quote_id:
-            referenced.add(quote_id)
-        referenced.update(_json_id_list(row["raw_event_ids"]))
-    for row in conn.execute(f"SELECT raw_event_ids FROM {ns}_candidates"):
-        referenced.update(_json_id_list(row["raw_event_ids"]))
-    return referenced
-
-
-def _json_id_list(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [item for item in parsed if isinstance(item, str) and item]
+    """Delete unreferenced raw rows older than ``cutoff`` without hydrating blobs."""
+    return memory.delete_orphan_raw_events(
+        before=cutoff,
+        limit=limit,
+        dry_run=dry_run,
+    )
 
 
 def _gc_pipeline_journal(
@@ -295,65 +254,6 @@ def _gc_pipeline_journal(
         limit=limit,
         dry_run=dry_run,
     )
-
-
-# ---------------------------------------------------------------------------
-# Backend pokes (SQLite-only for M5; D46-C postpones PG)
-# ---------------------------------------------------------------------------
-
-
-def _sqlite_backend(memory: Memory) -> Any | None:
-    from octop_memory.storage.backends.sqlite import SqliteMemoryBackend
-
-    backend = getattr(memory, "_backend", None)
-    if isinstance(backend, SqliteMemoryBackend):
-        return backend
-    return None
-
-
-def _sqlite_conn(memory: Memory) -> tuple[Any, str]:
-    """Return the SQLite connection and table prefix, or refuse before touching SQL.
-
-    Duck-typing on ``_conn`` / ``_ns`` is not enough: ``PostgresMemoryBackend``
-    exposes both, so it used to pass this guard and then run SQLite statements
-    (``{ns}_atoms``, ``?`` placeholders) against Postgres. That raised
-    ``UndefinedTable`` mid-transaction and left the shared psycopg connection
-    aborted, so every later memory write failed with ``InFailedSqlTransaction``.
-    Refuse on type instead, before any statement reaches the connection.
-    """
-    backend = _sqlite_backend(memory)
-    if backend is None:
-        raise RuntimeError(
-            "GC requires SQLite backend (D46-C; PG support deferred to M6); "
-            f"got {type(getattr(memory, '_backend', None)).__name__}"
-        )
-    conn = getattr(backend, "_conn", None)
-    ns = getattr(backend, "_ns", None)
-    if conn is None or ns is None:
-        raise RuntimeError("GC requires SQLite backend (D46-C; PG support deferred to M6)")
-    return conn, ns
-
-
-def _delete_candidate(memory: Memory, candidate_id: str) -> None:
-    """Remove a candidate row by id. SQLite-only; PG impl in M6."""
-    conn, ns = _sqlite_conn(memory)
-    conn.execute(f"DELETE FROM {ns}_candidates WHERE id = ?", (candidate_id,))
-    conn.commit()
-
-
-def _delete_atom(memory: Memory, atom_id: str) -> None:
-    conn, ns = _sqlite_conn(memory)
-    # Triggers on the atoms table keep the atoms_fts shadow in sync,
-    # so DELETE FROM atoms is enough — no manual FTS cleanup needed.
-    conn.execute(f"DELETE FROM {ns}_atoms WHERE id = ?", (atom_id,))
-    conn.commit()
-
-
-def _delete_raw_event(memory: Memory, raw_id: str) -> None:
-    conn, ns = _sqlite_conn(memory)
-    # Same: triggers keep the raw FTS in sync.
-    conn.execute(f"DELETE FROM {ns}_raw_events WHERE id = ?", (raw_id,))
-    conn.commit()
 
 
 __all__ = [

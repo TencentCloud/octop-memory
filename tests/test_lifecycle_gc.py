@@ -442,15 +442,14 @@ class TestJournalRetention:
 
 
 class TestBackendGuard:
-    """GC is SQLite-only; non-SQLite backends must no-op before any SQL.
+    """Backends without lifecycle retention methods must no-op before any SQL.
 
-    Duck-typing on ``_conn`` / ``_ns`` used to let the Postgres backend through,
-    which then ran ``{ns}_atoms`` SQL against Postgres. The resulting
-    ``UndefinedTable`` aborted the shared transaction and every later memory
-    write failed with ``InFailedSqlTransaction``.
+    Duck-typing on ``_conn`` / ``_ns`` used to let non-SQLite backends through
+    into SQLite-specific SQL. Custom or partial backends that do not implement
+    the retention protocol methods must remain a safe no-op.
     """
 
-    def test_non_sqlite_backend_is_noop_without_touching_connection(self, memory: Memory) -> None:
+    def test_partial_backend_is_noop_without_touching_connection(self, memory: Memory) -> None:
         class FakePostgresBackend:
             """Exposes ``_conn`` / ``_ns`` like the real Postgres backend.
 
